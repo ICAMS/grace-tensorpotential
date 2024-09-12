@@ -1,0 +1,211 @@
+- __cls__: tensorpotential.instructions.compute.BondLength
+  name: BondLength
+- __cls__: tensorpotential.instructions.compute.ScaledBondVector
+  bond_length:
+    _instruction_: true
+    name: BondLength
+  name: ScaledBondVector
+- __cls__: tensorpotential.instructions.compute.RadialBasis
+  basis_type: SBessel
+  bonds:
+    _instruction_: true
+    name: BondLength
+  name: RadialBasis
+  nfunc: 2
+  normalized: true
+  p: 5
+  rcut: 6
+- __cls__: tensorpotential.instructions.compute.MLPRadialFunction
+  basis:
+    _instruction_: true
+    name: RadialBasis
+  hidden_layers: null
+  input_shape: null
+  lmax: 2
+  n_rad_max: 2
+  name: R
+- __cls__: tensorpotential.instructions.compute.SphericalHarmonic
+  lmax: 2
+  name: Y
+  vhat:
+    _instruction_: true
+    name: ScaledBondVector
+- __cls__: tensorpotential.instructions.compute.ScalarChemicalEmbedding
+  element_map:
+    Mo: 0
+    Nb: 1
+    Ta: 2
+    W: 3
+  embedding_size: 2
+  is_trainable: true
+  name: Z
+- __cls__: tensorpotential.instructions.compute.SingleParticleBasisFunctionScalarInd
+  angular:
+    _instruction_: true
+    name: Y
+  indicator:
+    _instruction_: true
+    name: Z
+  name: A
+  radial:
+    _instruction_: true
+    name: R
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  - - 1
+    - -1
+  instructions:
+  - _instruction_: true
+    name: A
+  is_central_atom_type_dependent: true
+  ls_max:
+  - 1
+  n_in: 2
+  n_out: 2
+  name: I
+  number_of_atom_types: 4
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  instructions:
+  - _instruction_: true
+    name: A
+  is_central_atom_type_dependent: true
+  ls_max:
+  - 0
+  n_in: 2
+  n_out: 1
+  name: E
+  number_of_atom_types: 4
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  instructions:
+  - _instruction_: true
+    name: A
+  is_central_atom_type_dependent: true
+  ls_max:
+  - 0
+  n_in: 2
+  n_out: 1
+  name: rho
+  number_of_atom_types: 4
+- Lmax: 2
+  __cls__: tensorpotential.instructions.compute.SingleParticleBasisFunctionEquivariantInd
+  angular:
+    _instruction_: true
+    name: Y
+  history_drop_list: null
+  indicator:
+    _instruction_: true
+    name: I
+  keep_parity:
+  - - 0
+    - 1
+  - - 1
+    - -1
+  - - 2
+    - 1
+  - - 3
+    - -1
+  - - 4
+    - 1
+  - - 5
+    - -1
+  - - 6
+    - 1
+  lmax: 2
+  max_sum_l: null
+  name: YI
+  radial:
+    _instruction_: true
+    name: R
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  - - 1
+    - -1
+  - - 2
+    - 1
+  - - 3
+    - -1
+  - - 4
+    - 1
+  - - 5
+    - -1
+  - - 6
+    - 1
+  instructions:
+  - _instruction_: true
+    name: YI
+  is_central_atom_type_dependent: false
+  ls_max:
+  - 2
+  n_in: 2
+  n_out: 2
+  name: B
+  number_of_atom_types: null
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  instructions:
+  - _instruction_: true
+    name: B
+  is_central_atom_type_dependent: true
+  ls_max:
+  - 0
+  n_in: 2
+  n_out: 1
+  name: E2
+  number_of_atom_types: 4
+- __cls__: tensorpotential.instructions.compute.FunctionReduce
+  allowed_l_p:
+  - - 0
+    - 1
+  instructions:
+  - _instruction_: true
+    name: B
+  is_central_atom_type_dependent: true
+  ls_max:
+  - 0
+  n_in: 2
+  n_out: 1
+  name: rho2
+  number_of_atom_types: 4
+- __cls__: tensorpotential.instructions.output.CreateOutputTarget
+  initial_value: 0.0
+  name: atomic_energy
+- __cls__: tensorpotential.instructions.output.LinearOut2Target
+  name: LinearOut2ScalarTarget
+  origin:
+  - _instruction_: true
+    name: E
+  - _instruction_: true
+    name: E2
+  target:
+    _instruction_: true
+    name: atomic_energy
+- __cls__: tensorpotential.instructions.output.MLPOut2ScalarTarget
+  hidden_layers: null
+  name: MLPOut2ScalarTarget
+  origin:
+  - _instruction_: true
+    name: rho
+  - _instruction_: true
+    name: rho2
+  target:
+    _instruction_: true
+    name: atomic_energy
+- __cls__: tensorpotential.instructions.output.ConstantScaleShiftTarget
+  name: ConstantScaleShiftScalarTarget
+  scale: 0.4420795186228098
+  shift: 0
+  target:
+    _instruction_: true
+    name: atomic_energy

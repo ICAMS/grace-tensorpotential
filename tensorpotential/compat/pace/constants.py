@@ -1,0 +1,8 @@
+LOSS_TYPE = 'loss_type'
+AUX_LOSS_FACTOR = 'aux_loss_factor'
+L2_REG = 'l2_reg'
+L1_REG = 'l1_reg'
+LOSS_ENERGY_FACTOR = 'loss_energy_factor'
+LOSS_FORCE_FACTOR = 'loss_force_factor'
+GPU_INDEX = 'gpu_ind'
+GPU_MEMORY_LIMIT = 'mem_limit'

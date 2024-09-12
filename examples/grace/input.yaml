@@ -1,0 +1,42 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "/path/to/train.pckl.gzip"
+#  train_size: 100
+  test_filename: "/path/to/test.pckl.gzip"
+#  test_size: 0.05 # 50
+
+potential:
+  #  elements: ["C", "H", "O"]
+  preset: "FS" # LINEAR, FS,  MLP, GRACE, GRACE_C, GRACE_MD17
+
+fit:
+  #  strategy: mirrored # or -m flag
+  loss: {
+    energy: { type: huber, weight: 1, delta: 0.01 }, # or type: square
+    forces: { type: huber, weight: 500., delta: 0.01 }, # or type: square and no delta
+
+    switch: { after_iter: 1, energy: { weight: 10.0 }, forces: { weight: 100.0 } }
+
+  }
+  #energy_loss_weight: 1
+  #forces_loss_weight: 100.0
+
+  maxiter: 1500
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 0.01, "amsgrad": True }
+
+  #  optimizer: L-BFGS-B
+
+  batch_size: 10
+
+  train_max_n_buckets: 5
+  test_max_n_buckets: 1
+
+  checkpoint_freq: 100
+#  progressbar: True
+#  train_shuffle: True
+#  train_cycle: True
+#  jit_compile: True

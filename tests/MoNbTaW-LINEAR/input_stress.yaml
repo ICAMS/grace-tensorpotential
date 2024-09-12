@@ -1,0 +1,42 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "../data/MoNbTaW_train50.pkl.gz"
+  train_size: 20
+  test_filename: "../data/MoNbTaW_test50.pkl.gz"
+  test_size: 20
+
+potential:
+  preset: "LINEAR"
+
+fit:
+  loss: {
+    energy: { type: square, weight: 1}, # normalize_by_samples: False},
+    forces: { type: square, weight: 500}, # normalize_by_samples: False},
+    stress: {type: square, weight: 10}, #normalize_by_samples: False},
+  }
+#  normalize_weights: True  # norm per-sample weights to sum-up to one
+#  normalize_force_per_structure: True # force-weights is divided by number of atoms
+
+
+  weighting: { type: energy_based, DE: 0.01, DF: 0.01}
+  compute_convex_hull: True # for low-group computation
+
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 0.01, "amsgrad": True }
+  learning_rate_reduction: { patience: 5, factor: 0.8, min: 1.0e-3, stop_at_min: True, resume_lr: True }
+  maxiter: 2
+
+  batch_size: 5
+  test_batch_size: 5
+  train_max_n_buckets: 2
+  test_max_n_buckets: 2
+
+
+  checkpoint_freq: 20
+  progressbar: False
+  train_shuffle: True
+  #train_cycle: True
+  jit_compile: False

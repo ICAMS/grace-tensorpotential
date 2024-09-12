@@ -1,0 +1,44 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "../data/MoNbTaW_train50.pkl.gz"
+  train_size: 20
+  test_filename: "../data/MoNbTaW_test50.pkl.gz"
+  test_size: 20
+
+potential:
+  #  elements: ["C", "H", "O"]
+  preset: "LINEAR"
+#  scale: False
+
+fit:
+
+  loss: {
+    energy: { type: square, weight: 1, }, # or type: square
+    forces: { type: square, weight: 500., }, # or type: square and no delta
+  }
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 0.1, "amsgrad": True }
+  learning_rate_reduction: { patience: 5,
+                             factor: 0.8,
+                             min: 1.0e-3,
+                             stop_at_min: True,
+                             resume_lr: True,
+                             loss_explosion_threshold: 1.5
+  }
+
+  maxiter: 5
+
+  batch_size: 10
+  test_batch_size: 20
+  train_max_n_buckets: 2
+  test_max_n_buckets: 2
+
+
+  checkpoint_freq: 20
+  progressbar: False
+  train_shuffle: True
+  #train_cycle: True
+  jit_compile: False

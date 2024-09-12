@@ -1,0 +1,52 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "../data/MoNbTaW_train50.pkl.gz"
+  train_size: 20
+  test_filename: "../data/MoNbTaW_test50.pkl.gz"
+  test_size: 20
+
+potential:
+  #  elements: ["C", "H", "O"]
+  preset: "LINEAR"
+#  scale: False
+
+fit:
+  #  strategy: mirrored
+  loss: {
+    energy: { type: huber, weight: 1, delta: 0.01}, # normalize_by_samples: False},
+    forces: { type: huber, weight: 500., delta: 0.01}, # normalize_by_samples: False},
+
+    switch: { after_iter: 1, energy: { weight: 10.0 }, forces: { weight: 100.0 } }
+
+  }
+
+#  normalize_weights: True  # norm per-sample weights to sum-up to one
+#  normalize_force_per_structure: True # force-weights is divided by number of atoms
+
+  #  energy_loss_weight: 1
+  #  forces_loss_weight: 500.0
+
+  #  loss_weights_switch: 1
+  #  energy_loss_weight_2: 10.0
+  #  forces_loss_weight_2: 100.0
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 0.01, "amsgrad": True }
+  learning_rate_reduction: { patience: 5, factor: 0.8, min: 1.0e-3, stop_at_min: True, resume_lr: True }
+  #  optimizer: L-BFGS-B
+  maxiter: 2
+
+  batch_size: 10
+  test_batch_size: 20
+  train_max_n_buckets: 2
+  test_max_n_buckets: 2
+
+
+  checkpoint_freq: 20
+  progressbar: False
+  train_shuffle: True
+  #train_cycle: True
+  jit_compile: False
+  eager: True

@@ -1,0 +1,40 @@
+#!/usr/bin/env python
+import os
+import sys
+import argparse
+
+from tensorpotential.calculator.foundations_models import download_fm, MODELS_NAME_LIST
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="grace_download", description="Download foundational models"
+    )
+
+    parser.add_argument(
+        "model",
+        help=f"Model name ({', '.join(MODELS_NAME_LIST)}). Default is None - all models are downloaded",
+        type=str,
+        nargs="?",
+        default=None,
+    )
+
+    return parser
+
+
+def main(args):
+    parser = build_parser()
+    args_parse = parser.parse_args(args)
+    model = args_parse.model
+    if model is None:
+        model_list = MODELS_NAME_LIST
+    else:
+        model_list = [model]
+
+    for model in model_list:
+        model_path = download_fm(model)
+        print(f"{model} -> {model_path}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
