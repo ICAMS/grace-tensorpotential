@@ -6,6 +6,7 @@ data:
 #  train_size: 100
   test_filename: "/path/to/test.pckl.gzip"
 #  test_size: 0.05 # 50
+  reference_energy: 0.0
 
 potential:
   #  elements: ["C", "H", "O"]
