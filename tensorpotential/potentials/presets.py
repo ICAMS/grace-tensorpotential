@@ -456,7 +456,7 @@ def GRACE_2LAYER_MP(
     mlp_radial=True,
     func_init="random",
     chem_init="random",
-    downscale_embedding_size=16,
+    atomic_shift_map: dict = None
     **kwargs
 ):
     num_elements = len(element_map)
@@ -678,7 +678,6 @@ def GRACE_2LAYER_MP(
             allowed_l_p=Parity.SCALAR,
         )
 
-        mu_e0 = None  # {0: -70045.28385080204, 1: -1030.5671648271828, 2: -12522.649269035726, 3: -2715.318528602957, 4: -13.571964772646918, 5: -8102.524593409054, 6: -1486.3750255780376, 7: -2043.933693071156, 8: -9287.407133426237, 9: -10834.4844708122}
         out_instr = CreateOutputTarget(name=constants.PREDICT_ATOMIC_ENERGY)
         out_instr2 = LinMLPOut2ScalarTarget(
             origin=[I_nl, I_l0], target=out_instr, hidden_layers=[64]
@@ -687,7 +686,7 @@ def GRACE_2LAYER_MP(
             target=out_instr,
             scale=constant_out_scale,
             shift=constant_out_shift,
-            atomic_shift_map=mu_e0,
+            atomic_shift_map=atomic_shift_map,
         )
 
     return instructor.instruction_list
