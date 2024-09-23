@@ -456,7 +456,7 @@ def GRACE_2LAYER_MP(
     mlp_radial=True,
     func_init="random",
     chem_init="random",
-    atomic_shift_map: dict = None
+    atomic_shift_map: dict = None,
     **kwargs
 ):
     num_elements = len(element_map)
