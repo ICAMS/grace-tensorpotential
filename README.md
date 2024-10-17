@@ -1,4 +1,4 @@
-# GRACE - GRaph Atomic Clister Expansion
+# GRACE - GRaph Atomic Cluster Expansion
 
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
 
