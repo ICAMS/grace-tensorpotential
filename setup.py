@@ -18,7 +18,7 @@ setup(
         "sympy",
         "pandas<3.0.0",
         "ase",
-        "pyyaml",
+        "pyyaml>=6.0.2",
         "tqdm",
     ],
     scripts=[

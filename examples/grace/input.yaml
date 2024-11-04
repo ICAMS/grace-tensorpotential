@@ -6,37 +6,35 @@ data:
 #  train_size: 100
   test_filename: "/path/to/test.pckl.gzip"
 #  test_size: 0.05 # 50
+  reference_energy: 0.0
 
 potential:
   #  elements: ["C", "H", "O"]
-  preset: "FS" # LINEAR, FS,  MLP, GRACE, GRACE_C, GRACE_MD17
+  preset: "FS" # FS, GRACE_1LAYER, GRACE_2LAYER
 
 fit:
   #  strategy: mirrored # or -m flag
   loss: {
-    energy: { type: huber, weight: 1, delta: 0.01 }, # or type: square
-    forces: { type: huber, weight: 500., delta: 0.01 }, # or type: square and no delta
+    energy: { type: huber, weight: 1, delta: 0.1 }, # or type: square
+    forces: { type: huber, weight: 5., delta: 0.1 }, # or type: square and no delta
 
-    switch: { after_iter: 1, energy: { weight: 10.0 }, forces: { weight: 100.0 } }
+    switch: { after_iter: 100, energy: { weight: 5.0 }, forces: { weight: 2.0 } }
 
   }
-  #energy_loss_weight: 1
-  #forces_loss_weight: 100.0
 
-  maxiter: 1500
+  maxiter: 150
 
   optimizer: Adam
-  opt_params: { "learning_rate": 0.01, "amsgrad": True }
+  opt_params: { learning_rate: 0.01, amsgrad: True, use_ema: True, ema_momentum: 0.99,  weight_decay: null, clipvalue: 1.0 }
 
   #  optimizer: L-BFGS-B
 
-  batch_size: 10
+  batch_size: 20
 
-  train_max_n_buckets: 5
-  test_max_n_buckets: 1
+  train_max_n_buckets: 10
+  test_max_n_buckets: 3
 
-  checkpoint_freq: 100
-#  progressbar: True
-#  train_shuffle: True
-#  train_cycle: True
-#  jit_compile: True
+  checkpoint_freq: 5
+  progressbar: True
+  train_shuffle: True
+  jit_compile: True
