@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="tensorpotential",
-    version="0.4.0",
+    version="0.4.1",
     packages=find_packages(include=["tensorpotential", "tensorpotential.*"]),
     url="https://github.com/ICAMS/grace-tensorpotential",
     license="Academic Software License (ASL)",
