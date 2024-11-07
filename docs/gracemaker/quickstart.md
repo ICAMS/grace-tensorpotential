@@ -1,86 +1,114 @@
-## Stages of model parameterization
+## Stages of Model Parameterization
 
-1. [Data collection](#data-collection)
-2. [Input file setup](#input-file-setup)
+1. [Data Collection](#data-collection)
+2. [Input File Setup](#input-file-setup)
 3. [Parameterization with `gracemaker`](#grace-model-parameterization)
 4. [Export model](#export-model)
-5. Build active set (for GRACE/FS only)  
-6. Use in [ASE](#usage-in-ase) and/or [LAMMPS](#usage-in-lammps)
-
-### Data collection
+5. [Build active set (for GRACE/FS only)](#build-active-set-for-gracefs-only)  
+6. Usage in [ASE](#usage-in-ase) and [LAMMPS](#usage-in-lammps)
+_____
+### Data Collection
 
 You can either use [`grace_collect`](../utilities#grace_collect) 
 ```bash
 grace_collect
 ```
 
-or build a `pandas.DataFrame` by you own. It must contain following columns:
+or build a `pandas.DataFrame` on you own. It must contain the following columns:
+ 
+* `ase_atoms` - Atomic structures represented as ASE Atoms
+* `energy` - Total energy (should be force-consistent), shape: single number 
+* `energy_corrected` (optional) - Cohesive energy, i.e., total energy after subtraction of free atoms' energies, shape: single number
+* `forces` - Per-atom forces, shape: (number_of_atoms, 3) 
 
-* `ase_atoms` - with atomic structures, represented as ASE Atoms
-* `energy` - total energy (should be force-consistent), shape: single number 
-* `energy_corrected` - cohesive energy, i.e. total energy, after subtraction of free atoms energies, shape: single number
-* `forces` - per-atom forces as NumPy array, shape: (number_of_atoms, 3) 
+Note, that the `energy_corrected` column is not mandatory and can be constructed automatically by _gracemaker_, 
+if you provide `reference_energy`
 
-Note, that `energy_corrected` column is not mandatory, and can be constructed automatically by _gracemaker_, if you provide `reference_energy`
+_____
 
-### Input file setup
+### Input File Setup
 
-You can use `gracemaker -t` for interactive interface to configure simple input file (not yet implemented)
-and adjust it further manually (see [Input file](../inputfile) for more information)
+You can use `gracemaker -t` for an interactive interface to configure simple input file (not yet implemented)
+and then adjust it manually as needed. For more information, see [Input file](../inputfile).
 
-### GRACE model parameterization
+_____
 
-To start gracemaker, simply run
-```python
+### GRACE Model Parameterization
+
+To start `gracemaker`, simply run
+```bash
 gracemaker
 ```
 
-Please, note, that the first line of input file is `seed: 42`, which specifies the random initialization of the model
-parameters. After `gracemaker` started, it creates a working subfolder, i.e.  _seed/42/_ with related output files:
+Please note that the first line of input file should be `seed: 1`, which sets the random see for initializing the model
+parameters. When `gracemaker` starts, it creates a working subfolder, (e.g., _seed/1/_)  containing the following output files:
 
-* _log.txt_ with redirected log
-* _train_metrics.yaml_ and _test_metrics.yaml_ with multiple metrics in YAML format
-* _checkpoints/_ with best test loss (suffix `.best_test_loss`) and last checkpoints (no extra suffix)
+* **log.txt** — Redirected log output.
+* **train_metrics.yaml** and **test_metrics.yaml** — Various training and testing metrics in YAML format.
+* **checkpoints/** — Model checkpoints, including the best test loss checkpoint (suffix .best_test_loss) and the latest checkpoint (no suffix).
 
-In addition to that, in a current working directory,  a file `model.yaml` will be created, that contains model's architecture.
+Additionally, a file named _model.yaml_ will be created in the current working directory. This file contains the architecture of the model.
 
+_____
 
-### Export model
+Here's a refined version with improved grammar and style:
 
-After normal termination of `gracemaker`, exported model in _saved_model_ format (used by TensorFlow)
-will be saved into `seed/1/final_model`.
+---
 
-In order to export GRACE model from the checkpoint at anytime, do:
+### Export Model
 
-* `gracemaker -r -s`  to export model with _best test loss_
-* `gracemaker -rl -s`  to export model from _latest saved checkpoint_
+After `gracemaker` completes successfully, the exported model in [saved_model](https://www.tensorflow.org/guide/saved_model) 
+format (used by TensorFlow) will be saved in the `seed/1/final_model` directory.
 
-In all cases you will get model saved into folder `seed/1/saved_model`, that can be used in [ASE](#grace-tensorflow) 
-or [LAMMPS](#lammps-grace-tensorflow)
+To export the GRACE model from a checkpoint at any time, use:
 
-In order to export GRACE/FS model in _YAML_ format (used by custom C++ implementation), add `-sf` flag to previous commands.
-In that case you will get additionally `seed/1/FS_model.yaml` file. This model can be used in [ASE](#gracefs) or 
-[LAMMPS](#lammps-gracefs)
+* `gracemaker -r -s` to export the model with the _best test loss_.
+* `gracemaker -rl -s` to export the model from the _latest saved checkpoint_.
+
+In all cases, the model will be saved in the `seed/1/saved_model` folder and can be used with [ASE](#grace-tensorflow) or [LAMMPS](#lammps-grace-tensorflow).
+
+To export the GRACE/FS model in _YAML_ format (for use with a custom C++ implementation), add the `-sf` flag to the above commands.
+This will generate the `seed/1/FS_model.yaml` file, which can be used in [ASE](#gracefs) or [LAMMPS](#lammps-gracefs).
+
+_____
+
+### Build Active Set (for GRACE/FS Only)
+
+For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
+Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
+
+To create the active set, use the `pace_activeset` utility, following a process similar 
+to [ML-PACE](https://pacemaker.readthedocs.io/en/latest/pacemaker/active_learning/#extrapolation_grade_and_active_learning).
+
+Example:
+
+```bash
+cd seed/1
+pace_activeset -d training_set.pkl.gz FS_model.yaml
+```
+
+_____
 
 ### Usage in ASE
 
-You can use exported GRACE model via ASE compatible calculator `TPCalculator` or  `PyGRACEFSCalculator`
+You can use the exported GRACE model with ASE-compatible calculators, such as `TPCalculator` or `PyGRACEFSCalculator`.
 
 #### GRACE (TensorFlow)
-Usage as ASE calculator
+To use it as an ASE calculator:
+
 ```python
 from tensorpotential.calculator import TPCalculator
 calc = TPCalculator("/path/to/saved_model")
 ```
 
-loading foundational models:
+To load foundational models:
 ```python
 from tensorpotential.calculator import grace_fm
 
 calc=grace_fm('name_of_the_model') 
 ```
 
-for both functions (_TPCalculator_ and _grace_fm_), you can change options for padding and minimal distance:
+For both functions (TPCalculator and grace_fm), you can adjust options for padding and minimal distance:
 ```python
 calc=TPCalculator(model_path,
         pad_neighbors_fraction = 0.05,
@@ -88,41 +116,48 @@ calc=TPCalculator(model_path,
         min_dist=0.5
 )
 ```
-If `min_dist` if given, calc will raise an exception when encounter distance shorter than `min_dist`
-(usefull when you do  relaxation, in order to prevent non-physical short distances)
+If `min_dist` is given, calculator will raise an exception when it encounters a distance shorter than `min_dist`
+(useful for preventing non-physical short distances during relaxation).
+
+---
 
 #### GRACE/FS
 
-**NOTE!** You need `python-ace` package installed (see [here](../install/#gracefs-cpu))
+**Note:** The `python-ace` package is required (see the [installation guide](../install/#gracefs-cpu)).
 
-In order to use **GRACE/FS** calculator (with C++ implementations), you can use
+To use the **GRACE/FS** calculator (with C++ implementations), use the following code:
+
 ```python
 from pyace.asecalc import PyGRACEFSCalculator
 calc = PyGRACEFSCalculator("/path/to/FS_model.yaml")
+calc.set_active_set("/path/to/FS_model.asi")
 ```
+___
 
 ### Usage in LAMMPS
+For big production runs, it is better to use LAMMPS. 
 
 #### LAMMPS: GRACE (TensorFlow)
-Usage with LAMMPS:
-Just use following pair_style 
+Use following pair_style 
 ```
 pair_style	grace
-pair_coeff	* * MODEL_PATH Al Li
+pair_coeff	* * /path/to/saved_model Al Li
 ```
-where MODEL_PATH is a path to saved model.
 If you downloaded foundation models (run `grace_download`), path will be like
 * `/path/to/home/.cache/grace/train_1.5M_test_75_grace_1layer_v2_7Aug2024/` for `mp-1layer`
 * `/path/to/home/.cache/grace/train_1.5M_test_75_grace_2layer_8Aug2024/` for `mp-2layer`
 
-TECHNICAL NOTE: GRACE model are JIT (just-in-time) compiled, i.e. first run will be slow.  We do use padding (default - ON) to prevent too-frequent recompilation if structure size or number of neighbour are changed. However, you can notice recompilations from time to time, this is ok. 
+**Technical Note:** GRACE models are JIT (just-in-time) compiled, meaning the first run will be slower. 
+GRACE uses padding (enabled by default) to reduce the frequency of recompilations if the structure size or number of 
+neighbors changes. However, occasional recompilations may still occur; this is expected behavior.
 
-You can change fraction of neighbours padded as 
+You can adjust the fraction of neighbors padded with:
 ```
 pair_style grace padding 0.05
 ```
-If `padding ...` is not provided, then default value is 0.01 i.e. 1%
-add option `pad_verbose`
+If `padding ...` is not specified, the default value is 0.01 (i.e., 1%).
+
+To receive messages when new padding and recompilations occur, add the `pad_verbose` option:
 ```
 pair_style grace ... pad_verbose
 ```
@@ -130,15 +165,18 @@ to get messages when new padding and recompilation are happening
 
 
 
-** WARNING!!!! Only single lammps process (that will use max 1 GPU) will work now **
-Usage without GPU is possible, but TF utilizes CPU less efficient
+**Warning**: Currently, only a single LAMMPS process (utilizing a maximum of one GPU) is supported.
+While GPU usage is optional, TensorFlow is less efficient when running solely on the CPU.
 
 #### LAMMPS: GRACE/FS
 
-Only `GRACE/FS`  family of models has now native C++ implementaion (still not-optimal, product evaluator, NO KOKKOS support yet). 
-In order to use these models, use following pairstyle:
-
-with extrapolation grade:
+Only the GRACE/FS family of models currently has a native C++ implementation (product evaluator, and no KOKKOS support yet).
+To use these models, use the following pair_style:
+```
+pair_style grace/fs 
+pair_coeff      * * FS_model.yaml  Mo Nb Ta W 
+```
+or with extrapolation grade:
 ```
 pair_style grace/fs extrapolation
 pair_coeff      * * FS_model.yaml FS_model.asi Mo Nb Ta W 
@@ -146,23 +184,16 @@ pair_coeff      * * FS_model.yaml FS_model.asi Mo Nb Ta W
 fix grace_gamma all pair 100 grace/fs gamma 1
 compute max_grace_gamma all reduce max f_grace_gamma
 ```
+The advantage of these models is that they are lightweight and do not rely on TensorFlow, meaning no GPU is required.
+However, you can still parallelize them with MPI as usual.
 
+##### Multi-GPU parallelization 
+Currently, only **1-LAYER** models can be parallelized using MPI with domain decomposition.
+No need to modify LAMMPS input file, but here is an example of shell run command:  
 
-without extrapolation grade:
-```
-pair_style grace/fs 
-pair_coeff      * * FS_model.yaml  Mo Nb Ta W 
-```
-This type of model does not rely on TF and thus no GPU will be used. But you can parallelize  with MPI as usual
-
-
-For MPI-parallel run on GPU for **1-LAYER** models:
 ```
  TF_CPP_MIN_LOG_LEVEL=1 mpirun -np 4 --bind-to none  bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
 ```
-
-
-[//]: # (## &#40;TODO&#41; Model presets and configuration)
 
 
 

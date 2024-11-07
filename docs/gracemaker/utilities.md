@@ -1,24 +1,3 @@
-## `grace_download`
-Utility to download (all) foundation models
-
-```
-usage: grace_download [-h] [model]
-
-Download foundational models
-
-positional arguments:
-  model       Model name (mp-1layer, mp-1layer-shift, mp-2layer). Default is None - all models are downloaded
-
-options:
-  -h, --help  show this help message and exit
-
-```
-
-Example:
-```bash
-grace_download
-```
-
 ## `grace_collect`
 
 Utility to collect VASP calculations from a top-level directory and store them
@@ -40,3 +19,27 @@ options:
   --selection SELECTION
                         Option to select from multiple configurations of single VASP calculation: first, last, all, first_and_last (default: last)
 ```
+
+___
+
+## `grace_download`
+Utility to download (all) foundation models
+
+```
+usage: grace_download [-h] [model]
+
+Download foundational models
+
+positional arguments:
+  model       Model name (mp-1layer, mp-1layer-shift, mp-2layer). Default is None - all models are downloaded
+
+options:
+  -h, --help  show this help message and exit
+
+```
+
+Example:
+```bash
+grace_download
+```
+___

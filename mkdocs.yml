@@ -12,11 +12,12 @@ theme:
     - navigation.top  # Keep the top navigation bar fixed
   palette:
     - scheme: default
-      primary: "green"
-      accent: "deep orange"
+      primary: "teal"
+      accent: "indigo"
     - scheme: slate
       primary: "indigo"
       accent: "pink"
+
 
 plugins:
   - search
@@ -31,6 +32,7 @@ nav:
   - CLI: gracemaker/cli.md
   - Utilities: gracemaker/utilities.md
   - FAQs: gracemaker/faq.md
+  - Tutorials: gracemaker/tutorials.md
 
 
 markdown_extensions:
