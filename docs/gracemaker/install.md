@@ -1,6 +1,4 @@
-# Installation
-
-## GRACE-TENSORPOTENTIAL
+## GRACE
 
 Main package, that contains gracemaker and other utilities
 
@@ -34,21 +32,21 @@ grace_download
 
 
 
-## GRACE/FS
+## GRACE/FS (CPU)
 
-This is a custom C++ implementation of GRACE/FS model, taht can be executed on CPU without TensorFlow library and parallelized using usual MPI.
+This is a custom C++ implementation of GRACE/FS model, that can be executed on CPU without TensorFlow library and parallelized using usual MPI.
 
-1. Activate conda environment
+* Activate conda environment
 ```bash
 conda activate grace
 ```
 
-2. Clone repo:
+* Clone repo:
 ```
 git clone -b feature/grace_fs https://github.com/ICAMS/python-ace.git
 ```
 
-3. Install
+* Install
 ```
 cd pyace
 pip install .
@@ -56,7 +54,7 @@ pip install .
 
 Now, you can use `pace_activeset` utility to generate ASI for GRACE/FS models, fitted with gracemaker
 
-## LAMMPS+GRACE
+## LAMMPS with GRACE
 
 1. Activate conda environment (it should contain TF)
 ```

@@ -4,9 +4,19 @@
 
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
 
+# Features
+
+* Support from multi-component material systems
+* Support for one- and two-layer message passing architectures
+* Custom C++ implementation of GRACE/FS  model, that enable fast, multi-CPU parallelization using MPI in LAMMPS,
+without GPU and extra dependencies (i.e. TensorFlow)
+
 # Documentation
 
-Please use the navigation bar on the left to explore the documentation.
+Please use the top navigation bar to explore:
+
+* [Installation](gracemaker/install.md)
+* [Quick start](gracemaker/quickstart.md)
 
 # Citation
 

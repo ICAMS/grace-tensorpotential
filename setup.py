@@ -25,5 +25,6 @@ setup(
     scripts=[
         "bin/gracemaker",
         "bin/grace_download",
+        "bin/grace_collect"
     ],
 )
