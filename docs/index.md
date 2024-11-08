@@ -1,15 +1,26 @@
 # gracemaker
 
-`gracemaker` is a tool for fitting of interatomic potentials in a general nonlinear Graph Atomic Cluster Expansion (GRACE) form.
+`gracemaker` is a tool for fitting interatomic potentials in a general non-linear Graph Atomic Cluster Expansion (GRACE) form.
 
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
 
 # Features
 
-* Support from multi-component material systems
-* Support for one- and two-layer message passing architectures
-* Custom C++ implementation of GRACE/FS  model, that enable fast, multi-CPU parallelization using MPI in LAMMPS,
-without GPU and extra dependencies (i.e. TensorFlow)
+* Support for multi-component material systems with unlimited number of interacting elements.
+* Extension of the local ACE models to also include semi-local interactions (a.k.a. message passing).
+* Line of models targeting various performance/complexity regimes and hardware:
+    * **GRACE/FS**: Fast, mildly non-linear local model with standalone C++ implementation enabling
+    efficient multi-CPU parallelization using MPI in LAMMPS. Intended for large-scale simulations of systems
+    containing up to several million atoms.
+   
+    * **GRACE-1L**: Local, non-linear model with improved accuracy intended to run on GPU.
+    Utilizes TensorFlow library to run simulations in LAMMPS or in python and supports multi-GPU parallelization.
+    Suitable for modeling both small systems and large-scale simulations of hundreds of thousands of atoms.
+  
+    * **GRACE-2L**: Semi-local, non-linear model offering state-of-the-art accuracy. 
+    Utilizes TensorFlow library to run simulations in LAMMPS or in python.
+    Best applied for simulating molecular systems and materials with up to hundred thousand of atoms.
+
 
 # Documentation
 
@@ -20,7 +31,7 @@ Please use the top navigation bar to explore:
 
 # Citation
 
-Please cite following papers:
+Please cite following papers if you use GRACEmkaer in your work:
 
 - [Bochkarev, A., Lysogorskiy, Y. and Drautz, R. Graph Atomic Cluster Expansion for Semilocal Interactions beyond Equivariant Message Passing. Phys. Rev. X 14, 021036 (2024)](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.14.021036)
 
