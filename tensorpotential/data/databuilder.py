@@ -2,26 +2,49 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
+import signal
+import threading
+import time
+
 import numpy as np
 import pandas as pd
 
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
 from ase import Atoms
+from collections import defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
-from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL
-
-
-try:
-    from matscipy.neighbours import neighbour_list as nl
-except ImportError:
-    from ase.neighborlist import neighbor_list as nl
+from itertools import combinations_with_replacement
 
 from tensorpotential import constants
+from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL
+from tensorpotential.utils import process_cutoff_dict
+
+from matscipy.neighbours import neighbour_list as nl
+
+# from ase.neighborlist import neighbor_list as nl
+
 from ase.stress import full_3x3_to_voigt_6_stress
 
 DEFAULT_STRESS_UNITS = "eV/A3"
 MININTERVAL = 2  # min interval for progress bar
+
+
+### from https://stackoverflow.com/questions/71300294/how-to-terminate-pythons-processpoolexecutor-when-parent-process-dies
+def start_thread_to_terminate_when_parent_process_dies(ppid):
+    pid = os.getpid()
+
+    def f():
+        while True:
+            try:
+                os.kill(ppid, 0)
+            except OSError:
+                os.kill(pid, signal.SIGTERM)
+            time.sleep(1)
+
+    thread = threading.Thread(target=f, daemon=True)
+    thread.start()
 
 
 def enforce_pbc(atoms, cutoff):
@@ -57,7 +80,7 @@ def generate_batches_df(structures_df, batch_size):
     structures_df["bid"] = np.arange(len(structures_df)) // batch_size
     structures_df["structure_ind"] = structures_df.index
     batch_df = structures_df.groupby("bid").agg(
-        {"nat": sum, "nneigh": sum, "nstruct": sum, "structure_ind": list}
+        {"nat": "sum", "nneigh": "sum", "nstruct": "sum", "structure_ind": list}
     )
     assert batch_df["nstruct"].sum() == len(structures_df)
     return batch_df
@@ -189,7 +212,13 @@ class GeometricalDataBuilder(AbstractDataBuilder):
     """
 
     def __init__(
-        self, elements_map: dict, cutoff: float, is_fit_stress=False, **kwargs
+        self,
+        elements_map: dict,
+        cutoff: float,
+        cutoff_dict: dict = None,
+        is_fit_stress=False,
+        bond_type: str = "symmetric_bond",
+        **kwargs,
     ):
         super().__init__(**kwargs)
         """
@@ -203,14 +232,56 @@ class GeometricalDataBuilder(AbstractDataBuilder):
         ), "`elements_map` should be list of elements of dict[element->index] mapping"
         self.elements_map = elements_map
         self.cutoff = float(cutoff)
+
+        self.cutoff_dict = (
+            process_cutoff_dict(cutoff_dict, self.elements_map)
+            if cutoff_dict is not None
+            else None
+        )
+
+        assert bond_type == "symmetric_bond", ValueError(
+            "Only one option available now"
+        )
+        self.bond_type = bond_type
+
+        if self.cutoff_dict is not None:
+            max_cutoff = np.max([v for k, v in self.cutoff_dict.items()])
+            self.max_cutoff = np.max([max_cutoff, self.cutoff])
+        else:
+            self.max_cutoff = self.cutoff
+            self.nl_cutoffs = self.cutoff
+
         self.is_fit_stress = is_fit_stress
 
     def extract_from_ase_atoms(self, ase_atoms, **kwarg):
         """
         Construction of per-structure data dictionary
         """
-        ase_atoms = enforce_pbc(ase_atoms, cutoff=self.cutoff)
-        ind_i, ind_j, bond_vector = nl("ijD", ase_atoms, cutoff=self.cutoff)
+        ase_atoms = enforce_pbc(ase_atoms, cutoff=self.max_cutoff)
+
+        if self.cutoff_dict is not None:
+            cutoff = {}
+            for e1, e2 in combinations_with_replacement(
+                set(ase_atoms.get_chemical_symbols()), 2
+            ):
+                cutoff[(e1, e2)] = self.cutoff_dict.get((e1, e2), self.cutoff)
+        else:
+            cutoff = self.cutoff
+
+        ind_i, ind_j, bond_vector = nl("ijD", ase_atoms, cutoff=cutoff)
+
+        atomic_mu_i = np.array(
+            [self.elements_map[s] for s in ase_atoms.get_chemical_symbols()]
+        )
+
+        nat_per_specie = defaultdict(int)
+        total_nei_per_specie = defaultdict(int)
+        u_i, n_j = np.unique(ind_i, return_counts=True)
+
+        for at_i, nb_i in zip(u_i, n_j):
+            specie_i = atomic_mu_i[at_i]
+            nat_per_specie[specie_i] += 1
+            total_nei_per_specie[specie_i] += nb_i
 
         all_atom_ind = np.arange(len(ase_atoms))
         if np.unique(ind_i).shape[0] < all_atom_ind.shape[0]:
@@ -225,7 +296,7 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                     ase_atoms.cell,
                     np.array([[1, 1, 1] for _ in missing_ind]).reshape(3, -1),
                 ).reshape(-1, 3)
-                + self.cutoff
+                + self.max_cutoff
             )
             ind_i = np.append(ind_i, missing_ind)
             ind_j = np.append(ind_j, ind_j_to_add)
@@ -235,10 +306,6 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             ind_i = ind_i[sort]
             ind_j = ind_j[sort]
             bond_vector = bond_vector[sort]
-
-        atomic_mu_i = np.array(
-            [self.elements_map[s] for s in ase_atoms.get_chemical_symbols()]
-        )
 
         mu_i = np.array([atomic_mu_i[i] for i in ind_i])
         mu_j = np.array([atomic_mu_i[j] for j in ind_j])
@@ -253,6 +320,8 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             constants.N_ATOMS_BATCH_REAL: np.array(len(ase_atoms)).astype(np.int32),
             constants.N_STRUCTURES_BATCH_REAL: np.array(1).astype(np.int32),
             constants.N_NEIGHBORS_REAL: np.array(len(bond_vector)).astype(np.int32),
+            "nat_per_specie": nat_per_specie,
+            "total_nei_per_specie": total_nei_per_specie,
         }
 
     def extract_from_row(self, row, **kwarg):
@@ -324,6 +393,18 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             res_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.array(
                 map_bonds_to_structure
             ).astype(np.int32)
+
+        nat_per_specie = defaultdict(int)
+        total_nei_per_specie = defaultdict(int)
+        for data_dict in pre_batch_list:
+            nps = data_dict["nat_per_specie"]
+            tnps = data_dict["total_nei_per_specie"]
+            for k, v in nps.items():
+                nat_per_specie[k] += v
+            for k, v in tnps.items():
+                total_nei_per_specie[k] += v
+        res_dict["nat_per_specie"] = nat_per_specie
+        res_dict["total_nei_per_specie"] = total_nei_per_specie
 
         return res_dict
 
@@ -673,6 +754,7 @@ def construct_batches(
     external_max_nneigh: int = None,
     external_max_nat: int = None,
     gc_collect=True,
+    max_workers=None,
 ):
     """
     Return:    batches, padding_stats (optional)
@@ -697,21 +779,22 @@ def construct_batches(
             data_dict_list.append(data_dict)
     elif isinstance(df_or_ase_atoms_list, pd.DataFrame):
         # Stage 1. Build List of (data dict)
-        if verbose:
-            logging.info("1/4. Converting pd.DataFrame to batch data")
-        for row_ind, row in iterator_func(
-            df_or_ase_atoms_list.iterrows(),
-            total=len(df_or_ase_atoms_list),
-            mininterval=MININTERVAL,
-        ):
-            data_dict = {}  # managed by reference
-            for data_builder in data_builders:
-                data_dict.update(
-                    data_builder.extract_from_row(
-                        row, **{constants.DATA_STRUCTURE_ID: row_ind}
-                    )
+        if max_workers is None:
+            # SERIAL PROCESSING
+            if verbose:
+                logging.info("1/4. Converting pd.DataFrame to batch data")
+            data_dict_list = process_dataframe(
+                df_or_ase_atoms_list, data_builders, iterator_func
+            )
+        else:
+            # PARALLEL PROCESSING
+            if verbose:
+                logging.info(
+                    f"1/4. Converting pd.DataFrame to batch data (parallel, max_workers={max_workers})"
                 )
-            data_dict_list.append(data_dict)
+            data_dict_list = parallel_process_dataframe(
+                df_or_ase_atoms_list, data_builders, iterator_func, max_workers
+            )
     else:
         raise NotImplementedError()
 
@@ -817,3 +900,51 @@ def construct_batches(
         return batches, padding_stats
     else:
         return batches
+
+
+def process_dataframe(df_or_ase_atoms_list, data_builders, iterator_func):
+    data_dict_list = []
+    for row_ind, row in iterator_func(
+        df_or_ase_atoms_list.iterrows(),
+        total=len(df_or_ase_atoms_list),
+        mininterval=MININTERVAL,
+    ):
+        data_dict = process_row(row_ind, row, data_builders)
+        data_dict_list.append(data_dict)
+
+    return data_dict_list
+
+
+def parallel_process_dataframe(
+    df_or_ase_atoms_list, data_builders, iterator_func, max_workers
+):
+    data_dict_list = []
+    # Use ProcessPoolExecutor to parallelize row processing
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=start_thread_to_terminate_when_parent_process_dies,  # +
+        initargs=(os.getpid(),),
+    ) as executor:
+        # Submit tasks for each row in df_or_ase_atoms_list
+        futures = [
+            executor.submit(process_row, row_ind, row, data_builders)
+            for row_ind, row in df_or_ase_atoms_list.iterrows()
+        ]
+
+        # Collect results as they are completed
+        for future in iterator_func(
+            futures, total=len(futures), mininterval=MININTERVAL
+        ):
+            data_dict = future.result()
+            data_dict_list.append(data_dict)
+
+    return data_dict_list
+
+
+def process_row(row_ind, row, data_builders):
+    data_dict = {}  # managed by reference
+    for data_builder in data_builders:
+        data_dict.update(
+            data_builder.extract_from_row(row, **{constants.DATA_STRUCTURE_ID: row_ind})
+        )
+    return data_dict

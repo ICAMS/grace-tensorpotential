@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import tensorflow as tf
 
@@ -74,9 +76,9 @@ class GaussianRadialBasisFunction(RadialBasisFunction):
         nfunc: int,
         rcut: float,
         p: int,
-        normalized: bool = True,
-        rmin: float = 0.2,
-        init_gamma: float = 100,
+        normalized: bool = False,
+        rmin: float = 0.0,
+        init_gamma: float = 1,
         trainable: bool = False,
         **kwargs,
     ):
@@ -106,7 +108,8 @@ class GaussianRadialBasisFunction(RadialBasisFunction):
         self.is_build = True
 
     def compute_basis(self, r):
-        basis = tf.math.exp(-self.scale * 0.5 * (r - self.grid) ** 2)
+        # basis = tf.math.exp(-self.scale * 0.5 * (r - self.grid) ** 2)
+        basis = tf.math.exp(-(self.scale**2) * (r - self.grid) ** 2)
         if self.normalized:
             if self.trainable:
                 gamma_norm = tf.math.rsqrt(self.scale)
@@ -115,6 +118,47 @@ class GaussianRadialBasisFunction(RadialBasisFunction):
                 basis = basis * self.norm
 
         return basis * cutoff_func_p_order_poly(r / self.rc, self.pcut)
+
+
+class ChebSqrRadialBasisFunction(RadialBasisFunction):
+    def __init__(
+        self,
+        nfunc: int,
+        rcut: float,
+        p: int = 5,
+        normalized: bool = True,
+        kind: int = 1,
+        reversed: bool = False,
+        **kwargs,
+    ):
+        super().__init__(nfunc, rcut, name="ChebSqrRadialBasisFunction")
+        self.normalized = normalized
+        self.lmbda = 1
+        self.kind = kind
+        self.reversed = reversed
+        self.pcut = p
+        if self.normalized:
+            self.norm = np.sqrt(1 / np.pi)
+
+    def build(self, float_dtype):
+        if not self.is_build:
+            super().build(float_dtype)
+            if self.normalized:
+                self.norm = tf.convert_to_tensor(self.norm, dtype=float_dtype)
+        self.is_build = True
+
+    def compute_basis(self, r):
+        if self.reversed:
+            r_rescale = -2.0 * (1.0 - tf.abs(1.0 - r / self.rc) ** self.lmbda) + 1.0
+        else:
+            r_rescale = 2.0 * (1.0 - tf.abs(1.0 - r / self.rc) ** self.lmbda) - 1.0
+        # basis = 1 - chebvander(r_rescale, self.nfunc+1)[:, 1:]
+        basis = chebvander(r_rescale, self.nfunc + 1, self.kind)[:, 1:]
+        basis *= cutoff_func_p_order_poly(r / self.rc, self.pcut)
+        if self.normalized:
+            return basis * self.norm
+        else:
+            return basis
 
 
 class SinBesselRadialBasisFunction(RadialBasisFunction):
@@ -236,11 +280,16 @@ def sinc(x):
     return tf.where(x != 0, tf.math.sin(x) / x, tf.ones_like(x, dtype=x.dtype))
 
 
-def chebvander(x, deg):
+def chebvander(x, deg, kind=1):
     v = [tf.ones_like(x)]
     if deg > 0:
         x2 = 2 * x
-        v += [x]
+        if kind == 1:
+            v += [x]
+        elif kind == 2:
+            v += [2 * x]
+        else:
+            raise ValueError("kind must be 1 or 2")
 
         for i in range(2, deg):
             v += [v[i - 1] * x2 - v[i - 2]]
@@ -248,4 +297,13 @@ def chebvander(x, deg):
     v = tf.stack(v)
     v = tf.transpose(v, [1, 2, 0])
 
-    return v
+    return v[:, 0, :]
+
+
+def compute_cheb_radial_basis(r, nfunc, rcut, p, kind=1):
+    roverrcut = r / rcut
+    r_rescale = 2.0 * (1.0 - tf.abs(1.0 - roverrcut)) - 1.0
+    basis = chebvander(r_rescale, nfunc + 1, kind)[:, 1:]
+    basis *= cutoff_func_p_order_poly(roverrcut, p)
+
+    return basis

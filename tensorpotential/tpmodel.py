@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import os
 
@@ -25,6 +27,106 @@ def extract_cutoff_and_elements(instructions):
 
     cutoff = np.max(cuts)
     return cutoff, element_map_symbols, element_map_index
+
+
+def extract_cutoff_matrix(instructions) -> np.array:
+    """
+    Aggregate cutoff matrix over all instructions using cumulative max
+    Reshape it into square matrix
+    """
+    cutoff_matrix = None
+    for instruction in instructions:
+        if hasattr(instruction, "bond_cutoff_map"):
+            if cutoff_matrix is None:
+                # init
+                cutoff_matrix = instruction.bond_cutoff_map.numpy()
+            else:
+                # cumulative max
+                current_cutoff_matrix = instruction.bond_cutoff_map.numpy()
+                for i in range(current_cutoff_matrix.shape[0]):
+                    for j in range(current_cutoff_matrix.shape[1]):
+                        cutoff_matrix[i, j] = np.max(
+                            current_cutoff_matrix[i, j], cutoff_matrix[i, j]
+                        )
+
+    if cutoff_matrix is not None:
+        # infer number of elements
+        nels = int(np.round(np.sqrt(len(cutoff_matrix))))
+        assert nels**2 == len(cutoff_matrix)
+        return np.array(cutoff_matrix).reshape(nels, nels)
+
+
+def compute_batch_virials_from_pair_forces(pair_f, input_data):
+    # virials xx,yy,zz
+    virial_012 = tf.reshape(
+        tf.math.unsorted_segment_sum(
+            pair_f * input_data[constants.BOND_VECTOR],
+            segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
+            num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
+        ),
+        (-1, 3),
+    )
+
+    # xy
+    virial_3 = tf.reshape(
+        tf.math.unsorted_segment_sum(
+            pair_f[:, 1] * input_data[constants.BOND_VECTOR][:, 0],
+            segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
+            num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
+        ),
+        (-1, 1),
+    )
+    # xz
+    virial_4 = tf.reshape(
+        tf.math.unsorted_segment_sum(
+            pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 0],
+            segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
+            num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
+        ),
+        (-1, 1),
+    )
+    # yz
+    virial_5 = tf.reshape(
+        tf.math.unsorted_segment_sum(
+            pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 1],
+            segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
+            num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
+        ),
+        (-1, 1),
+    )
+
+    # order: xx,yy,zz, xy,xz,yz
+    virial = tf.concat([virial_012, virial_3, virial_4, virial_5], axis=1)
+    return virial
+
+
+def compute_structure_virials_from_pair_forces(pair_f, input_data):
+    virial_012 = tf.reshape(
+        tf.reduce_sum(pair_f * input_data[constants.BOND_VECTOR], axis=0),
+        [
+            -1,
+        ],
+    )
+    virial_3 = tf.reshape(
+        tf.reduce_sum(pair_f[:, 1] * input_data[constants.BOND_VECTOR][:, 0], axis=0),
+        [
+            1,
+        ],
+    )
+    virial_4 = tf.reshape(
+        tf.reduce_sum(pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 0], axis=0),
+        [
+            1,
+        ],
+    )
+    virial_5 = tf.reshape(
+        tf.reduce_sum(pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 1], axis=0),
+        [
+            1,
+        ],
+    )
+    virial = tf.concat([virial_012, virial_3, virial_4, virial_5], axis=0)
+    return virial
 
 
 class TrainFunction(ABC):
@@ -127,47 +229,7 @@ class ComputeBatchEnergyForcesVirials(TrainFunction):
         ) - tf.math.unsorted_segment_sum(
             pair_f, input_data[constants.BOND_IND_I], num_segments=nat
         )
-
-        # virials xx,yy,zz
-        virial_012 = tf.reshape(
-            tf.math.unsorted_segment_sum(
-                pair_f * input_data[constants.BOND_VECTOR],
-                segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
-                num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
-            ),
-            (-1, 3),
-        )
-
-        # xy
-        virial_3 = tf.reshape(
-            tf.math.unsorted_segment_sum(
-                pair_f[:, 1] * input_data[constants.BOND_VECTOR][:, 0],
-                segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
-                num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
-            ),
-            (-1, 1),
-        )
-        # xz
-        virial_4 = tf.reshape(
-            tf.math.unsorted_segment_sum(
-                pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 0],
-                segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
-                num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
-            ),
-            (-1, 1),
-        )
-        # yz
-        virial_5 = tf.reshape(
-            tf.math.unsorted_segment_sum(
-                pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 1],
-                segment_ids=input_data[constants.BONDS_TO_STRUCTURE_MAP],
-                num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
-            ),
-            (-1, 1),
-        )
-
-        # order: xx,yy,zz, xy,xz,yz
-        virial = tf.concat([virial_012, virial_3, virial_4, virial_5], axis=1)
+        virial = compute_batch_virials_from_pair_forces(pair_f, input_data)
 
         return {
             constants.PREDICT_TOTAL_ENERGY: total_energy,
@@ -200,58 +262,23 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
 
-        # total_energy = tf.math.unsorted_segment_sum(
-        #     e_atomic,
-        #     input_data[constants.ATOMS_TO_STRUCTURE_MAP],
-        #     num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
-        # )
-
-        # replace with reduce_sum given the function is supposed to operate on a single structure
         total_energy = tf.reduce_sum(e_atomic, axis=0, keepdims=True)
+
         nat = tf.reshape(input_data[constants.N_ATOMS_BATCH_TOTAL], [])
         total_f = tf.math.unsorted_segment_sum(
             pair_f, input_data[constants.BOND_IND_J], num_segments=nat
         ) - tf.math.unsorted_segment_sum(
             pair_f, input_data[constants.BOND_IND_I], num_segments=nat
         )
-
-        virial_012 = tf.reshape(
-            tf.reduce_sum(pair_f * input_data[constants.BOND_VECTOR], axis=0),
-            [
-                -1,
-            ],
-        )
-        virial_3 = tf.reshape(
-            tf.reduce_sum(
-                pair_f[:, 1] * input_data[constants.BOND_VECTOR][:, 0], axis=0
-            ),
-            [
-                1,
-            ],
-        )
-        virial_4 = tf.reshape(
-            tf.reduce_sum(
-                pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 0], axis=0
-            ),
-            [
-                1,
-            ],
-        )
-        virial_5 = tf.reshape(
-            tf.reduce_sum(
-                pair_f[:, 2] * input_data[constants.BOND_VECTOR][:, 1], axis=0
-            ),
-            [
-                1,
-            ],
-        )
-        virial = tf.concat([virial_012, virial_3, virial_4, virial_5], axis=0)
+        virial = compute_structure_virials_from_pair_forces(pair_f, input_data)
 
         return {
             constants.PREDICT_TOTAL_ENERGY: total_energy,
             constants.PREDICT_FORCES: total_f,
             constants.PREDICT_VIRIAL: virial,
             constants.PREDICT_ATOMIC_ENERGY: e_atomic,
+            # just quick hack to have it at last position, since all outputs are **alphabetically** sorted
+            "z_" + constants.PREDICT_PAIR_FORCES: pair_f,
         }
 
 
@@ -271,6 +298,24 @@ class ComputeEquivariantForces(ComputeFunction):
         return {
             constants.PREDICT_TOTAL_ENERGY: tf.constant([[0.0]], dtype=atomic_f.dtype),
             constants.PREDICT_FORCES: atomic_f,
+        }
+
+
+class ComputePlaceholder(ComputeFunction):
+    specs = {}
+
+    def __call__(
+        self,
+        instructions: list[TPInstruction],
+        input_data: dict,
+        training: bool = False,
+    ):
+        for ins in instructions:
+            ins(input_data, training=training)
+        placeholder = input_data[constants.PLACEHOLDER]
+
+        return {
+            constants.PLACEHOLDER: placeholder,
         }
 
 
@@ -344,10 +389,17 @@ class TPModel(tf.Module):
             self.instructions
         )
         element_map_symbols = element_map_symbols[element_map_index]
+        cutoff_matrix = extract_cutoff_matrix(self.instructions)
+        if cutoff_matrix is not None:
+            cutoff = np.max(cutoff_matrix)
         metadata = {
             "chemical_symbols": list(map(str, element_map_symbols)),
             "cutoff": float(cutoff),
         }
+        if cutoff_matrix is not None:
+            # convert to list for YAML-friendly format
+            metadata["cutoff_matrix"] = np.array(cutoff_matrix).tolist()
+
         with open(os.path.join(path, "metadata.yaml"), "w") as f:
             yaml.dump(metadata, f)
 

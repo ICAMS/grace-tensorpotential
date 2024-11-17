@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import tensorflow as tf
@@ -107,11 +109,19 @@ class TensorPotential:
                     self.swap_on_epoch = True
                     self._ema_weights_in_model = False
 
-                self.checkpoint = tf.train.Checkpoint(
-                    model=self.model, optimizer=self.optimizer
-                )
+                self.setup_checkpoint_with_optimizer()
             else:
                 self.checkpoint = tf.train.Checkpoint(model=self.model)
+
+    def setup_checkpoint_with_optimizer(self):
+        self.checkpoint = tf.train.Checkpoint(
+            model=self.model, optimizer=self.optimizer
+        )
+
+    def reset_optimizer(self):
+        with self.strategy.scope():
+            self.optimizer = self.optimizer.__class__(**self.optimizer.get_config())
+            self.setup_checkpoint_with_optimizer()
 
     def get_model_grad_signatures(self):
         dtypes = {"int": tf.int32, "float": self.float_dtype}

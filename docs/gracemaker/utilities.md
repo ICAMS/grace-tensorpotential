@@ -22,24 +22,26 @@ options:
 
 ___
 
-## `grace_download`
+## `grace_models`
 Utility to download (all) foundation models
 
 ```
-usage: grace_download [-h] [model]
+usage: grace_models [-h] {list,download} ...
 
-Download foundational models
+Download foundational GRACE models
 
 positional arguments:
-  model       Model name (mp-1layer, mp-1layer-shift, mp-2layer). Default is None - all models are downloaded
+  {list,download}  Sub-command help
+    list           List available models
+    download       Download a model
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help       show this help message and exit
 
 ```
 
 Example:
 ```bash
-grace_download
+grace_models
 ```
 ___

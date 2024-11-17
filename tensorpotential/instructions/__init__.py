@@ -24,6 +24,7 @@ from tensorpotential.instructions.compute import (
     FCRight2Left,
     ZBLPotential,
     CropProductFunction,
+    BondSpecificRadialBasisFunction,
 )
 
 from tensorpotential.instructions.output import (
@@ -33,6 +34,7 @@ from tensorpotential.instructions.output import (
     MLPOut2ScalarTarget,
     ConstantScaleShiftTarget,
     LinMLPOut2ScalarTarget,
+    LinearOut2EquivarTarget,
 )
 
 __all__ = [
@@ -64,4 +66,6 @@ __all__ = [
     "FCRight2Left",
     "CropProductFunction",
     "ZBLPotential",
+    "LinearOut2EquivarTarget",
+    "BondSpecificRadialBasisFunction",
 ]

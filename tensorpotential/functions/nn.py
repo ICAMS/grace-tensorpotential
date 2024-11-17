@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 import tensorflow as tf
 
 from typing import Callable, Optional
+
+
+ACTIVATION_DICT = {"tanh": tf.nn.tanh}
 
 
 class DenseLayer(tf.Module):
@@ -75,7 +80,7 @@ class FullyConnectedMLP(tf.Module):
         input_size: int,
         output_size: int,
         hidden_layers: list,
-        activation: callable = silu_n2norm,
+        activation: callable = None,
         out_act: bool = False,
         name: str = "FullyConnectedMLP",
         no_weight_decay: bool = False,
@@ -84,6 +89,15 @@ class FullyConnectedMLP(tf.Module):
         self.layers_config = [input_size] + hidden_layers + [output_size]
         self.nlayers = 0
         self.is_built = False
+
+        if activation is None:
+            activation = silu_n2norm
+        elif activation in ACTIVATION_DICT:
+            activation = ACTIVATION_DICT[activation]
+        else:
+            raise ValueError(
+                f"activation must be a string ({list(ACTIVATION_DICT.keys())})"
+            )
 
         for i, (n_in, n_out) in enumerate(
             zip(self.layers_config, self.layers_config[1:])

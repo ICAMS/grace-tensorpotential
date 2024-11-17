@@ -8,9 +8,9 @@ data:
   test_size: 20
 
 potential:
-  preset: "GRACE_2LAYER"
+  preset: "GRACE_2LAYER_MP"
   scale: True
-  kwargs: { lmax: [2,3],
+  kwargs: { lmax: 2,
             basis_type: "SBessel",
             rad_base_normalized: True,
             n_rad_base: 2,
@@ -35,6 +35,7 @@ fit:
 
   optimizer: Adam
   opt_params: { "learning_rate": 0.1, "amsgrad": True }
+  reset_optimizer: True
   learning_rate_reduction: { patience: 1, factor: 0.8, min: 9.e-2, stop_at_min: True, resume_lr: True }
   #  optimizer: L-BFGS-B
   maxiter: 3

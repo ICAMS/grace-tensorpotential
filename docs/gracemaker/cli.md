@@ -25,6 +25,6 @@ options:
   -e, --eager           Eager graph execution
   -nj, --no-jit         No JIT
   --seed SEED           Random seed (will overwrite value from input.yaml)
-  -cm, --check-model    Check model consistency, without performing fit and neighbourlist build
+  -cm, --check-model    Check model consistency, without performing fit and building neighbourlist
 
 ```

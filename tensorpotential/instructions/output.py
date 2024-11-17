@@ -11,6 +11,7 @@ from tensorpotential.instructions.base import (
 )
 from tensorpotential.instructions.compute import (
     FunctionReduce,
+    FunctionReduceN,
     FunctionReduceParticular,
     ScalarChemicalEmbedding,
 )
@@ -51,7 +52,9 @@ class CreateOutputTarget(TPInstruction):
             self.value = initial_value
 
     def build(self, float_dtype):
-        self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
+        if not self.is_built:
+            self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
         return self.value
@@ -187,12 +190,14 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
         origin: list[FunctionReduce],
         target: CreateOutputTarget,
         hidden_layers: list[int] = None,
+        n_out: int = 1,
         name="MLPOut2ScalarTarget",
         normalize: bool = False,
         l: int = 0,
     ):
         super(MLPOut2ScalarTarget, self).__init__(name=name, target=target)
         self.origin = origin
+        self.n_out = n_out
         self.normalize = normalize
         if self.normalize:
             self.norm_n_origins = 1 / len(origin) ** 0.5
@@ -217,7 +222,7 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
         self.mlp = FullyConnectedMLP(
             input_size=out_shapes[0],
             hidden_layers=self.hidden_layers,
-            output_size=1,
+            output_size=self.n_out,
         )
 
     def build(self, float_dtype):
@@ -245,11 +250,13 @@ class LinMLPOut2ScalarTarget(MLPOut2ScalarTarget):
 
     def __init__(
         self,
-        origin: list[FunctionReduce],
+        origin: list[FunctionReduce | FunctionReduceN],
         target: CreateOutputTarget,
         hidden_layers: list[int] = None,
         name="MLPOut2ScalarTarget",
+        n_out: int = 1,
         normalize: bool = False,
+        activation: callable = None,
         l: int = 0,
     ):
         super(LinMLPOut2ScalarTarget, self).__init__(
@@ -258,17 +265,19 @@ class LinMLPOut2ScalarTarget(MLPOut2ScalarTarget):
             hidden_layers=hidden_layers,
             name=name,
             normalize=normalize,
+            n_out=n_out,
         )
 
         self.mlp = FullyConnectedMLP(
             input_size=self.origin[0].n_out - 1,
             hidden_layers=self.hidden_layers,
-            output_size=1,
+            activation=activation,
+            output_size=self.n_out,
         )
         if self.normalize:
             self.norm_contr = 0.707106781186547
         else:
-            self.norm_contr = 1.
+            self.norm_contr = 1.0
 
     def frwrd(self, input_data, training=False):
         target = input_data[f"{self.target.name}"]
@@ -403,7 +412,7 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
 
 
 @capture_init_args
-class LinearEquivarOut2Target(TPOutputInstruction):
+class LinearOut2EquivarTarget(TPOutputInstruction):
     """
     Adds origin to target without transformation
     """
@@ -414,9 +423,11 @@ class LinearEquivarOut2Target(TPOutputInstruction):
         l: int,
         target: CreateOutputTarget,
         name="LinearEquivarOut2Target",
+        full_r2_form: bool = False,
     ):
-        super(LinearEquivarOut2Target, self).__init__(name=name, target=target, l=l)
+        super(LinearOut2EquivarTarget, self).__init__(name=name, target=target, l=l)
         self.origin = origin
+        self.full_r2_form = full_r2_form
 
         lmax = np.max([ins.lmax for ins in self.origin])
         assert lmax == self.l, f"Origin l={lmax} does not match target l={self.l}"
@@ -424,10 +435,33 @@ class LinearEquivarOut2Target(TPOutputInstruction):
 
         out_shapes = [ins.n_out for ins in self.origin]
         assert len(set(out_shapes)) == 1, "Not all shapes are the same"
-        if self.l > 1:
+        if self.l > 2:
             raise NotImplementedError(
-                f"LinearEquivarOut2Target can only do vectors for now"
+                f"LinearEquivarOut2Target can only do vectors and matrices for now"
             )
+        if self.l == 2:
+            a = -0.5 / np.sqrt(3)
+            b = 1 / np.sqrt(3)
+            if full_r2_form:
+                self.transform = np.array(
+                    [
+                        [0, 0.5, 0, 0.5, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0.5, 0, 0.5, 0],
+                        [a, 0, 0, 0, a, 0, 0, 0, b],
+                        [0, 0, 0.5, 0, 0, 0, 0.5, 0, 0],
+                        [0.5, 0, 0, 0, -0.5, 0, 0, 0, 0],
+                    ]
+                ).reshape(5, 9)
+            else:
+                self.transform = np.array(
+                    [
+                        [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+                        [a, a, b, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+                        [0.5, -0.5, 0.0, 0.0, 0.0, 0.0],
+                    ]
+                ).reshape(5, 6)
 
     def frwrd(self, input_data, training=False):
         target = input_data[f"{self.target.name}"]
@@ -437,5 +471,13 @@ class LinearEquivarOut2Target(TPOutputInstruction):
             if self.l == 1:
                 r_tensor = tf.roll(tensor, shift=1, axis=2)
                 target += r_tensor
+            elif self.l == 2:
+                trnsfrm = tf.constant(self.transform, dtype=target.dtype)
+                r_tensor = tf.einsum("...b,bc->...c", tensor, trnsfrm)
+                target += r_tensor
+            else:
+                raise NotImplementedError(
+                    "LinearEquivarOut2Target can only do vectors and matrices for now"
+                )
 
         return target

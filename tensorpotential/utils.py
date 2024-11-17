@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import os
+import re
+
 import os.path as p
 import pandas as pd
 
@@ -299,3 +303,310 @@ def plot_dashboard(
         )
 
     return fig, ax_e, ax_f
+
+
+CUTOFF_PRESETS = {
+    # equilibrium nn-dist + 3 A, crop(4,8).round(1)
+    "DEFAULT_CUTOFF_1L": {
+        "H": 4.0,
+        "N": 4.1,
+        "O": 4.2,
+        "C": 4.4,
+        "F": 4.4,
+        "B": 4.7,
+        "Cl": 5.0,
+        "S": 5.1,
+        "Mn": 5.2,
+        "P": 5.2,
+        "Be": 5.2,
+        "Se": 5.4,
+        "Si": 5.4,
+        "Br": 5.4,
+        "Fe": 5.4,
+        "Co": 5.5,
+        "Cr": 5.5,
+        "Ni": 5.5,
+        "Ge": 5.5,
+        "Ga": 5.5,
+        "As": 5.6,
+        "Cu": 5.6,
+        "V": 5.6,
+        "Ti": 5.6,
+        "Zn": 5.7,
+        "Ru": 5.7,
+        "Os": 5.7,
+        "Tc": 5.7,
+        "Rh": 5.7,
+        "Mo": 5.7,
+        "Ir": 5.7,
+        "Re": 5.7,
+        "W": 5.8,
+        "Pd": 5.8,
+        "Pt": 5.8,
+        "I": 5.8,
+        "Al": 5.9,
+        "Nb": 5.9,
+        "Ta": 5.9,
+        "Sn": 5.9,
+        "Te": 5.9,
+        "He": 5.9,
+        "Au": 5.9,
+        "Ag": 5.9,
+        "Sb": 5.9,
+        "Cd": 6.0,
+        "Li": 6.0,
+        "Ne": 6.0,
+        "Bi": 6.1,
+        "Hf": 6.1,
+        "Mg": 6.2,
+        "Zr": 6.2,
+        "Sc": 6.2,
+        "Po": 6.3,
+        "Ce": 6.3,
+        "In": 6.4,
+        "Lu": 6.4,
+        "Tm": 6.4,
+        "Er": 6.5,
+        "Ho": 6.5,
+        "Y": 6.5,
+        "Dy": 6.5,
+        "Tl": 6.5,
+        "Hg": 6.5,
+        "Tb": 6.5,
+        "Pb": 6.6,
+        "Gd": 6.6,
+        "Sm": 6.6,
+        "Pm": 6.6,
+        "Nd": 6.7,
+        "Pr": 6.7,
+        "La": 6.7,
+        "Na": 6.7,
+        "Yb": 6.8,
+        "Ca": 6.9,
+        "Eu": 6.9,
+        "Ar": 7.0,
+        "Sr": 7.2,
+        "Ba": 7.4,
+        "Ra": 7.5,
+        "Kr": 7.5,
+        "K": 7.7,
+        "Xe": 7.9,
+        "Rb": 8.0,
+        "Fr": 8.0,
+        "Cs": 8.0,
+        "Rn": 8.0,
+    },
+    # equilibrium nn-dist + 1.75 A, crop(3.5,7.5).round(1)
+    "DEFAULT_CUTOFF_2L": {
+        "H": 3.5,
+        "N": 3.5,
+        "O": 3.5,
+        "C": 3.5,
+        "F": 3.5,
+        "B": 3.5,
+        "Cl": 3.8,
+        "S": 3.8,
+        "Mn": 3.9,
+        "P": 4.0,
+        "Be": 4.0,
+        "Se": 4.1,
+        "Si": 4.1,
+        "Br": 4.1,
+        "Fe": 4.2,
+        "Co": 4.2,
+        "Cr": 4.2,
+        "Ni": 4.2,
+        "Ge": 4.2,
+        "Ga": 4.3,
+        "As": 4.3,
+        "Cu": 4.3,
+        "V": 4.3,
+        "Ti": 4.4,
+        "Zn": 4.4,
+        "Ru": 4.4,
+        "Os": 4.4,
+        "Tc": 4.5,
+        "Rh": 4.5,
+        "Mo": 4.5,
+        "Ir": 4.5,
+        "Re": 4.5,
+        "W": 4.5,
+        "Pd": 4.5,
+        "Pt": 4.6,
+        "I": 4.6,
+        "Al": 4.6,
+        "Nb": 4.6,
+        "Ta": 4.6,
+        "Sn": 4.6,
+        "Te": 4.6,
+        "He": 4.6,
+        "Au": 4.7,
+        "Ag": 4.7,
+        "Sb": 4.7,
+        "Cd": 4.8,
+        "Li": 4.8,
+        "Ne": 4.8,
+        "Bi": 4.8,
+        "Hf": 4.9,
+        "Mg": 4.9,
+        "Zr": 4.9,
+        "Sc": 5.0,
+        "Po": 5.0,
+        "Ce": 5.1,
+        "In": 5.1,
+        "Lu": 5.2,
+        "Tm": 5.2,
+        "Er": 5.2,
+        "Ho": 5.3,
+        "Y": 5.3,
+        "Dy": 5.3,
+        "Tl": 5.3,
+        "Hg": 5.3,
+        "Tb": 5.3,
+        "Pb": 5.3,
+        "Gd": 5.3,
+        "Sm": 5.4,
+        "Pm": 5.4,
+        "Nd": 5.4,
+        "Pr": 5.5,
+        "La": 5.5,
+        "Na": 5.5,
+        "Yb": 5.6,
+        "Ca": 5.6,
+        "Eu": 5.7,
+        "Ar": 5.7,
+        "Sr": 6.0,
+        "Ba": 6.1,
+        "Ra": 6.3,
+        "Kr": 6.3,
+        "K": 6.5,
+        "Xe": 6.6,
+        "Rb": 6.8,
+        "Fr": 7.0,
+        "Cs": 7.2,
+        "Rn": 7.4,
+    },
+}
+
+
+def process_cutoff_dict(pair_cutoff_map: str | dict, element_map: dict):
+    """
+
+    Expand user defined cutoff_dict (cut_dict={"AlLi":1}) into dict of tuples -> float
+    Example: cut_dict={"AlLi":1}
+    """
+
+    # to prevent side effects, work on copy of pair_cutoff_map:
+    if isinstance(pair_cutoff_map, dict):
+        pair_cutoff_map = pair_cutoff_map.copy()
+
+    # algorithmically re-expand cutoff dict
+    all_elements = sorted(set(element_map.keys()))
+    if isinstance(pair_cutoff_map, str) and pair_cutoff_map in CUTOFF_PRESETS:
+        pair_cutoff_map = CUTOFF_PRESETS[pair_cutoff_map]
+        pair_cutoff_map = {
+            k: v for k, v in pair_cutoff_map.items() if k in all_elements
+        }
+        binary_cutoff_dict = {}
+
+        for e1, r1 in pair_cutoff_map.items():
+            binary_cutoff_dict[(e1, e1)] = r1
+            for e2, r2 in pair_cutoff_map.items():
+                binary_cutoff_dict[(e1, e2)] = (r1 + r2) / 2
+
+        binary_cutoff_dict = {"".join(k): v for k, v in binary_cutoff_dict.items()}
+
+        pair_cutoff_map = binary_cutoff_dict
+
+    # pre-expand "*" to all elements:
+    upd_cutoff_dict = {}
+    key_to_drop = []
+    for k, v in pair_cutoff_map.items():
+        if "*" in k:
+            assert (
+                all_elements is not None
+            ), f"Can not expand * in {k} if :elements: is not provided"
+            for e in all_elements:
+                new_k = k.replace("*", str(e))
+                upd_cutoff_dict[new_k] = v
+            key_to_drop.append(k)
+    for k in key_to_drop:
+        del pair_cutoff_map[k]
+    # upd_cutoff_dict.update(cutoff_dict)
+    pair_cutoff_map.update(upd_cutoff_dict)
+
+    pattern = re.compile(r"[A-Z][a-z]*")
+
+    def extract_element_pairs_from_str(s):
+        if isinstance(s, str):
+            res = tuple(pattern.findall(s))
+            if len(res) == 1:
+                res = (res[0], res[0])
+            return res
+        elif isinstance(s, tuple):
+            assert len(s) == 2
+            assert isinstance(s[0], str)
+            assert isinstance(s[1], str)
+            return s
+
+    cut_dict = {
+        extract_element_pairs_from_str(k): v for k, v in pair_cutoff_map.items()
+    }
+
+    #
+    sym_upd_cut_d = {}
+    for (e1, e2), v in cut_dict.items():
+        sym_upd_cut_d[(e2, e1)] = v
+    cut_dict.update(sym_upd_cut_d)
+
+    # ensure that only elements from element_map are in cut_dict
+    cut_dict = {
+        (e1, e2): v
+        for (e1, e2), v in cut_dict.items()
+        if e1 in element_map and e2 in element_map
+    }
+
+    return cut_dict
+
+
+default_input_dict = {
+    "cutoff": 6,
+    "seed": 1,
+    "data": {
+        "filename": "path",
+        "test_filename": "path",
+        "reference_energy": 0.0,
+        "save_dataset": False,
+    },
+    "potential": {"preset": "GRACE_1L", "scale": False, "shift": False},
+    "fit": {
+        "loss": {
+            "energy": {"type": "square", "weight": 1.0},
+            "forces": {"type": "square", "weight": 5.0},
+        },
+        "maxiter": 500,
+        "optimizer": "Adam",
+        "opt_params": {
+            "learning_rate": 0.01,
+            "amsgrad": True,
+            "use_ema": True,
+            "ema_momentum": 0.99,
+            "weight_decay": None,
+            "clipvalue": 1.0,
+        },
+        "learning_rate_reduction": {
+            "patience": 5,
+            "factor": 0.98,
+            "min": 0.0005,
+            "stop_at_min": False,
+        },
+        "loss_norm_by_batch_size": True,
+        "batch_size": 20,
+        "test_batch_size": 200,
+        "jit_compile": True,
+        "train_max_n_buckets": 8,
+        "test_max_n_buckets": 2,
+        "progressbar": True,
+        "train_shuffle": True,
+    },
+}

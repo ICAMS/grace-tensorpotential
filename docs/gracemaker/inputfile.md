@@ -1,56 +1,59 @@
-## Input file
 
-Create `input.yaml` file
+# Input file `input.yaml`
 
-```yaml
+Example of `input.yaml` can be found in `examples/grace` folder
+
+```{ .yaml }
 seed: 42
 cutoff: 6
+
+# cutoff_dict: {Mo: 4, MoNb: 3, W: 5, Ta*: 7 } ## Defining cutoff for each bond type separately, used by certain models
+## possible defaults: DEFAULT_CUTOFF_1L, DEFAULT_CUTOFF_2L
+# use_per_specie_n_nei: False
 
 data:
   filename: "/path/to/train.pckl.gzip"
   #  train_size: 100
   test_filename: "/path/to/test.pckl.gzip"
-  #  test_size: 0.05 # 50
-  # reference_energy: 0 
+  #  test_size: 0.05 # 
+  reference_energy: 0 
   # reference_energy: {Al: -1.23, Li: -3.56}
   # save_dataset: False # default is True
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
-
+  # max_workers: 6 # for parallel data builder
+  
 potential:
   #  elements: ["C", "H", "O"] # If not provided - determined automatically from data
-  preset: "MOD_ACE" # MOD_ACE, LINEAR, FS, MLP, GRACE, GRACE_MD17, GRACE_CE, GRACE_1LAYER, GRACE_N
+  preset: "GRACE_1LAYER" # FS, GRACE_1LAYER, GRACE_2LAYER
 #  custom: model.custom_model # custom model from model.py file, function custom_model
-#  kwargs: {n_rad_max: 16}  # kw-arguments that will be passed to preset or custom function
+#  kwargs: {n_rad_max: 16}  # kw-arguments that will be passed to preset or custom model
+
+#  custom ZBL core repulsion for model:  kwargs: {zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }}
 
 #  filename: model.yaml # configuration (WITHOUT weights!) of the model
-#  shift: True
-#  scale: True
-#  float_dtype: float64 # float64, float32, tfloat32
+#  shift: False # True/False
+#  scale: False # False/True or float 
+#  float_dtype: float64 # float64, float32
 
 fit:
   #  strategy: mirrored # or -m flag
 
   loss: {
-    energy: { weight: 1, }, # or { type: huber, weight: 1, delta: 0.01 } #   normalize_by_samples: True
-    forces: { weight: 5. }, # or type: square and no delta #   normalize_by_samples: True
-#    stress: { weight: 0.001},
+    energy: { type: square, weight: 1, }, # or { type: huber, weight: 1, delta: 0.01 } 
+    forces: { type: huber, weight: 5., delta: 0.1 }, # or type: square and no delta 
+#    stress: { type: square, weight: 1.},
     
-#    switch: { after_iter: 1,
-#              energy: { weight: 10.0 }, 
-#              forces: { weight: 100.0 }, 
+#    switch: { after_iter: 10,
+#              energy: { weight: 5.0 }, 
+#              forces: { weight: 2.0 }, 
 #              stress: {weight: 0.001},
 #               learning_rate: 0.001}
     
    # l2_reg: 1.0e-10
   }
-  
-  # normalize_weights: True ## norm per-sample weights to sum-up to one
-  # normalize_force_per_structure: True ## force-weights is divided by number of atoms
-  
-## Adaptive loss change, not efficient, will be removed
-#  adaptive_loss_weights: {beta: 1.0,  freq: 5, factor: 1.0 }
-  
-## energy based weighting  
+ 
+## Uniform weighting is used if not specified
+## Energy based weighting can be used as:  
 #  weighting: {type: energy_based}  # the simplest default
   
 ## OR more detailed config:
@@ -76,42 +79,49 @@ fit:
 #    reftype: all,
 #    ## random number seed
 #    seed: 42}
-  
-  # OLD-STYLE
-  #energy_loss_weight: 1
-  #forces_loss_weight: 100.0
 
-  maxiter: 1500 # Number of iterations
+  maxiter: 500 # Max number of iterations
 
-  # OLD-STYLE
-  #  loss_weights_switch: 100
-  #  energy_loss_weight_2: 100
-  #  forces_loss_weight_2: 10.0
 
   optimizer: Adam
-  opt_params: { learning_rate: 0.01, amsgrad: True, use_ema: True }
+  opt_params: { learning_rate: 0.01, amsgrad: True, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipvalue: 1.0}
   
   # for learning-rate reduction
-  learning_rate_reduction: { patience: 5, factor: 0.8, min: 1.0e-3, stop_at_min: False, resume_lr: True, } #  loss_explosion_threshold: 2
+  learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, } 
 
+  ## Other optimizer option
   #  optimizer: L-BFGS-B
   #  opt_params: { "maxcor": 100, "maxls": 20 }
 
   # compute_convex_hull: False
-  batch_size: 10 # Important hyperparameter for Adam and irrelevant (but must be) for L-BFGS-B
-  test_batch_size: 20 # test batch size (optional)
+  batch_size: 32 # Important hyperparameter for Adam and irrelevant (but must be) for L-BFGS-B
+  test_batch_size: 200 # test batch size (optional)
   jit_compile: True
 
-  # To use jit_compile efficiently, data must be padded.
-  # Bucket is group of batches padded to the same shape
-  train_max_n_buckets: 5 # max number of buckets (group of batches of same shape) in train set  
-  test_max_n_buckets: 1 # same for test
+  # eval_init_stats: False  ## Compute train metrics before fitting 
+  
+  ## To use jit_compile efficiently, data must be padded.
+  ## Bucket is a group of batches padded to the same shape
+  train_max_n_buckets: 10  ## max number of buckets in train set  
+  test_max_n_buckets: 3  ## same for test
 
   checkpoint_freq: 10 # frequency for **REGULAR** checkpoints. 
-# save_all_regular_checkpoints: True # to store ALL regular checkpoints
+#  save_all_regular_checkpoints: False # to store ALL regular checkpoints
 #  progressbar: True # show batch-evaluation progress bar
 #  train_shuffle: True # shuffle train batches on every epoch
 
-# loss_norm_by_batch_size: False # normalization of total loss by global batch size (for backward compat)
-
+## technical parameters for normalization
+#  loss_norm_by_batch_size: False # normalization of total loss by global batch size (for backward compat)
+#  normalize_weights: True ## norm per-sample weights to sum-up to one
+#  normalize_force_per_structure: True ## force-weights is divided by number of atoms
 ```
+
+This is complete list of parameters. For the most of practical purposes
+it is sufficient to generate input file with `gracemaker -t` utility.   
+
+## (TODO) Checkpointing
+
+Use `checkpoint_freq` to specify how frequently save regular checkpoints (only last state will be saved into
+checkpoint).
+If you want to keep all regular checkpoints, then add flag `save_all_regular_checkpoints: True`
+

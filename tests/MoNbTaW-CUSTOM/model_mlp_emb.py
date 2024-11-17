@@ -21,6 +21,7 @@ def custom_model(
     embedding_size=3,
     n_mlp_dens=2,
     n_rad_func=2,
+    **kwargs
 ):
     num_elements = len(element_map)
     with InstructionManager() as instructor:

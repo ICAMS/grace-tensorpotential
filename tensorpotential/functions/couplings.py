@@ -1,4 +1,5 @@
-import dataclasses
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
@@ -623,9 +624,7 @@ def real_coupling_metainformation(
         dl.append(history_drop_list)
 
     # if history_drop_list is not None:
-    coupled_dat = [
-        dat for dat in coupled_dat if (dat[2], dat[0]) not in dl
-    ]
+    coupled_dat = [dat for dat in coupled_dat if (dat[2], dat[0]) not in dl]
 
     cdf = pd.DataFrame(
         coupled_dat,

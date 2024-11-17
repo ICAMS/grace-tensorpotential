@@ -21,13 +21,16 @@ Project GRACEmaker is a heavily modified and in large parts rewritten version of
     Utilizes TensorFlow library to run simulations in LAMMPS or in python.
     Best applied for simulating molecular systems and materials with up to hundred thousand of atoms.
 
+# What's next ?
+* [Installation](gracemaker/install)
+* [Quick start](gracemaker/quickstart)
+* [Tutorials](gracemaker/tutorials)
+* [FAQ](gracemaker/faq)
 
 # Documentation
 
-Please use the top navigation bar to explore:
+Please use the navigation bar on the left to explore documentation
 
-* [Installation](gracemaker/install.md)
-* [Quick start](gracemaker/quickstart.md)
 
 # Citation
 

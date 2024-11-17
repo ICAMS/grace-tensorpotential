@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import gc
 import logging
@@ -6,8 +8,9 @@ import os
 import sys
 import yaml
 
-from ase.data import chemical_symbols
+import tensorflow as tf
 
+from ase.data import chemical_symbols
 
 from tensorpotential.cli.data import load_and_prepare_datasets
 from tensorpotential.cli.train import try_load_checkpoint, train_adam, train_bfgs
@@ -16,7 +19,9 @@ from tensorpotential.cli.prepare import (
     construct_model,
     convert_to_tensors_for_model,
     construct_model_functions,
+    generate_template_input,
 )
+from tensorpotential import constants as tc
 from tensorpotential.loss import *
 from tensorpotential.metrics import *
 from tensorpotential.instructions.base import (
@@ -104,6 +109,14 @@ def build_parser():
     )
 
     parser.add_argument(
+        "-js",
+        "--just-save",
+        action="store_true",
+        default=False,
+        help="Export model as TF saved model from config/preset directly, without instructions .yaml",
+    )
+
+    parser.add_argument(
         "-sf",
         "--save--fs",
         action="store_true",
@@ -138,6 +151,16 @@ def build_parser():
         default=False,
         help="Check model consistency, without performing fit",
     )
+
+    parser.add_argument(
+        "-t",
+        "--template",
+        help="Generate a template 'input.yaml' file by dialog",
+        dest="template",
+        action="store_true",
+        default=False,
+    )
+
     return parser
 
 
@@ -149,9 +172,13 @@ def main(argv=None, strategy=None, strategy_desc=""):
     args_parse = parser.parse_args(argv)
     input_yaml_filename = args_parse.input
 
+    if args_parse.template:
+        generate_template_input()
+
     log.info("=" * 40)
     log.info(" " * 12 + "Start GRACEmaker")
     log.info("=" * 40)
+    log.info(f"Tensorflow version: {tf.__version__}")
     log.info("Loading {}... ".format(input_yaml_filename))
     with open(input_yaml_filename) as f:
         args_yaml = yaml.safe_load(f)
@@ -234,16 +261,24 @@ def main(argv=None, strategy=None, strategy_desc=""):
     if args_parse.check_model:
         element_map = {s: i for i, s in enumerate(chemical_symbols[1:90])}
         log.info(f"Checking model with {len(element_map)} elements")
-        pot = construct_model(potential_config, element_map=element_map, rcut=rcut)
-        model = TPModel(
-            pot,
+        cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+        if cut_dict:
+            log.info(f"User-defined cutoff dict: {cut_dict}")
+        pot = construct_model(
+            potential_config, element_map=element_map, rcut=rcut, cutoff_dict=cut_dict
         )
+        model = TPModel(pot)
         model.build(float_dtype=float_dtype)
         init_flat_vars = model.get_flat_trainable_variables()
         log.info("Model is constructed")
         log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
         log.info(f"Exiting...")
         sys.exit(0)
+
+    # loss function spec from fit_config
+    model_fns = construct_model_functions(fit_config)
+    log.info(f"Loss function: {model_fns.loss_fn}")
+
     # no need to perform expensive data processing if mode
     if not args_parse.save_model:
         # TODO: create a class ?
@@ -261,26 +296,51 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
     potential_file_name = args_parse.potential or potential_config.get("filename")
 
-    if args_parse.save_model:
-        potential_file_name = potential_file_name or MODEL_CONFIG_YAML
-
-    if potential_file_name and os.path.isfile(potential_file_name):
-        log.info(f"Loading model config from `{potential_file_name}`")
-        pot = load_instructions_list(potential_file_name)
-    elif not args_parse.save_model:
-        pot = construct_model(
-            potential_config, element_map=element_map, rcut=rcut, **data_stats
+    if args_parse.just_save:
+        (
+            train_data,
+            test_data,
+            element_map,
+            data_stats,
+            train_grouping_df,
+            test_grouping_df,
+        ) = load_and_prepare_datasets(
+            args_yaml, batch_size, test_batch_size=test_batch_size, seed=seed
         )
-        potential_file_name = MODEL_CONFIG_YAML
-        log.info(f"Saving model config to {potential_file_name}")
-        save_instructions_list(potential_file_name, pot)
-    else:  # save model, but initialized from scratch
-        # TODO: should be possible
-        raise ValueError("Cannot save just-initialized model")
+        has_test_set = test_data is not None
+        cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+        pot = construct_model(
+            potential_config,
+            element_map=element_map,
+            rcut=rcut,
+            cutoff_dict=cut_dict,
+            **data_stats,
+        )
+    else:
+        if args_parse.save_model:
+            potential_file_name = potential_file_name or MODEL_CONFIG_YAML
 
-    # loss function spec from fit_config
-    model_fns = construct_model_functions(fit_config)
-    log.info(f"Loss function: {model_fns.loss_fn}")
+        if potential_file_name and os.path.isfile(potential_file_name):
+            log.info(f"Loading model config from `{potential_file_name}`")
+            pot = load_instructions_list(potential_file_name)
+        elif not args_parse.save_model:
+            cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+            if cut_dict:
+                log.info(f"User-defined cutoff dict: {cut_dict}")
+            pot = construct_model(
+                potential_config,
+                element_map=element_map,
+                rcut=rcut,
+                cutoff_dict=cut_dict,
+                **data_stats,
+            )
+            potential_file_name = MODEL_CONFIG_YAML
+            log.info(f"Saving model config to {potential_file_name}")
+            save_instructions_list(potential_file_name, pot)
+        else:  # save model, but initialized from scratch
+            # TODO: should be possible
+            raise ValueError("Cannot save just-initialized model")
+
     if args_parse.eager:
         log.warning("Eager execution")
 
@@ -325,7 +385,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
             log.info("Exporting FS-model done")
         log.info("Saving model to `saved_model` and exit.")
         # TODO: first save with jit will convert function to JIT forever!
-        tp.save_model("saved_model_no_jit", jit_compile=False)  # first - no-jit
+        # tp.save_model("saved_model_no_jit", jit_compile=False)  # first - no-jit
         tp.save_model("saved_model", jit_compile=True)
         sys.exit(0)
 
@@ -347,7 +407,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
         log.info(f"Saving model to `{name}`")
         #  first save with no-jit, otherwise it will convert function to JIT forever!
-        tp.save_model(name + "_no_jit", jit_compile=False)  # first - no-jit
+        # tp.save_model(name + "_no_jit", jit_compile=False)  # first - no-jit
         tp.save_model(name, jit_compile=True)
 
     log.info("Convert data to tensors")
@@ -358,6 +418,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
     del test_data
     gc.collect()
 
+    compute_init_stats = args_yaml[tc.INPUT_FIT_SECTION].get("eval_init_stats", False)
     #  Run training
     try:
         if opt in ["L-BFGS-B", "BFGS"]:
@@ -371,6 +432,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 seed=seed,
                 train_grouping_df=train_grouping_df,
                 test_grouping_df=test_grouping_df,
+                compute_init_stats=compute_init_stats,
             )
         elif opt == "Adam":
             log.info("Start Adam optimization")
@@ -383,6 +445,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 seed=seed,
                 train_grouping_df=train_grouping_df,
                 test_grouping_df=test_grouping_df,
+                compute_init_stats=compute_init_stats,
             )
         else:
             raise ValueError(

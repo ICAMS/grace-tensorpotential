@@ -7,16 +7,34 @@ theme:
     logo: material/library
   features:
     - content.code.copy
-    - navigation.tabs
-    - navigation.sections
-    - navigation.top  # Keep the top navigation bar fixed
+#    - navigation.tabs # navigation on the top
+    - navigation.sections   # Ensures that nested items are grouped in sections
+    - navigation.expand     # Allows for expandable sections in the sidebar
+    - navigation.tracking   # Highlights the active section in the sidebar
   palette:
-    - scheme: default
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
       primary: "teal"
       accent: "indigo"
-    - scheme: slate
-      primary: "indigo"
-      accent: "pink"
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: "teal"
+      accent: "indigo"
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
 
 
 plugins:
@@ -31,8 +49,9 @@ nav:
   - Input file: gracemaker/inputfile.md
   - CLI: gracemaker/cli.md
   - Utilities: gracemaker/utilities.md
-  - FAQs: gracemaker/faq.md
+  - Foundation models: gracemaker/foundation.md
   - Tutorials: gracemaker/tutorials.md
+  - FAQs: gracemaker/faq.md
 
 
 markdown_extensions:
@@ -48,5 +67,5 @@ extra_javascript:
   - https://polyfill.io/v3/polyfill.min.js?features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
-extra_css:
-  - stylesheets/extra.css
+#extra_css:
+#  - stylesheets/extra.css
