@@ -1,15 +1,18 @@
-# Tutorials
-Prerequisites:
+# Tutorials  
 
-* Linux or MacOS  (for latter you probably would like to install custom `tensorflow`).  
-For WSL on Windows, no GPU will be supported.
-* Graphical card (GPU) is preferential, multicore CPU will be much slower, but still ok.
-* Installed `gracemaker` (see [Installation](../install))
+### Prerequisites  
 
-Materials for these tutorials can be found on [Github](https://github.com/ICAMS/grace-tutorial)
+- **Operating System**: Linux or macOS (on macOS, you may need to install a custom `tensorflow`).  
+  - **Note for Windows**: If using WSL, GPU support is not available.  
+- **Hardware**: A GPU is highly recommended. Multicore CPUs are significantly slower but still functional.  
+- **Software**: `gracemaker` must be installed (see [Installation](../install)).  
+
+### Tutorial Materials  
+
+All materials for these tutorials are available on [GitHub](https://github.com/ICAMS/grace-tutorial). Clone the repository with:  
 ```bash
 git clone --depth=1 https://github.com/ICAMS/grace-tutorial
-```
+```  
 
 ## Tutorial 1: Parameterization of 2-layer GRACE for Al-Li
 Working folder for this tutorial is `1-AlLi-GRACE-2LAYER`
@@ -60,14 +63,22 @@ You have to enter following information:
 This will produce `input.yaml` file, which you can further check and tune.
 
 #### 1.2.2. Run gracemaker
-Now, you can run model parameterization with
+Now, you can run the model parameterization with:  
 ```bash
-gracemaker input.yaml
-```
-After preprocessing and data preparation (i.e. building neighbour lists), parameterization process will start.
-First epoch (or iteration) will take some time, because of JIT compilation for each train and test bucket. 
+gracemaker
+```  
 
-It will take some time, if you don't want to wait, you can terminate the process  manually (`Ctrl+Z` and `kill %1`)
+During this process:  
+- **Preprocessing and Data Preparation**: Tasks such as building neighbor lists will be performed.  
+- **JIT Compilation**: The first epoch (or iteration) may take additional time due to JIT compilation for each training and testing bucket.  
+
+If you do not wish to wait, you can manually terminate the process: `Ctrl+Z` and `kill %1`  
+
+To create multiple models for an ensemble, run additional parameterizations with different seeds:  
+```bash
+gracemaker --seed 2
+gracemaker --seed 3
+```  
 
 #### 1.2.3. Analyze learning curves
 Check `1-AlLi-GRACE-2LAYER/1-fit/visualize_metrics.ipynb` Jupyter notebook to analyze learning curves
@@ -93,19 +104,25 @@ cd ../3-lammps/
 /path/to/lmp -in in.lammps
 ``` 
 
-In order to use GRACE potential in SavedModel format, we use following pair_style
-```
-pair_style grace  pad_verbose
-pair_coeff * * ../1-fit/seed/1/saved_model/  Al
-```
-where, we add `pad_verbose` option that will print more detailed information about padding.
-In this simulation  Al FCC supercell (with up to 100k atoms) will be run under NPT conditions at 300K and zero pressure.
-Simulation will run, first, for 20 steps to JIT-compile model and then for another 20 steps to measure execution time.
-If you run on A100 GPU, you can find one of the last lines:
+To use the GRACE potential in SavedModel format, the following `pair_style` should be used:  
+```bash
+pair_style grace pad_verbose
+pair_coeff * * ../1-fit/seed/1/saved_model/ Al
+```  
+
+- The `pad_verbose` option provides detailed information about padding during the simulation.  
+- In this example, an Al FCC supercell (up to 100k atoms) will be simulated under NPT conditions at 300K and zero pressure.  
+
+### Simulation Details  
+- The simulation will first run for **20 steps** to JIT-compile the model.  
+- Then, it will run for another **20 steps** to measure execution time.  
+
+For example, on an A100 GPU, one of the final output lines might be:  
 ```
 Loop time of 24.4206 on 1 procs for 20 steps with 108000 atoms
-```
-which mean that current model (GRACE-2LAYER, small) can run up to **100k atoms** with approx **11 mcs/atom** performance.
+```  
+
+This indicates that the current model (GRACE-2LAYER, small) achieves a performance of approximately **11 mcs/atom**, supporting simulations with up to **100k atoms**.  
 
 
 ---
@@ -157,16 +174,16 @@ You have to enter following information:
 * Enter weighting scheme type ... : \[ENTER\]
 * Enter batch size : \[ENTER\]
 
-#### 2.1.2. Run gracemaker
-Now, you can run model parameterization with
+#### 2.1.2. Run `gracemaker`
+
+Now, you can run the model parameterization with:  
 ```bash
 gracemaker input.yaml
-```
-During the run, at the beginning, you will probably see multiple messages, starting with `ptxas warning :` or similar.
-This demonstrates that JIT compilation works (for each train and test bucket) and is completely fine. 
-These messages will go away after first iteration/epoch. However, you can try to [reduce](../faq/#how-to-reduce-verbosity-level-of-tensorflow) verbosity level of
-TensorFlow. 
-Now, you can either wait until completion of the process, or terminate it manually (`Ctrl+Z` and `kill %1`)
+```  
+
+During the run, you may notice multiple warning messages starting with `ptxas warning:` or similar. These messages indicate that JIT compilation is occurring for each training and testing bucket, and they are normal. They will disappear after the first iteration/epoch.  
+
+If you prefer, you can [reduce](../faq/#how-to-reduce-tensorflow-verbosity-level) the verbosity level of TensorFlow to minimize these messages.  
 
 #### 2.1.3. (optional) Manual continuation of the fit with new loss function
 
@@ -199,80 +216,129 @@ fit:
   learning_rate_reduction: { ..., resume_lr: False} # overwrite learning_rate from checkpoint with new 1e-3 value
 
 ```
-
-* run gracemaker with `-r` flag (to read previous best-test-loss checkpoint):
+- Run `gracemaker` with the `-r` flag to read the previous best-test-loss checkpoint:  
 ```bash
 gracemaker -r
-```
+```  
 
-NOTE! You can switch energy/forces/stress weights in loss function in one gracemaker run.
-For that you need to provide `input.yaml::fit::loss::switch` option manually (see [here](../inputfile/#input-file-inputyaml) for more details) or
-provide non-empty answer to `Switch loss function E:F:S...` question of `gracemaker -t` dialog.
+**NOTE**: You can switch energy/forces/stress weights in the loss function during a single `gracemaker` run. To do this, you need to manually provide the `input.yaml::fit::loss::switch` option (see [here](../inputfile/#input-file-inputyaml) for more details) or provide a non-empty answer to the `Switch loss function E:F:S...` question in the `gracemaker -t` dialog.  
 
-### 2.2. Save/export model
-In order to export the model into both TensorFlow's SavedModel and GRACE/FS YAML formats, do
+### 2.2. Save/Export Model
+
+To export the model into both TensorFlow's SavedModel and GRACE/FS YAML formats, run:  
 ```bash
 gracemaker -r -s -sf
-``` 
-Check [here](../quickstart/#gracefs) for more details.
+```  
 
-### 2.3. Active set construction
-In order to construct active set (ASI), that will be used for uncertainty indication, run following commands (more details [here](../quickstart/#build-active-set-for-gracefs-only))
+For more details, check [here](../quickstart/#gracefs).
+
+### 2.3. Active Set Construction
+To construct the active set (ASI) for uncertainty indication, run the following commands (more details [here](../quickstart/#build-active-set-for-gracefs-only)):  
 ```bash
 cd seed/1
 pace_activeset -d training_set.pkl.gz FS_model.yaml
 ```
 
-### 2.4. Usage of the model
+### 2.4. Usage of the Model
 
-#### 2.4.1. Python/ASE
-Please, check Jupyter notebook `2-HEA25S-GRACE-FS/HEA25-GRACE-FS.ipynb`
+#### 2.4.1. Python/ASE  
+Please refer to the Jupyter notebook `2-HEA25S-GRACE-FS/HEA25-GRACE-FS.ipynb` for usage details.
 
-#### 2.4.2. LAMMPS
-You need LAMMPS with GRACE/FS be compiled (check [here](../install/#lammps-with-grace))
+#### 2.4.2. LAMMPS  
+You need to compile LAMMPS with GRACE/FS (see [here](../install/#lammps-with-grace) for instructions).  
+
 ```bash
 cd 3-lammps/grace-fs-with-extrapolation-grade/
 mpirun -np 2 /path/to/lmp -in in.lammps
-``` 
-In this simulation  FCC(111) surface slab will be run under NPT conditions, with increasing temperature from 500K to 5000K.
-Extrapolation grade will be computed for each atom, and current configuration will be saved to `extrapolative_structures.dump` 
-if max gamma > 1.5.
+```  
 
-In order to select most representative structures for following DFT calculations based on D-optimality, use `pace_select` utility:
+In this simulation, the FCC(111) surface slab will be run under NPT conditions with an increasing temperature from 500K to 5000K. The extrapolation grade will be computed for each atom, and the configuration will be saved to `extrapolative_structures.dump` if the max gamma > 1.5.
+
+To select the most representative structures for DFT calculations based on D-optimality, use the `pace_select` utility:  
+
 ```bash
 pace_select extrapolative_structures.dump  -p ../../1-fit/seed/1/FS_model.yaml -a ../../1-fit/seed/1/FS_model.asi -e "Au"
-```
-Find more [here](https://pacemaker.readthedocs.io/en/latest/pacemaker/utilities/#d-optimality_structure_selection).
+```  
+
+Find more details [here](https://pacemaker.readthedocs.io/en/latest/pacemaker/utilities/#d-optimality_structure_selection).
 
 ---
 
-## Tutorial 3: Usage of universal machine learning interatomic potential
+## Tutorial 3: Using Universal Machine Learning Interatomic Potentials
 
-Universal machine learning interatomic potentials, also called foundation models, are models that support wide range of 
-elements, or even (almost) whole periodic table. These models are parameterized on large reference DFT datasets, such as 
-[Materials Project](https://next-gen.materialsproject.org/) or [Alexandria](https://alexandria.icams.rub.de/).
-Some of these models were tested for high-throughput materials discovery, see [Matbench Discovery](https://matbench-discovery.materialsproject.org/).
-We parameterize few GRACE-1LAYER/2LAYER on MPTraj dataset (relaxation trajectories from Materials Project).
+Universal machine learning interatomic potentials, also known as foundation models, are models capable of supporting a wide range of elements or even nearly the entire periodic table. These models are parameterized using large reference DFT datasets, such as the [Materials Project](https://next-gen.materialsproject.org/) or [Alexandria](https://alexandria.icams.rub.de/). Some of these models have been tested for high-throughput materials discovery, as demonstrated in [Matbench Discovery](https://matbench-discovery.materialsproject.org/). 
 
-### 3.1. Overview and download 
+We have parameterized several GRACE-1LAYER and GRACE-2LAYER models on the MPTraj dataset (relaxation trajectories from the Materials Project).
 
-You can check available GRACE foundation models with
+### 3.1. Overview and Download 
+
+You can view the available GRACE foundation models using the command:
 ```bash
 grace_models list
 ```
-and download given model with `grace_models download MP_GRACE_1L_r6_4Nov2024` or all models with `grace_models download all`. 
+To download a specific model, use:
+```bash
+grace_models download MP_GRACE_1L_r6_4Nov2024
+```
+To download all models at once, use:
+```bash
+grace_models download all
+```
 
-### 3.2. Use in ASE
-Check `3-foundation-models/1-python-ase/using-grace-fm.ipynb` Jupyter notebook.
+### 3.2. Usage in ASE
+To load a model in ASE, use the following function:
+```python
+from tensorpotential.calculator.foundation_models import grace_fm, GRACEModels
 
-### 3.3. Use in LAMMPS
-  *  Check folder `3-foundation-models/2-lammps/1-Pt-surface` for simulation of oxygen molecule on Pt (100) surface.
+calc = grace_fm("MP_GRACE_1L_r6_4Nov2024",
+                pad_atoms_number=2,
+                pad_neighbors_fraction=0.05, 
+                min_dist=0.5)
+# or 
+calc = grace_fm(GRACEModels.MP_GRACE_1L_r6_4Nov2024) # for better code completion
+```
+Note that the additional parameters are optional. Default values are provided for `pad_atoms_number` and `pad_neighbors_fraction`.
 
-  *  Check folder `3-foundation-models/2-lammps/2-ethanol-water` for  simulation of ethanol and water. (TODO: check mpi)
+For more details, refer to the Jupyter notebook `3-foundation-models/1-python-ase/using-grace-fm.ipynb`.
 
+### 3.3. Usage in LAMMPS
+The usage of foundation models in LAMMPS is the same as for custom-parameterized GRACE potentials. Examples are provided in the following directories:
+
+* `3-foundation-models/2-lammps/1-Pt-surface`: Simulation of an oxygen molecule on a Pt (100) surface with GRACE-2LAYER.
+* `3-foundation-models/2-lammps/2-ethanol-water`: Simulation of ethanol and water with GRACE-1LAYER.
+
+Note: The currently available GRACE-1LAYER models do not support MPI parallelization. Updated models with MPI support will be released in the future.
 
 ---
 
-[//]: # (## 4. &#40;work in progress&#41; Fine-tuning of GRACE models)
+## Tutorial 4. Fine-Tuning Foundation GRACE Models.
 
-[//]: # (work in progress, will be available later)
+Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
+
+
+
+
+=======
+
+Here’s an edited version with improved grammar and style:
+
+---
+
+### 3.3. Usage in LAMMPS
+
+The usage of foundation models in LAMMPS is the same as for custom-parameterized GRACE potentials. Examples are provided in the following directories:
+
+- `3-foundation-models/2-lammps/1-Pt-surface`: Simulation of an oxygen molecule on a Pt (100) surface.
+- `3-foundation-models/2-lammps/2-ethanol-water`: Simulation of ethanol and water. 
+
+**Note:** The currently available GRACE-1LAYER models do not support MPI parallelization. Updated models with MPI support will be released in the future.
+
+---
+
+## Tutorial 4: Fine-Tuning Foundation GRACE Models
+
+Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
+
+---
+
+This version improves clarity, grammar, and consistency while ensuring readability. Let me know if further adjustments are needed!

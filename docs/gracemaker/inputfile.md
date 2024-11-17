@@ -118,10 +118,3 @@ fit:
 
 This is complete list of parameters. For the most of practical purposes
 it is sufficient to generate input file with `gracemaker -t` utility.   
-
-## (TODO) Checkpointing
-
-Use `checkpoint_freq` to specify how frequently save regular checkpoints (only last state will be saved into
-checkpoint).
-If you want to keep all regular checkpoints, then add flag `save_all_regular_checkpoints: True`
-

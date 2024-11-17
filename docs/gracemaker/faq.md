@@ -1,54 +1,94 @@
-## How to perform multi-GPU fit ?
+## How to Continue a Current Fit?
 
+- Run `gracemaker -r` in the folder of the original fit to restart from the previous best-test-loss checkpoint.  
+- Run `gracemaker -rl` in the folder of the original fit to restart from the latest checkpoint.  
+- To continue in a new folder, copy `seed/{number}/checkpoints` and `seed/{number}/model.yaml` into the new folder.  
 
+---
 
-## How to restart/continue fit ?
+## How to Save Regular Checkpoints?
 
-Simply run `gracemaker -r` in the folder of the original fit 
+Use `checkpoint_freq` to specify how frequently to save regular checkpoints (only the last state will be saved).  
+To keep all regular checkpoints, add the flag `input.yaml::fit::save_all_regular_checkpoints: True`.  
 
-## How to fit and export GRACE/FS model? 
+---
 
-## What is buckets  (`train_max_n_buckets` and `test_max_n_buckets`) ?
+## Can I Have Different Cutoffs for Different Bond Types?
 
-GRACE models are JIT compiled which requires all batches to have the same size. This is achieved by padding. However,
-padding all batches to the identical dimensions might be inefficient. Instead, batches are
-split into buckets which are then padded. Parameters `train_max_n_buckets` and `test_max_n_buckets` determines
-maximum number of buckets for padding train and test data respectively. The more buckets there are the less padding
-is required. The optimal number of buckets can be estimated by looking at `[TRAIN] dataset stats:` log line,
-where the amount of padded neighbours is printed, i.e.
+Yes, you can specify bond-specific cutoffs using the `input.yaml::cutoff_dict` option. For example:  
+```yaml
+cutoff_dict: {Mo: 4, MoNb: 3, W: 5, Ta*: 7}
+```  
+This can be used alongside `input.yaml::cutoff`.  
+
+---
+
+## What Are Buckets (`train_max_n_buckets` and `test_max_n_buckets`)?
+
+GRACE models are JIT-compiled, which requires all batches to have the same size. This is achieved through padding. To improve efficiency, batches are split into buckets that are then padded.  
+
+The parameters `train_max_n_buckets` and `test_max_n_buckets` define the maximum number of buckets for padding training and testing data, respectively. More buckets reduce padding.  
+
+To estimate the optimal number of buckets, refer to the `[TRAIN] dataset stats:` log line, which shows padding information:  
 ```
- [TRAIN] dataset stats: num. batches: 18 | num. real structures: 576 (+2.78%) | num. real atoms: 10942 (+5.25%) | num. real neighbours: 292102 (+1.74%) 
-```
-Here it is only +1.74% padded neighbours. It is recommended to keep this number within 15%.
-Same applies for `[TEST] dataset stats`.
+[TRAIN] dataset stats: num. batches: 18 | num. real structures: 576 (+2.78%) | num. real atoms: 10942 (+5.25%) | num. real neighbours: 292102 (+1.74%)
+```  
+Here, the padding for neighbors is only +1.74%. It is recommended to keep this value below 15%. The same applies to `[TEST] dataset stats`.  
 
-## How to reduce verbosity level of TensorFlow ?
+---
+
+## How to Run a GRACE-1LAYER Model in Parallel Within LAMMPS?
+
+```bash
+mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
+```
+
+---
+
+## How to Evaluate Uncertainty Indication for GRACE Models?
+
+- **For all GRACE models:** Use naive ensembling (query-by-committee). Run parameterization with different seeds, e.g.,  
+  ```bash
+  gracemaker ... --seed 1
+  gracemaker ... --seed 2
+  ```
+  This generates multiple models in `seed/{number}/`. Use these models with the ASE calculator:  
+  ```python
+  from tensorpotential.calculator import TPCalculator
+
+  calc_ens = TPCalculator(model=[
+      "fit/seed/1/saved_model/",
+      "fit/seed/2/saved_model/",
+      "fit/seed/3/saved_model/",
+  ])
+
+  at.calc = calc_ens
+  at.get_potential_energy()
+
+  calc.results['energy_std']  # Standard deviation of total energy predictions
+  calc.results['forces_std']  # Standard deviation of forces predictions
+  calc.results['stress_std']  # Standard deviation of stress predictions
+  ```
+  
+- **For GRACE/FS models:** In addition to the ensembling method, use extrapolation grades based on D-optimality in [ASE](../quickstart/#gracefs_1) and [LAMMPS](../quickstart/#lammps-gracefs).  
+
+---
+
+## How to Perform Multi-GPU Fit?
+
+If you have a node with multiple GPUs, use the `gracemaker ... -m` option to enable data-parallel fitting. In this case, increase the batch size (global batch size).  
+
+---
+
+## How to Reduce TensorFlow Verbosity Level?
 
 ```python
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 ```
 
-or 
+or  
 
 ```bash
 export TF_CPP_MIN_LOG_LEVEL=3
-```
-
-## How to run GRACE-1LAYER model in parallel within LAMMPS?
-```bash
-TF_CPP_MIN_LOG_LEVEL=1 mpirun -np 4 --bind-to none  bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
-```
-
-
-## How to evaluate uncertainty indication for GRACE models ?
-TODO: Ensemble, with multiple models , provided to TPCalculator 
-
-## (TODO) Checkpointing
-
-Use `checkpoint_freq` to specify how frequently save regular checkpoints (only last state will be saved into
-checkpoint).
-If you want to keep all regular checkpoints, then add flag `save_all_regular_checkpoints: True`
-
-
-## (TODO) Single-GPU / Multi-GPU / Multi-worker modes
+```  

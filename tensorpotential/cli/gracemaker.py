@@ -318,7 +318,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
         )
     else:
         if args_parse.save_model:
-            potential_file_name = potential_file_name or MODEL_CONFIG_YAML
+            potential_file_name = potential_file_name or os.path.join(output_dir,MODEL_CONFIG_YAML)
 
         if potential_file_name and os.path.isfile(potential_file_name):
             log.info(f"Loading model config from `{potential_file_name}`")
@@ -334,7 +334,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 cutoff_dict=cut_dict,
                 **data_stats,
             )
-            potential_file_name = MODEL_CONFIG_YAML
+            potential_file_name = os.path.join(output_dir,MODEL_CONFIG_YAML)
             log.info(f"Saving model config to {potential_file_name}")
             save_instructions_list(potential_file_name, pot)
         else:  # save model, but initialized from scratch

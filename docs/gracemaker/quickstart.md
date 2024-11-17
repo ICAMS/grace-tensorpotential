@@ -87,8 +87,25 @@ Here `-r` flag stands for reading checkpoint with best test loss (usually, it is
 `-s` flag is for saving the model immediately (without running fit) into TensorFlow SavedModel format and `-sf` is for also saving into GRACE/FS YAML format.
 
 This will generate the `seed/1/FS_model.yaml` file, which can be used in [ASE](#gracefs) or [LAMMPS](#lammps-gracefs).
-_____
 
+---
+
+### Build Active Set (for GRACE/FS Only)
+
+For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
+Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
+
+To create active set, use the `pace_activeset` utility, following a process similar 
+to [ML-PACE](https://pacemaker.readthedocs.io/en/latest/pacemaker/active_learning/#extrapolation_grade_and_active_learning).
+
+Example:
+
+```bash
+cd seed/1
+pace_activeset -d training_set.pkl.gz FS_model.yaml
+```
+
+---
 
 ### Usage in ASE
 
@@ -126,28 +143,16 @@ If `min_dist` is given, calculator will raise an exception when it encounters a 
 
 **Note:** The `python-ace` package is required (see the [installation guide](../install/#gracefs-cpu)).
 
-To use the **GRACE/FS** calculator (with C++ implementations), use the following code:
+To use the **GRACE/FS** calculator (with C++ implementations), you need first build active set (see [here](#build-active-set-for-gracefs-only)) and then use the following code:
 
 ```python
 from pyace.asecalc import PyGRACEFSCalculator
 calc = PyGRACEFSCalculator("/path/to/FS_model.yaml")
 calc.set_active_set("/path/to/FS_model.asi")
-```
-___
 
-### Build Active Set (for GRACE/FS Only)
-
-For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
-Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
-
-To create active set, use the `pace_activeset` utility, following a process similar 
-to [ML-PACE](https://pacemaker.readthedocs.io/en/latest/pacemaker/active_learning/#extrapolation_grade_and_active_learning).
-
-Example:
-
-```bash
-cd seed/1
-pace_activeset -d training_set.pkl.gz FS_model.yaml
+at.calc = calc
+at.get_potential_energy()
+at.calc.results['gamma'] # per-atom extrapolation grades
 ```
 
 _____
