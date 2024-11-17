@@ -2,9 +2,7 @@
 
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
 
-Please see https://github.com/AntBoc/pace-tutorial-2024 for installation instructions and examples. 
-
-More complete documentation will be available soon.
+Please see [documentation](https://gracemaker.readthedocs.io/) for installation instructions and examples. 
 
 # Reference
 Please see 
