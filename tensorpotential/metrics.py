@@ -1,4 +1,6 @@
-from abc import ABC, abstractmethod
+from __future__ import annotations
+
+from abc import ABC
 
 import tensorflow as tf
 
@@ -108,18 +110,14 @@ class VirialMetrics(AbstractMetrics):
         )
 
         # reduce by [xx,yy,zz,xy,xz,yz] comps, /6 to normalize by 6 components
-        abs_v_reduce = (
-            tf.reduce_sum(tf.math.abs(delta_virials), axis=1, keepdims=True) / 6
-        )
-        abs_stress_reduce = (
-            tf.reduce_sum(tf.math.abs(delta_stresses), axis=1, keepdims=True) / 6
+        abs_v_reduce = tf.reduce_sum(tf.math.abs(delta_virials), axis=1, keepdims=True)
+        abs_stress_reduce = tf.reduce_sum(
+            tf.math.abs(delta_stresses), axis=1, keepdims=True
         )
 
         # reduce by [xx,yy,zz,xy,xz,yz] comps, /6 to normalize by 6 components
-        sqr_v_reduce = tf.reduce_sum((delta_virials / 6) ** 2, axis=1, keepdims=True)
-        sqr_stress_reduce = tf.reduce_sum(
-            (delta_stresses / 6) ** 2, axis=1, keepdims=True
-        )
+        sqr_v_reduce = tf.reduce_sum(delta_virials**2, axis=1, keepdims=True)
+        sqr_stress_reduce = tf.reduce_sum(delta_stresses**2, axis=1, keepdims=True)
 
         return {
             "abs/dv/per_struct": abs_v_reduce,
@@ -134,7 +132,6 @@ class ComputeMetrics:
         constants.DATA_STRUCTURE_ID: {"shape": [None, 1], "dtype": "int"},
     }
 
-    # TODO: It looks like it's impossible to compute only force/energy metrics, things go wrong further down the line
     def __init__(
         self,
         metrics: list[callable],

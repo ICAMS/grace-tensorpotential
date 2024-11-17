@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 import logging
 import numpy as np
 import os
 import pandas as pd
-from tensorpotential.constants import DATA_ENERGY_WEIGHTS, DATA_FORCE_WEIGHTS
 
 from tensorpotential.data.weighting import EnergyBasedWeightingPolicy
 
@@ -21,6 +22,8 @@ from tensorpotential.data.process_df import (
 )
 
 from tensorpotential.tensorpot import get_output_dir
+from collections import defaultdict
+
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
@@ -142,11 +145,11 @@ def apply_weighting(fit_config, train_df, test_df):
 def check_weighting(train_df, test_df):
     # Check, if DATA_ENERGY_WEIGHTS and/or DATA_FORCE_WEIGHTS are in dataframe columns
     log.info(
-        f"TRAIN WEIGHTS: energy - {DATA_ENERGY_WEIGHTS in train_df.columns}, forces - {DATA_FORCE_WEIGHTS in train_df.columns} "
+        f"TRAIN WEIGHTS: energy - {tc.DATA_ENERGY_WEIGHTS in train_df.columns}, forces - {tc.DATA_FORCE_WEIGHTS in train_df.columns} "
     )
     if test_df is not None:
         log.info(
-            f"TEST WEIGHTS: energy - {DATA_ENERGY_WEIGHTS in test_df.columns}, forces - {DATA_FORCE_WEIGHTS in test_df.columns} "
+            f"TEST WEIGHTS: energy - {tc.DATA_ENERGY_WEIGHTS in test_df.columns}, forces - {tc.DATA_FORCE_WEIGHTS in test_df.columns} "
         )
 
 
@@ -170,29 +173,43 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
     if test_df is not None:
         test_df["NUMBER_OF_ATOMS"] = test_df["ase_atoms"].map(len)
 
-    if "energy_corrected" not in train_df:
-        log.info(
-            "'energy_corrected' column is not found in dataset, trying to generate it"
-        )
-        reference_energy = data_config.get("reference_energy")
-        if reference_energy == 0:
-            log.info("Set 'energy_corrected' to 'energy', because reference_energy=0")
-            train_df["energy_corrected"] = train_df["energy"]
-            if test_df is not None:
-                test_df["energy_corrected"] = test_df["energy"]
-        elif isinstance(reference_energy, dict):
-            log.info(
-                f"Construct 'energy_corrected' from 'energy', using single-atom reference {reference_energy=}"
+    if tc.INPUT_FIT_LOSS_ENERGY in fit_config[tc.INPUT_FIT_LOSS]:
+        if tc.INPUT_REFERENCE_ENERGY in data_config:
+            reference_energy = data_config.get(tc.INPUT_REFERENCE_ENERGY)
+            if reference_energy == 0:
+                log.info(
+                    "Set 'energy_corrected' to 'energy', because reference_energy=0"
+                )
+                train_df["energy_corrected"] = train_df["energy"]
+                if test_df is not None:
+                    test_df["energy_corrected"] = test_df["energy"]
+            elif isinstance(reference_energy, dict):
+                log.info(
+                    f"Construct 'energy_corrected' from 'energy', using single-atom reference {reference_energy=}"
+                )
+                compute_corrected_energy(train_df, esa_dict=reference_energy)
+                if test_df is not None:
+                    compute_corrected_energy(test_df, esa_dict=reference_energy)
+            else:
+                raise RuntimeError(
+                    f"'input::data::reference_energy'={reference_energy} is not supported. "
+                    "Only 0 or dict are supported."
+                )
+        if "energy_corrected" not in train_df.columns or (
+            test_df is not None and "energy_corrected" not in test_df.columns
+        ):
+            raise RuntimeError(
+                "'energy_corrected' column is not in dataset, either provide input::data::reference_energy: 0 or dict "
+                "or generate column externally"
             )
-            compute_corrected_energy(train_df, esa_dict=reference_energy)
-            if test_df is not None:
-                compute_corrected_energy(test_df, esa_dict=reference_energy)
-        else:
-            raise RuntimeError("'input::data::reference_energy' is not provided")
 
-    train_df["energy_corrected_per_atom"] = (
-        train_df["energy_corrected"] / train_df["NUMBER_OF_ATOMS"]
-    )
+        train_df["energy_corrected_per_atom"] = (
+            train_df["energy_corrected"] / train_df["NUMBER_OF_ATOMS"]
+        )
+        if test_df is not None:
+            test_df["energy_corrected_per_atom"] = (
+                test_df["energy_corrected"] / test_df["NUMBER_OF_ATOMS"]
+            )
 
     stress_units = data_config.get("stress_units", DEFAULT_STRESS_UNITS)
     if is_fit_stress:
@@ -240,7 +257,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             scale = max(1e-1, scale)  # prevent too small values
             if scale < 0.8:
                 log.warning(
-                    f"Constant potential::{scale=} is possibly too small. Consider setting it manually unless you know"
+                    f"Constant potential::{scale=} is possibly too small. Consider setting it manually unless you know "
                     f"what you are doing"
                 )
             log.info(f"Data (auto) scale: {scale}")
@@ -257,10 +274,6 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             )
         else:
             # compute only for train set
-            if "energy_corrected_per_atom" not in test_df.columns:
-                test_df["energy_corrected_per_atom"] = (
-                    test_df["energy_corrected"] / test_df["NUMBER_OF_ATOMS"]
-                )
             train_df["is_train"] = 1
             test_df["is_train"] = 0
             tot_df = pd.concat([train_df, test_df], axis=0, copy=False)
@@ -280,11 +293,6 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         log.warning("Duplicate indices in TRAIN dataframe found, resetting")
         train_df.reset_index(drop=True, inplace=True)
 
-    if data_config.get("save_dataset", True):
-        training_set_full_fname = os.path.join(get_output_dir(seed), TRAINING_SET_FNAME)
-        log.info(f"Saving current training set to {training_set_full_fname}")
-        train_df.to_pickle(training_set_full_fname)
-
     has_test_set = test_df is not None
     if has_test_set:
         if test_df.index.duplicated().any():
@@ -292,12 +300,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             test_df.reset_index(drop=True, inplace=True)
 
         log.info(f"Test Dataset size: {len(test_df)}")
-        if data_config.get("save_dataset", True):
-            testing_set_full_fname = os.path.join(
-                get_output_dir(seed), TESTING_SET_FNAME
-            )
-            log.info(f"Saving current test set to {testing_set_full_fname}")
-            test_df.to_pickle(testing_set_full_fname)
+
     # extract elements mapping from input or from dataset
     elements = potential_config.get("elements")
     if elements is None:
@@ -313,18 +316,62 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
     if fit_config.get("weighting") is not None:
         train_df, test_df = apply_weighting(fit_config, train_df, test_df)
     check_weighting(train_df, test_df)
+
+    if data_config.get("save_dataset", True):
+        training_set_full_fname = os.path.join(get_output_dir(seed), TRAINING_SET_FNAME)
+        log.info(f"Saving current training set to {training_set_full_fname}")
+        train_df.to_pickle(training_set_full_fname)
+        if has_test_set:
+            testing_set_full_fname = os.path.join(
+                get_output_dir(seed), TESTING_SET_FNAME
+            )
+            log.info(f"Saving current test set to {testing_set_full_fname}")
+            test_df.to_pickle(testing_set_full_fname)
+
+    user_cutoff_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+
     # instantiate DataBuilders class (with optional parameters); HARDCODED, but rarely changes
     data_builders = [
-        GeometricalDataBuilder(element_map, rcut, is_fit_stress=is_fit_stress),
-        ReferenceEnergyForcesStressesDataBuilder(
-            normalize_weights=fit_config.get("normalize_weights", False),
-            normalize_force_per_structure=fit_config.get(
-                "normalize_force_per_structure", False
-            ),
+        GeometricalDataBuilder(
+            element_map,
+            cutoff=rcut,
+            cutoff_dict=user_cutoff_dict,
             is_fit_stress=is_fit_stress,
-            stress_units=stress_units,
         ),
     ]
+    if (
+        tc.INPUT_FIT_LOSS_ENERGY in fit_config[tc.INPUT_FIT_LOSS]
+        or tc.INPUT_FIT_LOSS_FORCES in fit_config[tc.INPUT_FIT_LOSS]
+    ):
+        data_builders.append(
+            ReferenceEnergyForcesStressesDataBuilder(
+                normalize_weights=fit_config.get("normalize_weights", False),
+                normalize_force_per_structure=fit_config.get(
+                    "normalize_force_per_structure", False
+                ),
+                is_fit_stress=is_fit_stress,
+                stress_units=stress_units,
+            ),
+        )
+    extras = data_config.get("extra_components", None)
+    if extras is not None:
+        import importlib
+
+        mod = importlib.import_module(
+            "tensorpotential.experimental.extra_data_builders"
+        )
+        for db_name, db_config in extras.items():
+            try:
+                db = getattr(mod, db_name)
+                data_builders.append(db(**db_config))
+            except AttributeError as e:
+                raise NameError(f"Could not find data builder {db_name}")
+
+    # if tc.INPUT_FIT_LOSS_EFG in fit_config[tc.INPUT_FIT_LOSS]:
+    #     from tensorpotential.experimental.efg.databuilder import ReferenceEFGDataBuilder
+    #
+    #     data_builders.append(ReferenceEFGDataBuilder())
+
     # preprocess data
     log.info("Train set processing")
     max_n_buckets = fit_config.get("train_max_n_buckets", 5)
@@ -336,6 +383,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         max_n_buckets=max_n_buckets,  # 1
         return_padding_stats=True,
         verbose=True,
+        max_workers=data_config.get("max_workers"),
     )
 
     if padding_stats:
@@ -351,6 +399,22 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
     # compute average number of neighbours over TRAIN set
     total_number_neigh = sum(b[tc.N_NEIGHBORS_REAL] for b in train_batches)
     total_number_atoms = sum(b[tc.N_ATOMS_BATCH_REAL] for b in train_batches)
+    # compute avg number of neighbors per element
+    nat_per_specie = defaultdict(int)
+    total_nei_per_specie = defaultdict(int)
+    for b in train_batches:
+        nps = b["nat_per_specie"]
+        tnps = b["total_nei_per_specie"]
+        for k, v in nps.items():
+            nat_per_specie[k] += v
+        for k, v in tnps.items():
+            total_nei_per_specie[k] += v
+    avg_n_neigh_per_specie = {}
+    for k, v in nat_per_specie.items():
+        val = v if v > 0 else 1.0
+        avg_n_neigh_per_specie[k] = total_nei_per_specie[k] / val
+    # log.info(f"Average per specie nnei: {avg_n_neigh_per_specie}")
+
     if has_test_set:
         log.info("Test set processing")
         test_max_n_buckets = fit_config.get("test_max_n_buckets", 1)
@@ -362,6 +426,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             max_n_buckets=test_max_n_buckets,  # 1
             return_padding_stats=True,
             verbose=True,
+            max_workers=data_config.get("max_workers"),
         )
         if test_padding_stats:
             logging.info(
@@ -378,7 +443,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         # tuple_of_test_datasets = None
         test_batches = None
     avg_n_neigh = total_number_neigh / total_number_atoms
-
+    logging.info(f"Average number of neighbors: {avg_n_neigh}")
     # esa_dict: el -> e0
     # element_map: el -> mu
     # atomic_shift_map :  mu -> e0
@@ -388,9 +453,11 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         if esa_dict is not None
         else None
     )
-
+    use_per_specie_n_nei = args_yaml.get(tc.INPUT_USE_PER_SPECIE_N_NEI, False)
     data_stats = {
-        "avg_n_neigh": avg_n_neigh,
+        "avg_n_neigh": (
+            avg_n_neigh if not use_per_specie_n_nei else avg_n_neigh_per_specie
+        ),
         "constant_out_shift": shift,
         "constant_out_scale": scale,
         "atomic_shift_map": atomic_shift_map,

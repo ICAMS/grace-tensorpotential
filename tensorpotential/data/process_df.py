@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import logging
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -258,11 +262,11 @@ def compute_compositions(
         df[COMP_TUPLE] = df[COMP_DICT].map(compdict_to_comptuple)
 
     elements = extract_elements(df)
-
-    for el in elements:
-        df["n_" + el] = df[COMP_DICT].map(lambda d: d.get(el, 0))
-        df["c_" + el] = df["n_" + el] / df[NUMBER_OF_ATOMS]
-
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+        for el in elements:
+            df["n_" + el] = df[COMP_DICT].map(lambda d: d.get(el, 0))
+            df["c_" + el] = df["n_" + el] / df[NUMBER_OF_ATOMS]
     return elements
 
 
@@ -436,38 +440,39 @@ def compute_corrected_energy(
     return esa_dict
 
 
-def compute_shifted_scaled_corrected_energy(
-    df: pd.DataFrame, n_atoms_column=NUMBER_OF_ATOMS
-):
-    elements = compute_compositions(df)
-    n_elements = ["n_" + e for e in elements]
-    corr_mask = ~df[ENERGY].isna()
-    comp_array = df.loc[corr_mask, n_elements].values
-    e_array = df.loc[corr_mask, ENERGY].values
-    assert not np.any(np.isnan(comp_array)), "Compositions columns contain NaN"
-    assert not np.any(np.isnan(e_array)), "Energy column contain NaN"
-    esa_array = np.linalg.pinv(comp_array, rcond=1e-10) @ e_array  # solve equation
-    esa_dict = {e: esa for e, esa in zip(elements, esa_array)}
-    df.loc[corr_mask, ENERGY_CORRECTED_COL] = e_array - np.dot(comp_array, esa_array)
-    df[E_CORRECTED_PER_ATOM_COLUMN] = df[ENERGY_CORRECTED_COL] / df[n_atoms_column]
-
-    def safe_get_volume_per_atom(at):
-        try:
-            return at.get_volume() / len(at)
-        except Exception as e:
-            return 0
-
-    df["volume_per_atom"] = df[ASE_ATOMS].map(safe_get_volume_per_atom)
-    max_vpa = df["volume_per_atom"].max()
-    e_corr_shift = 0
-    if max_vpa > 0:
-        # "-", becese +=shift
-        e_corr_shift = -df[df["volume_per_atom"] >= max_vpa].iloc[0][
-            E_CORRECTED_PER_ATOM_COLUMN
-        ]
-    else:  # max_vpa==0
-        e_corr_shift = 0
-
-    df[ENERGY_CORRECTED_COL] += e_corr_shift * df[n_atoms_column]
-    esa_dict["shift"] = e_corr_shift
-    return esa_dict
+#
+# def compute_shifted_scaled_corrected_energy(
+#     df: pd.DataFrame, n_atoms_column=NUMBER_OF_ATOMS
+# ):
+#     elements, df = compute_compositions(df)
+#     n_elements = ["n_" + e for e in elements]
+#     corr_mask = ~df[ENERGY].isna()
+#     comp_array = df.loc[corr_mask, n_elements].values
+#     e_array = df.loc[corr_mask, ENERGY].values
+#     assert not np.any(np.isnan(comp_array)), "Compositions columns contain NaN"
+#     assert not np.any(np.isnan(e_array)), "Energy column contain NaN"
+#     esa_array = np.linalg.pinv(comp_array, rcond=1e-10) @ e_array  # solve equation
+#     esa_dict = {e: esa for e, esa in zip(elements, esa_array)}
+#     df.loc[corr_mask, ENERGY_CORRECTED_COL] = e_array - np.dot(comp_array, esa_array)
+#     df[E_CORRECTED_PER_ATOM_COLUMN] = df[ENERGY_CORRECTED_COL] / df[n_atoms_column]
+#
+#     def safe_get_volume_per_atom(at):
+#         try:
+#             return at.get_volume() / len(at)
+#         except Exception as e:
+#             return 0
+#
+#     df["volume_per_atom"] = df[ASE_ATOMS].map(safe_get_volume_per_atom)
+#     max_vpa = df["volume_per_atom"].max()
+#     e_corr_shift = 0
+#     if max_vpa > 0:
+#         # "-", becese +=shift
+#         e_corr_shift = -df[df["volume_per_atom"] >= max_vpa].iloc[0][
+#             E_CORRECTED_PER_ATOM_COLUMN
+#         ]
+#     else:  # max_vpa==0
+#         e_corr_shift = 0
+#
+#     df[ENERGY_CORRECTED_COL] += e_corr_shift * df[n_atoms_column]
+#     esa_dict["shift"] = e_corr_shift
+#     return esa_dict, df

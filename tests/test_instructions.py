@@ -52,11 +52,30 @@ def test_radial_basis():
     basis = RadialBasis(
         bonds="fake_bonds",
         basis_type="Gaussian",
+        # basis_type="Cheb",
         nfunc=nfunc,
         rcut=rcut,
         p=10,
         normalized=False,
         init_gamma=100,
+    )
+    basis.build(float64)
+    baza = basis.frwrd({"fake_bonds": fake_bonds})
+    # plt.plot(fake_bonds, baza)
+    # plt.show()
+    print(np.var(baza, axis=0))
+    assert baza.shape == (100, nfunc)
+    print("=================================")
+
+    nfunc = 10
+    fake_bonds = np.linspace(0, rcut, 100).reshape(-1, 1)
+    # fake_bonds = np.random.uniform(0, rcut, size=(1000, 1))
+    basis = RadialBasis(
+        bonds="fake_bonds",
+        basis_type="Cheb",
+        nfunc=nfunc,
+        rcut=rcut,
+        normalized=True,
     )
     basis.build(float64)
     baza = basis.frwrd({"fake_bonds": fake_bonds})
@@ -80,7 +99,186 @@ def test_linear_radial_function():
     assert rf.shape == (10, n_rad_max, int((lmax + 1) ** 2))
 
 
-def test_zbl():
+def n_act(x):
+    return 1.59278 * tf.nn.tanh(x)
+
+
+def test_mlp_function():
+    nfunc = 8
+    rcut = 6.2
+    n_rad_max = 22
+    lmax = 2
+
+    # fake_bonds = np.linspace(0, rcut, 100).reshape(-1, 1)
+    fake_bonds = np.random.uniform(0, rcut, size=(100_000, 1))
+    data = {"fake_bonds": fake_bonds}
+    basis = RadialBasis(
+        name="baza",
+        bonds="fake_bonds",
+        # basis_type="Cheb",
+        basis_type="RadSinBessel",
+        p=5,
+        nfunc=nfunc,
+        rcut=rcut,
+        normalized=True,
+    )
+    basis.build(float64)
+    data = basis(data)
+
+    rfunc = MLPRadialFunction(
+        n_rad_max=n_rad_max,
+        input_shape=nfunc,
+        lmax=lmax,
+        basis=basis,
+        name="R",
+        activation="tanh",
+    )
+    rfunc.build(float64)
+
+    data = rfunc(data)
+    rf = data[rfunc.name].numpy()[:, :, [0, 1, 4]]
+    # print(rf)
+    print(np.var(rf, axis=0))
+    # assert rf.shape == (10, n_rad_max, int((lmax + 1) ** 2))
+
+
+def test_bond_cut():
+    from ase.build import molecule
+    from tensorpotential.data.databuilder import GeometricalDataBuilder
+
+    el_map = {"C": 0, "Cl": 1, "H": 2, "O": 3}
+
+    cutoff_dict = {
+        "CC": 4.1,
+        "CH": 2.1,
+        "CO": 3,
+        # ("C", "Cl"): 2,
+        "ClCl": 2.9,
+        "ClH": 2.2,
+        "ClO": 2,
+        "HH": 3,
+        "HO": 2.11,
+        "OO": 2,
+    }
+    default_cut = 5
+    db = GeometricalDataBuilder(
+        elements_map=el_map,
+        cutoff=default_cut,
+    )
+    data = db.extract_from_ase_atoms(molecule("CH3COCl"))
+    data = tf.data.Dataset.from_tensors(data).get_single_element()
+    bonds = BondLength()
+    bonds.build(float64)
+    data = bonds(data)
+
+    bs = BondSpecificRadialBasisFunction(
+        bonds,
+        element_map=el_map,
+        cutoff_dict=cutoff_dict,
+        cutoff=default_cut,
+        nfunc=2,
+    )
+    bs.build(float64)
+    data = bs(data)
+    b = data[bs.name].numpy()[:, 0]
+    print(b)
+    dist = data[bonds.name].numpy()
+    inv_map = {v: k for k, v in el_map.items()}
+    non0_d = []
+    cut_d = bs.cutoff_dict
+    for bi, mui, muj, dd in zip(b, data["mu_i"].numpy(), data["mu_j"].numpy(), dist):
+        mini = np.min((mui, muj))
+        maxi = np.max((mui, muj))
+        k = (inv_map[mini], inv_map[maxi])
+        curr_cut = cut_d.get(k, default_cut)
+        print(f"({inv_map[mui]}, {inv_map[muj]}), [{curr_cut}] : {dd}, {bi}")
+        if dd >= curr_cut:
+            assert bi == 0
+        else:
+            assert bi != 0
+            non0_d.append(dd)
+
+    print("#" * 100)
+    print("#" * 100)
+    print("#" * 100)
+    db = GeometricalDataBuilder(
+        elements_map=el_map,
+        cutoff=default_cut,
+        cutoff_dict=cutoff_dict,
+    )
+    data = db.extract_from_ase_atoms(molecule("CH3COCl"))
+    data = tf.data.Dataset.from_tensors(data).get_single_element()
+    bonds = BondLength()
+    bonds.build(float64)
+    data = bonds(data)
+
+    bs = BondSpecificRadialBasisFunction(
+        bonds,
+        element_map=el_map,
+        cutoff_dict=cutoff_dict,
+        cutoff=default_cut,
+        nfunc=2,
+    )
+    bs.build(float64)
+    data = bs(data)
+    b = data[bs.name].numpy()[:, 0]
+    print(b)
+    dist = data[bonds.name].numpy()
+    inv_map = {v: k for k, v in el_map.items()}
+    non0_d2 = []
+    cut_d = bs.cutoff_dict
+    for bi, mui, muj, dd in zip(b, data["mu_i"].numpy(), data["mu_j"].numpy(), dist):
+        mini = np.min((mui, muj))
+        maxi = np.max((mui, muj))
+        k = (inv_map[mini], inv_map[maxi])
+        # curr_cut = cutoff_dict.get(k, default_cut)
+        # k = f'{inv_map[mini]}{inv_map[maxi]}'
+        curr_cut = cut_d.get(k, default_cut)
+        print(f"({inv_map[mui]}, {inv_map[muj]}), [{curr_cut}] : {dd}, {bi}")
+        assert bi != 0
+        non0_d2.append(dd)
+    print("!" * 100)
+    print(non0_d)
+    print(non0_d2)
+    assert len(non0_d) == len(non0_d2)
+    assert np.allclose(np.array(non0_d) - np.array(non0_d2), 0)
+
+    # =======================================================================================
+    # =======================================================================================
+
+    from tensorpotential.tpmodel import TPModel, ComputePlaceholder
+    from tensorpotential.calculator import TPCalculator
+
+    d_ij = BondLength()
+    bs = BondSpecificRadialBasisFunction(
+        d_ij,
+        element_map=el_map,
+        cutoff_dict=cutoff_dict,
+        cutoff=default_cut,
+        nfunc=1,
+        name=constants.PLACEHOLDER,
+    )
+    z = ScalarChemicalEmbedding("z", element_map=el_map, embedding_size=2)
+    model = TPModel(instructions=[d_ij, bs, z], compute_function=ComputePlaceholder)
+    model.build(float64)
+    calc = TPCalculator(
+        model=model,
+        cutoff=6,
+        extra_properties=[bs.name],
+        pad_atoms_number=None,
+        pad_neighbors_fraction=None,
+    )
+    at = molecule("CH3COCl")
+
+    at.calc = calc
+    at.get_potential_energy()
+    b_val = at.calc.results[constants.PLACEHOLDER]
+    print(b_val)
+    assert np.allclose(b_val.flatten(), b.flatten())
+    print(at.calc.cutoff_dict)
+
+
+def test_zbl(do_plot=False):
     rcut = 4.0
     r_in = 3
     size = 10
@@ -114,10 +312,10 @@ def test_zbl():
         bonds=d_ij,
         # cutoff=rcut,
         cutoff={
-            ("Al", "Al"): 1.0,
-            ("Al", "H"): 3.5,
+            "Al": 1.0,
+            "AlH": 3.5,
             # ("H", "Al"): 5.5,
-            ("H", "H"): 1.0,
+            "H": 1.0,
         },
         element_map={"Al": 0, "H": 1},
         delta_cutoff=r_in,
@@ -138,25 +336,30 @@ def test_zbl():
         at = Atoms("AlH", positions=[[0, 0, 0], [0, 0, d]])
         at.calc = calc
         es.append(at.get_potential_energy())
-    plt.plot(dd, es, label="AlH")
+    if do_plot:
+        plt.plot(dd, es, label="AlH")
 
     es = []
     for d in dd:
         at = Atoms("AlAl", positions=[[0, 0, 0], [0, 0, d]])
         at.calc = calc
         es.append(at.get_potential_energy())
-    plt.plot(dd, es, label="AlAl")
+    if do_plot:
+        plt.plot(dd, es, label="AlAl")
 
     es = []
     for d in dd:
         at = Atoms("HH", positions=[[0, 0, 0], [0, 0, d]])
         at.calc = calc
         es.append(at.get_potential_energy())
-    plt.plot(dd, es, label="HH")
 
-    # plt.axhline(y=0, ls="--", c="r")
-    plt.legend()
-    # plt.show()
+    if do_plot:
+        plt.plot(dd, es, label="HH")
+
+        plt.axhline(y=0, ls="--", c="r")
+        plt.yscale("symlog")
+        plt.legend()
+        plt.show()
 
 
 def test_bond_spherical_harmonics():
@@ -175,6 +378,7 @@ def test_bond_spherical_harmonics():
 
 
 def test_product_function():
+    # size = 2
     size = 22
     lmax = 2
     fake_projections = np.random.normal(0, 1, size=(size, 3))
@@ -196,9 +400,13 @@ def test_product_function():
         Lmax=1,
         is_left_right_equal=True,
         keep_parity=[[0, 1], [1, -1], [1, 1], [2, -1], [2, 1]],
+        # keep_parity=[[2, -1], [2, 1]],
     )
     print_full(p.coupling_meta_data)
     print("-" * 200)
+    # p.build(float64)
+    # aa = p.frwrd(inpt_data)
+    # print(aa, aa.shape)
     pp = ProductFunction(
         left=p,
         right=Y,

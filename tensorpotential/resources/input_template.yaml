@@ -1,0 +1,68 @@
+seed: 1
+cutoff: {{CUTOFF}}
+
+data:
+  filename: {{TRAIN_FILENAME}}
+  {{TEST_DATA}}
+  reference_energy: 0
+  # reference_energy: {Al: -1.23, Li: -3.56}
+  # save_dataset: False
+  # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
+
+
+potential:
+  {{ELEMENTS}} # If elements not provided - determined automatically from data
+  preset: {{PRESET_NAME}} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+
+  ## For custom model from model.py::custom_model
+  #  custom: model.custom_model
+
+  # keywords-arguments that will be passed to preset or custom function
+  kwargs: {{KWARGS}}
+
+  #shift: False # True/False
+  scale: True # False/True or float
+
+fit:
+  loss: {
+    energy: { weight: 1, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
+    forces: { weight: {{FORCE_LOSS_WEIGHT}}, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
+    {{STRESS_LOSS}}
+    {{SWITCH_LOSS}}
+  }
+
+  {{WEIGHTING_SCHEME}}
+
+  maxiter: 500 # Number of epochs / iterations
+
+  optimizer: Adam
+  opt_params: {
+            learning_rate: 0.01,
+            amsgrad: True,
+            use_ema: True,
+            ema_momentum: 0.99,
+            weight_decay: null,
+            clipvalue: 1.0,
+        }
+
+  # for learning-rate reduction
+  learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, }
+
+  #  optimizer: L-BFGS-B
+  #  opt_params: { "maxcor": 100, "maxls": 20 }
+
+  ## needed for low-energy tier metrics and for "convex_hull"-based distance of energy-based weighting scheme
+  compute_convex_hull: {{COMPUTE_CONVEX_HULL}}
+  batch_size: {{BATCH_SIZE}} # Important hyperparameter for Adam and irrelevant (but must be) for L-BFGS-B
+  test_batch_size: {{TEST_BATCH_SIZE}} # test batch size (optional)
+
+  jit_compile: True
+#  eval_init_stats: True # to evaluate initial metrics
+
+  train_max_n_buckets: 10 # max number of buckets (group of batches of same shape) in train set
+  test_max_n_buckets: 5 # same for test
+
+  checkpoint_freq: 2 # frequency for **REGULAR** checkpoints.
+  # save_all_regular_checkpoints: True # to store ALL regular checkpoints
+  progressbar: True # show batch-evaluation progress bar
+  train_shuffle: True # shuffle train batches on every epoch

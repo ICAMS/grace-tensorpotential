@@ -10,7 +10,7 @@ data:
 potential:
   preset: "GRACE_2LAYER"
   scale: True
-  kwargs: { lmax: 2,
+  kwargs: { lmax: [2,3],
             basis_type: "SBessel",
             rad_base_normalized: True,
             n_rad_base: 2,

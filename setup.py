@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name="tensorpotential",
-    version="0.4.1",
+    version="0.4.2",
     packages=find_packages(include=["tensorpotential", "tensorpotential.*"]),
     url="https://github.com/ICAMS/grace-tensorpotential",
     license="Academic Software License (ASL)",
     author="Anton Bochkarev, Yury Lysogorskiy",
-    author_email="yury.lysogorskiy@rub.de",
+    author_email="anton.bochkarev@rub.de, yury.lysogorskiy@rub.de",
     description="Graph Atomic Cluster Expansion (GRACE)",
     long_description="Graph Atomic Cluster Expansion (GRACE)",
     python_requires="<3.12",
@@ -24,6 +24,10 @@ setup(
     ],
     scripts=[
         "bin/gracemaker",
-        "bin/grace_download",
+        "bin/grace_models",
+        "bin/grace_collect",
+        "bin/extxyz2df",
     ],
+    package_data={"tensorpotential": ["resources/input_template.yaml"]},
+    include_package_data=True,
 )
