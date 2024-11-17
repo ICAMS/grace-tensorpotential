@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class FitMetrics:
     def __init__(self, w_e, w_f, e_scale, f_scale, ncoefs, regs=None):
         self.w_e = w_e
@@ -23,29 +24,28 @@ class FitMetrics:
         :return: fit metrics dictionary
         """
 
-        regularization_loss = [float(r_comp * r_weight) for r_comp, r_weight in zip(self.regs, self.reg_weights)]
+        regularization_loss = [
+            float(r_comp * r_weight)
+            for r_comp, r_weight in zip(self.regs, self.reg_weights)
+        ]
         l1 = regularization_loss[0]
         l2 = regularization_loss[1]
         smoothness_reg_loss = regularization_loss[2:]
         res_dict = {
             # total loss
             "loss": self.loss,
-
             # loss contributions
             "e_loss_contrib": self.e_loss * self.e_scale,
             "f_loss_contrib": self.f_loss * self.f_scale,
             "l1_reg_contrib": l1,
             "l2_reg_contrib": l2,
             "extra_regularization_contrib": smoothness_reg_loss,
-
             # non-weighted e and f losses
             "e_loss": self.e_loss,
             "f_loss": self.f_loss,
-
             # e and f loss weights (scales)
             "e_scale": self.e_scale,
             "f_scale": self.f_scale,
-
             # RMSE metrics
             "rmse_epa": self.rmse_epa,
             "low_rmse_epa": self.low_rmse_epa,
@@ -53,7 +53,6 @@ class FitMetrics:
             "low_rmse_f": self.low_rmse_f,
             "rmse_f_comp": self.rmse_f_comp,
             "low_rmse_f_comp": self.low_rmse_f_comp,
-
             # MAE metrics
             "mae_epa": self.mae_epa,
             "low_mae_epa": self.low_mae_epa,
@@ -61,7 +60,6 @@ class FitMetrics:
             "low_mae_f": self.low_mae_f,
             "mae_f_comp": self.mae_f_comp,
             "low_mae_f_comp": self.low_mae_f_comp,
-
             # MAX metrics
             "max_abs_epa": self.max_abs_epa,
             "low_max_abs_epa": self.low_max_abs_epa,
@@ -69,10 +67,9 @@ class FitMetrics:
             "low_max_abs_f": self.low_max_abs_f,
             "max_abs_f_comp": self.max_abs_f_comp,
             "low_max_abs_f_comp": self.low_max_abs_f_comp,
-
             "eval_time": self.eval_time,
             "nat": self.nat,
-            "ncoefs": self.ncoefs
+            "ncoefs": self.ncoefs,
         }
 
         if self.nfuncs is not None:
@@ -123,12 +120,12 @@ class FitMetrics:
 
     def compute_metrics(self, de, de_pa, df, nat, dataframe=None, de_low=None):
         if de_low is None:
-            de_low = 1.
+            de_low = 1.0
         self.nat = np.sum(nat)
-        self.rmse_epa = np.sqrt(np.mean(de_pa ** 2))
-        self.rmse_e = np.sqrt(np.mean(de ** 2))
-        self.rmse_f = np.sqrt(np.mean(np.sum(df ** 2, axis=1)))
-        self.rmse_f_comp = np.sqrt(np.mean(df ** 2))  # per component
+        self.rmse_epa = np.sqrt(np.mean(de_pa**2))
+        self.rmse_e = np.sqrt(np.mean(de**2))
+        self.rmse_f = np.sqrt(np.mean(np.sum(df**2, axis=1)))
+        self.rmse_f_comp = np.sqrt(np.mean(df**2))  # per component
         self.mae_epa = np.mean(np.abs(de_pa))
         self.mae_e = np.mean(np.abs(de))
         self.mae_f = np.mean(np.linalg.norm(df, axis=1))
@@ -136,12 +133,12 @@ class FitMetrics:
         self.mae_f = np.mean(np.sum(np.abs(df), axis=1))
         # self.mae_f = np.mean(np.linalg.norm(df, axis=1))
 
-        self.e_loss = float(np.sum(self.w_e * de_pa ** 2))
-        self.f_loss = np.sum(self.w_f * df ** 2)
+        self.e_loss = float(np.sum(self.w_e * de_pa**2))
+        self.f_loss = np.sum(self.w_f * df**2)
         self.max_abs_e = np.max(np.abs(de))
         self.max_abs_epa = np.max(np.abs(de_pa))
         self.max_abs_f = np.max(np.abs(df))
-        self.max_abs_f_comp = np.max(np.abs(df).flatten()) # per component
+        self.max_abs_f_comp = np.max(np.abs(df).flatten())  # per component
 
         self.low_rmse_epa = 0
         self.low_mae_epa = 0
@@ -155,21 +152,42 @@ class FitMetrics:
         if dataframe is not None:
             try:
                 if "e_chull_dist_per_atom" in dataframe.columns:
-                    nrgs = dataframe["e_chull_dist_per_atom"].to_numpy().reshape(-1, )
+                    nrgs = (
+                        dataframe["e_chull_dist_per_atom"]
+                        .to_numpy()
+                        .reshape(
+                            -1,
+                        )
+                    )
                     mask = nrgs <= de_low
                 else:
-                    nrgs = dataframe['energy_corrected'].to_numpy().reshape(-1, ) / nat.reshape(-1, )
+                    nrgs = dataframe["energy_corrected"].to_numpy().reshape(
+                        -1,
+                    ) / nat.reshape(
+                        -1,
+                    )
                     emin = min(nrgs)
-                    mask = (nrgs <= (emin + de_low))
-                mask_f = np.repeat(mask, nat.reshape(-1, ))
+                    mask = nrgs <= (emin + de_low)
+                mask_f = np.repeat(
+                    mask,
+                    nat.reshape(
+                        -1,
+                    ),
+                )
                 self.low_rmse_epa = np.sqrt(np.mean(de_pa[mask] ** 2))
                 self.low_mae_epa = np.mean(np.abs(de_pa[mask]))
                 self.low_max_abs_epa = np.max(np.abs(de_pa[mask]))
                 self.low_rmse_f = np.sqrt(np.mean(np.sum(df[mask_f] ** 2, axis=1)))
                 self.low_mae_f = np.mean(np.linalg.norm(df[mask_f], axis=1))
                 self.low_max_abs_f = np.max(np.abs(df[mask_f]))
-                self.low_rmse_f_comp = np.sqrt(np.mean(df[mask_f] ** 2))  # per component
-                self.low_mae_f_comp = np.mean(np.abs(df[mask_f]).flatten())  # per component
-                self.low_max_abs_f_comp = np.max(np.abs(df[mask_f]).flatten())  # per component
+                self.low_rmse_f_comp = np.sqrt(
+                    np.mean(df[mask_f] ** 2)
+                )  # per component
+                self.low_mae_f_comp = np.mean(
+                    np.abs(df[mask_f]).flatten()
+                )  # per component
+                self.low_max_abs_f_comp = np.max(
+                    np.abs(df[mask_f]).flatten()
+                )  # per component
             except:
                 pass

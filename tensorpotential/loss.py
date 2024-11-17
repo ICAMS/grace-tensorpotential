@@ -21,6 +21,7 @@ class LossComponent(tf.Module, ABC):
         super(LossComponent, self).__init__(name=name)
         self._loss_component_weight = loss_component_weight
         self.normalize_by_samples = normalize_by_samples
+        self.corresponding_metrics = None
 
     def build(self, float_dtype):
         self.loss_component_weight = tf.Variable(
@@ -29,6 +30,12 @@ class LossComponent(tf.Module, ABC):
             trainable=False,
             name=f"{self.name}_component_weight",
         )
+
+    # def get_corresponding_metrics(self):
+    #     if hasattr(self, "corresponding_metrics"):
+    #         return self.corresponding_metrics
+    #     else:
+    #         return None
 
     def set_loss_component_weight(self, loss_component_weight: float):
         self.loss_component_weight.assign(loss_component_weight)

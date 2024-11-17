@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Final
 
 
@@ -48,19 +50,29 @@ PREDICT_ATOMIC_ENERGY: Final[str] = "atomic_energy"
 PREDICT_TOTAL_ENERGY: Final[str] = "total_energy"
 PREDICT_FORCES: Final[str] = "total_f"
 PREDICT_VIRIAL: Final[str] = "virial"
+PREDICT_PAIR_FORCES: Final[str] = "pair_f"
 
 L2_LOSS_COMPONENT: Final[str] = "l2_loss_component"
 
 ########### INPUT.YAML CONSTANTS #############
 INPUT_CUTOFF: Final[str] = "cutoff"
+INPUT_CUTOFF_DICT: Final[str] = "cutoff_dict"
 
 INPUT_DATA_SECTION: Final[str] = "data"
 INPUT_POTENTIAL_SECTION: Final[str] = "potential"
 INPUT_FIT_SECTION: Final[str] = "fit"
 
 INPUT_FIT_LOSS: Final[str] = "loss"
+INPUT_FIT_LOSS_ENERGY: Final[str] = "energy"
+INPUT_FIT_LOSS_FORCES: Final[str] = "forces"
 INPUT_FIT_LOSS_STRESS: Final[str] = "stress"
 INPUT_FIT_LOSS_VIRIAL: Final[str] = "virial"
+INPUT_USE_PER_SPECIE_N_NEI: Final[str] = "use_per_specie_n_nei"
 
+
+INPUT_REFERENCE_ENERGY: Final[str] = "reference_energy"
 
 COLUMN_ATOMIC_MAGMOM: Final[str] = "mag_mom"
+COLUMN_ASE_ATOMS: Final[str] = "ase_atoms"
+
+PLACEHOLDER: Final[str] = "placeholder"

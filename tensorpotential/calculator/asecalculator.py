@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-
 import numpy as np
 import time
 
 from tensorflow.data import Dataset
 
 from typing import Any
+from itertools import combinations_with_replacement
 from ase.calculators.calculator import Calculator, all_changes
 
 from tensorpotential.tensorpot import TensorPotential
-from tensorpotential.tpmodel import extract_cutoff_and_elements, TPModel
+from tensorpotential.tpmodel import extract_cutoff_and_elements, extract_cutoff_matrix
 from tensorpotential.data.databuilder import construct_batches, GeometricalDataBuilder
 from tensorpotential import constants
 
@@ -36,9 +36,11 @@ class TPCalculator(Calculator):
         self,
         model: list[Any] | Any,
         cutoff: float = None,
-        pad_neighbors_fraction: float = None,
-        pad_atoms_number: int = None,
+        pad_neighbors_fraction: float | None = 0.05,
+        pad_atoms_number: int | None = 1,
         min_dist=None,
+        extra_properties: list[str] = None,
+        truncate_extras_by_natoms: bool = False,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
@@ -68,6 +70,11 @@ class TPCalculator(Calculator):
 
         self.min_dist = min_dist  # minimal distance
         self.compute_properties = ["energy", "forces", "free_energy", "stress"]
+
+        self.extra_properties = None
+        if extra_properties is not None:
+            self.extra_properties = extra_properties
+        self.truncate_extras_by_natoms = truncate_extras_by_natoms
 
         assert model is not None, ValueError(f'"model" parameter is not provided')
         self.models = []
@@ -101,7 +108,7 @@ class TPCalculator(Calculator):
                 raise ValueError(f"model type is not recognized")
             self.models.append(model)
 
-        cutoffs, element_maps = [], []
+        cutoffs, element_maps, cutoff_matrices = [], [], []
         for model in self.models:
             cutoff, element_map_symbols, element_map_index = (
                 extract_cutoff_and_elements(model.instructions)
@@ -110,34 +117,54 @@ class TPCalculator(Calculator):
             element_maps.append(
                 {k: v for k, v in zip(element_map_symbols, element_map_index)}
             )
+            cutoff_matrix = extract_cutoff_matrix(model.instructions)
+            if cutoff_matrix is not None:
+                cutoff_matrices.append(cutoff_matrix)
         cutoff = np.max(cutoffs)
         assert all(
             [ems == element_maps[0]] for ems in element_maps
         )  # check that all maps are identical
         self.element_map = element_maps[0]
 
-        if cutoff > 0:
-            if self.cutoff is not None and self.cutoff != cutoff:
-                print(
-                    f"Cutoff of the potential {cutoff} A is different from calculator's {self.cutoff} A. "
-                    f"Using the value from the potential."
-                )
-            self.cutoff = cutoff
+        actual_cutoff_matrices = [m for m in cutoff_matrices if m is not None]
 
+        if len(actual_cutoff_matrices) == 0:
+            self.cutoff_dict = None
+            if cutoff > 0:
+                if self.cutoff is not None and self.cutoff != cutoff:
+                    print(
+                        f"Cutoff of the potential {cutoff} A is different from calculator's {self.cutoff} A. "
+                        f"Using the value from the potential."
+                    )
+                self.cutoff = cutoff
+            else:
+                print(
+                    f"Couldn't extract cutoff value from the model. Using the value from calculator: {self.cutoff}A"
+                )
         else:
-            print(
-                f"Couldn't extract cutoff value from the model. Using the value from calculator: {self.cutoff}A"
-            )
+            assert len(set([m.shape for m in actual_cutoff_matrices])) == 1
+            # get one max matrix over possibly many
+            nelems = len(self.element_map)
+            matrix = np.max(actual_cutoff_matrices, axis=0).reshape(nelems, nelems)
+            # get single max value
+            self.cutoff = np.max(matrix)
+            # construct dict
+            all_bond_comb = combinations_with_replacement(np.arange(nelems), 2)
+            inv_element_map = {v: k for k, v in self.element_map.items()}
+
+            self.cutoff_dict = {}
+            for comb in all_bond_comb:
+                el0, el1 = inv_element_map[comb[0]], inv_element_map[comb[1]]
+                self.cutoff_dict[(el0, el1)] = matrix[comb[0], comb[1]]
+
         self.data_builders = [
             GeometricalDataBuilder(
                 elements_map=self.element_map,
                 cutoff=self.cutoff,
+                cutoff_dict=self.cutoff_dict,
             )
         ]
-        if constants.ATOMIC_MAGMOM in self.data_keys:
-            from tensorpotential.experimental.mag.databuilder import MagMomDataBuilder
 
-            self.data_builders.append(MagMomDataBuilder())
 
     def get_data(self, atoms):
         current_symbs = atoms.symbols.species()
@@ -216,7 +243,7 @@ class TPCalculator(Calculator):
     def calculate(
         self,
         atoms=None,
-        properties=["energy", "forces", "stress"],
+        properties=("energy", "forces", "stress"),
         system_changes=all_changes,
     ):
         Calculator.calculate(self, atoms, properties, system_changes)
@@ -234,7 +261,10 @@ class TPCalculator(Calculator):
         energy_list = []
         forces_list = []
         stress_list = []
-        torques_list = []
+        if self.extra_properties is not None:
+            extras = {prop: [] for prop in self.extra_properties}
+        else:
+            extras = {}
         n_model = len(self.models)
 
         for model in self.models:
@@ -243,7 +273,11 @@ class TPCalculator(Calculator):
 
         for output in outputs:
             if "energy" in self.compute_properties:
-                energy_list.append(output.get(constants.PREDICT_TOTAL_ENERGY).numpy())
+                e = output.get(constants.PREDICT_TOTAL_ENERGY, None)
+                if e is None:
+                    energy_list.append(np.zeros((1, 1)))
+                else:
+                    energy_list.append(e.numpy())
 
             if "forces" in self.compute_properties:
                 forces = output.get(constants.PREDICT_FORCES, None)
@@ -260,16 +294,17 @@ class TPCalculator(Calculator):
                 else:
                     stress = -stress.numpy()[[0, 1, 2, 5, 4, 3]] / atoms.get_volume()
                 stress_list.append(stress)
-            if "torques" in self.compute_properties:
-                from tensorpotential.experimental.mag import constants as constants_mag
-
-                torques = output.get(constants_mag.PREDICT_TORQUES)
-                torques_list.append(torques)
+            for prop in extras:
+                res = output.get(prop)
+                if res is None:
+                    extras[prop].append(np.zeros((1, 1)))
+                else:
+                    res = res.numpy()
+                    if self.truncate_extras_by_natoms:
+                        extras[prop].append(res[: len(atoms)])
+                    else:
+                        extras[prop].append(res)
         self.eval_time = time.perf_counter() - t0
-
-        # energy_list = np.array(energy_list)
-        # forces_list = np.array(forces_list)
-        # stress_list = np.array(stress_list)
 
         self.energy = np.mean(energy_list, axis=0).flatten()[0]
 
@@ -282,9 +317,8 @@ class TPCalculator(Calculator):
         results["forces"] = self.forces
         results["stress"] = self.stress
 
-        if "torques" in self.compute_properties:
-            self.torques = np.mean(torques_list, axis=0)
-            results["torques"] = self.torques
+        for k, v in extras.items():
+            results[k] = np.mean(v, axis=0)
 
         if n_model > 1:
             results["energy_std"] = np.std(energy_list, axis=0).flatten()[0]

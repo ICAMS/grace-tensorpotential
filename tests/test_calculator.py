@@ -192,3 +192,41 @@ def test_calculator_min_dist():
     at2.calc = calc
     with pytest.raises(RuntimeError):
         at2.get_potential_energy()
+
+
+def test_calculator_model_with_custom_cutoff():
+    calc = TPCalculator(
+        model="./test_model_custom_cutoff",
+        pad_neighbors_fraction=0.25,
+        min_dist=1.0,
+    )
+
+    def compute_e(symbs, z):
+        at = Atoms(
+            symbs, positions=[[0, 0, 0], [0, 0, z]], cell=(100, 100, 100), pbc=True
+        )
+        desc = f"{symbs} (z={z})"
+        at.calc = calc
+        e = at.get_potential_energy()
+        print(f"{desc} e=", e)
+        return e
+
+    # Ta-*: 7
+    assert compute_e("Ta2", 7.5) == 0
+    assert compute_e("Ta2", 5.5) != 0
+
+    # Ta-Mo: 7
+    assert compute_e("TaMo", 7.5) == 0
+    assert compute_e("MoTa", 5.5) != 0
+
+    # Mo: 4
+    assert compute_e("Mo2", 5.5) == 0
+    assert compute_e("Mo2", 3.5) != 0
+
+    # W: 5
+    assert compute_e("W2", 5.5) == 0
+    assert compute_e("W2", 3.5) != 0
+
+    # Mo-Nb: 3
+    assert compute_e("MoNb", 5.5) == 0
+    assert compute_e("MoNb", 2.5) != 0

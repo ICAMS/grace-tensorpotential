@@ -9,6 +9,7 @@ import tensorflow as tf
 from typing import Literal
 from ase.data import atomic_numbers
 from ase.units import _eps0, _e
+from itertools import product, combinations_with_replacement
 
 from tensorpotential.export import (
     get_symbol,
@@ -24,6 +25,7 @@ from tensorpotential.instructions.base import (
     NoInstructionManager,
 )
 from tensorpotential import constants
+from tensorpotential.utils import process_cutoff_dict
 from tensorpotential.functions.couplings import (
     real_coupling_metainformation,
 )
@@ -32,6 +34,8 @@ from tensorpotential.functions.radial import (
     SinBesselRadialBasisFunction,
     SimplifiedBesselRadialBasisFunction,
     GaussianRadialBasisFunction,
+    ChebSqrRadialBasisFunction,
+    compute_cheb_radial_basis,
 )
 from tensorpotential.functions.spherical_harmonics import SphericalHarmonics
 
@@ -87,17 +91,28 @@ class BondLength(TPInstruction):
     puts it into the data dict.
     """
 
-    input_tensor_spec = {constants.BOND_VECTOR: {"shape": [None, 3], "type": "float"}}
+    input_tensor_spec = {constants.BOND_VECTOR: {"shape": [None, 3], "dtype": "float"}}
 
-    def __init__(self, name="BondLength"):
+    def __init__(self, instruction_with_bonds: TPInstruction = None, name="BondLength"):
         super().__init__(name=name)
+
+        self._instruction_with_bonds_name = (
+            instruction_with_bonds.name
+            if instruction_with_bonds is not None
+            else constants.BOND_VECTOR
+        )
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
-        return tf.linalg.norm(input_data[constants.BOND_VECTOR], axis=1, keepdims=True)
+
+        return tf.linalg.norm(
+            input_data[self._instruction_with_bonds_name],
+            axis=1,
+            keepdims=True,
+        )
 
 
 @capture_init_args
@@ -127,6 +142,7 @@ class ScaledBondVector(TPInstruction):
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         self.epsilon = tf.constant(self._epsilon, dtype=float_dtype)
+        self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
         r_ij = input_data[constants.BOND_VECTOR]
@@ -270,7 +286,7 @@ class RadialBasis(TPInstruction):
         elif isinstance(bonds, str):
             self.input_name = bonds
         else:
-            raise ValueError("Uknown entry for bonds")
+            raise ValueError("Unknown entry for bonds")
         self.kwargs = kwargs
         self.basis_type = basis_type
 
@@ -280,6 +296,8 @@ class RadialBasis(TPInstruction):
             self.basis_function = SimplifiedBesselRadialBasisFunction(**kwargs)
         elif basis_type == "Gaussian":
             self.basis_function = GaussianRadialBasisFunction(**kwargs)
+        elif basis_type == "Cheb":
+            self.basis_function = ChebSqrRadialBasisFunction(**kwargs)
         else:
             raise ValueError(f"Unknown type of the radial basis, {basis_type}")
 
@@ -295,6 +313,106 @@ class RadialBasis(TPInstruction):
         basis = self.basis_function(r)  # * self.norm
 
         return basis
+
+
+@capture_init_args
+class BondSpecificRadialBasisFunction(TPInstruction):
+    """
+    Radial Basis function with a cutoff defined specifically for each
+    i) element:
+        for each type mu_i of a central atom i, a cutoff radius r_c(mu_i) is defined.
+        An atom j of any type mu_j inside r_c(mu_i) around atom i,
+         counts as a neighbor of atom i.
+         specified as {('mu_1',): r_c(mu_1), ('mu_2',): r_c(mu_2), ...}
+    ii) symmetric bond:
+        for each atomic pair ij of types mu_i, mu_j, a cutoff radius r_c(mu_i, mu_j) is defined,
+        such that r_c(mu_i, mu_j) == r_c(mu_j, mu_i)
+        specified as {('mu_1', 'mu_2'): r_c(mu_1, mu_2), ...}
+    iii) bond
+        for each atomic pair ij of types mu_i, mu_j, a cutoff radius r_c(mu_i, mu_j) is defined,
+        such that r_c(mu_i, mu_j) != r_c(mu_j, mu_i)
+        specified as {('mu_1', 'mu_2'): r_c(mu_1, mu_2), ...}
+
+    Parameters
+    ----------
+    :cutoff_dict: dict - cutoff radius of each element pair, {'AB': 3.22, ...}
+    :cutoff_type: str - one of the following: 'element', 'bond', 'symmetric_bond' (default)
+
+    """
+
+    input_tensor_spec = {
+        constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
+        constants.BOND_MU_I: {"shape": [None], "dtype": "int"},
+        constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
+        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        bonds: TPInstruction | str,
+        element_map: dict,
+        cutoff_dict: dict | str,
+        cutoff: float = 5.0,
+        cutoff_type: str = "symmetric_bond",  # or bond
+        cutoff_function_param: float = 5,
+        basis_type: str = "Cheb",
+        nfunc: int = 8,
+        name: str = "BondSpecificRadialBasisFunction",
+    ):
+        super().__init__(name=name)
+        if isinstance(bonds, TPInstruction):
+            self.input_name = bonds.name
+        elif isinstance(bonds, str):
+            self.input_name = bonds
+        else:
+            raise ValueError("Unknown entry for bonds")
+
+        self.nelem = len(element_map)
+
+        self.cutoff_type = cutoff_type
+        assert self.cutoff_type in ["bond", "symmetric_bond"]
+        self.cutoff_dict = process_cutoff_dict(cutoff_dict, element_map)
+        self.default_cutoff = cutoff
+        self.cutoff_function_param = cutoff_function_param
+
+        # by construction, this includes ALL combinations, initialized with default cutoff
+        bond_ind_cut = np.ones((self.nelem, self.nelem)) * self.default_cutoff
+
+        for (el0, el1), cut in self.cutoff_dict.items():
+            i0 = element_map[el0]
+            i1 = element_map[el1]
+            bond_ind_cut[i0, i1] = cut
+            if self.cutoff_type == "symmetric_bond":
+                bond_ind_cut[i1, i0] = cut
+
+        self.bond_cutoff_map = bond_ind_cut.flatten().reshape(-1, 1).astype(np.float64)
+
+        self.basis_type = basis_type
+        self.nfunc = nfunc
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            self.bond_cutoff_map = tf.Variable(
+                self.bond_cutoff_map,
+                dtype=float_dtype,
+                trainable=False,
+                name="RBF_cutoff",
+            )
+            self.is_built = True
+
+    def frwrd(self, input_data: dict, training: bool = False):
+        d = input_data[self.input_name]
+        mu_i = input_data[constants.BOND_MU_I]
+        mu_j = input_data[constants.BOND_MU_J]
+        mu_ij = mu_j + mu_i * tf.constant(self.nelem, dtype=mu_i.dtype)
+        cutoff = tf.gather(self.bond_cutoff_map, mu_ij)
+        if self.basis_type == "Cheb":
+            basis = compute_cheb_radial_basis(
+                d, self.nfunc, cutoff, self.cutoff_function_param
+            )
+        else:
+            raise NotImplementedError("Cheb basis only for now")
+        return tf.where(d >= cutoff, tf.zeros_like(basis, dtype=d.dtype), basis)
 
 
 @capture_init_args
@@ -437,7 +555,7 @@ class MLPRadialFunction(TPInstruction):
         hidden_layers: list[int] = None,
         norm: bool = False,
         name="MLPRadialFunction",
-        activation: callable = None,
+        activation: str = None,
         no_weight_decay: bool = True,
         chemical_embedding_i: ScalarChemicalEmbedding = None,
         chemical_embedding_j: ScalarChemicalEmbedding = None,
@@ -488,7 +606,7 @@ class MLPRadialFunction(TPInstruction):
                 output_size=self.n_rad_max * (self.lmax + 1),
                 no_weight_decay=no_weight_decay,
             )
-        else:
+        elif isinstance(activation, str):
             self.mlp = FullyConnectedMLP(
                 input_size=self.input_shape,
                 hidden_layers=self.hidden_layers,
@@ -496,6 +614,8 @@ class MLPRadialFunction(TPInstruction):
                 activation=activation,
                 no_weight_decay=no_weight_decay,
             )
+        else:
+            raise ValueError("MLP activation must be predefined str or None")
         self.n_out = self.n_rad_max * (self.lmax + 1)
         self.norm = norm
 
@@ -622,6 +742,7 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
     input_tensor_spec = {
         constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
         constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
+        constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
@@ -633,14 +754,24 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
         indicator: ScalarChemicalEmbedding = None,
         indicator_l_depend: bool = False,
         sum_neighbors: bool = True,
-        avg_n_neigh: float = 1.0,
+        avg_n_neigh: float | dict = 1.0,
     ):
         super().__init__(name=name, lmax=angular.lmax)
         self.radial = radial
         self.angular = angular
         self.indicator = indicator
         self.sum_neighbors = sum_neighbors
-        self.inv_avg_n_neigh = 1.0 / avg_n_neigh
+        if isinstance(avg_n_neigh, float):
+            self.per_specie_n_neigh = False
+            self.inv_avg_n_neigh = 1.0 / avg_n_neigh
+        elif isinstance(avg_n_neigh, dict):
+            self.per_specie_n_neigh = True
+            self.inv_avg_n_neigh = np.zeros((len(avg_n_neigh), 1))
+            for k, v in avg_n_neigh.items():
+                val = v if v > 0 else 1.0
+                self.inv_avg_n_neigh[k] = 1.0 / val
+        else:
+            raise TypeError("avg_n_neigh must be float or dict")
 
         self.indicator_l_depend = indicator_l_depend
         if self.indicator is None:
@@ -701,7 +832,16 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
                 a_nl, segment_ids=ind_i, num_segments=batch_tot_nat
             )
             if self.inv_avg_n_neigh is not None:
-                a_nl *= self.inv_avg_n_neigh
+                if self.per_specie_n_neigh:
+                    nneigh_norm = tf.gather(
+                        self.inv_avg_n_neigh,
+                        input_data[constants.ATOMIC_MU_I],
+                        axis=0,
+                    )
+                    a_nl *= nneigh_norm[:, :, tf.newaxis]
+                    pass
+                else:
+                    a_nl *= self.inv_avg_n_neigh
 
         return a_nl
 
@@ -735,7 +875,7 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         l_max_ind: int = None,
         max_sum_l: int = None,
         sum_neighbors: bool = True,
-        avg_n_neigh: float = 1.0,
+        avg_n_neigh: float | dict = 1.0,
         normalize: bool = False,
     ):
         super().__init__(name=name, lmax=Lmax)
@@ -749,7 +889,7 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                 radia_basis is not None
             ), f"{self.__class__.__name__}_{self.name}: If :radial: is None, :radia_basis: should be provided"
             if hidden_layers is None:
-                self.hidden_layers = [64, 64, 64]
+                self.hidden_layers = [64, 64]
             else:
                 self.hidden_layers = hidden_layers
             self.radia_basis = radia_basis
@@ -764,7 +904,17 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         self.indicator = indicator
 
         self.sum_neighbors = sum_neighbors
-        self.inv_avg_n_neigh = 1.0 / avg_n_neigh
+        if isinstance(avg_n_neigh, float):
+            self.per_specie_n_neigh = False
+            self.inv_avg_n_neigh = 1.0 / avg_n_neigh
+        elif isinstance(avg_n_neigh, dict):
+            self.per_specie_n_neigh = True
+            self.inv_avg_n_neigh = np.zeros((len(avg_n_neigh), 1))
+            for k, v in avg_n_neigh.items():
+                val = v if v > 0 else 1.0
+                self.inv_avg_n_neigh[k] = 1.0 / val
+        else:
+            raise TypeError("avg_n_neigh must be float or dict")
 
         assert self.angular.coupling_meta_data is not None
         assert self.indicator.coupling_meta_data is not None
@@ -816,11 +966,12 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             self.n_l_out = np.max(l_out_map) + 1
             self.l_out_map = tf.constant(l_out_map, dtype=tf.int32)
             self.radia_basis_name = radia_basis.name
+            self.ind_size = self.indicator.n_out
             with NoInstructionManager():
                 self.mlp = FullyConnectedMLP(
                     input_size=radia_basis.basis_function.nfunc,
                     hidden_layers=self.hidden_layers,
-                    output_size=self.n_out * self.n_l_out,
+                    output_size=self.n_out * self.n_l_out * self.ind_size,
                 )
 
         init_coupling_symbols(self)
@@ -871,10 +1022,10 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         if self.internal_radial:
             basis = input_data[self.radia_basis.name]
             r = self.mlp(basis)
-            r = tf.reshape(r, [-1, self.n_out, self.n_l_out])
+            r = tf.reshape(r, [-1, self.n_out, self.ind_size, self.n_l_out])
             r = tf.gather(r, self.l_out_map, axis=-1)
-
-            prod = r * prod
+            # prod = r * prod
+            prod = tf.einsum("jnkl,jkl->jnl", r, prod)
 
         if self.sum_neighbors:
             prod = tf.math.unsorted_segment_sum(
@@ -884,7 +1035,16 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                 name=f"sum_nei_{self.name}",
             )
             if self.inv_avg_n_neigh is not None:
-                prod *= self.inv_avg_n_neigh
+                if self.per_specie_n_neigh:
+                    nneigh_norm = tf.gather(
+                        self.inv_avg_n_neigh,
+                        input_data[constants.ATOMIC_MU_I],
+                        axis=0,
+                    )
+                    prod *= nneigh_norm[:, :, tf.newaxis]
+                    pass
+                else:
+                    prod *= self.inv_avg_n_neigh
 
         return prod
 
@@ -1088,24 +1248,22 @@ class ProductFunction(TPEquivariantInstruction):
                 w = tf.gather(self.lft_out, self.left_collection["w_l_tile"], axis=-1)
                 left = tf.einsum("knl,anl->akl", w, left) * self.norm_left
 
-        if self.is_left_right_equal:
-            right = left
-        else:
-            right = input_data[self.right.name]
-            if self.do_reshape:
-                if self.chemical_embeding is not None:
-                    w = tf.einsum("zd,dknl->zknl", z_d, self.rght_out)
-                    w = tf.gather(w, self.right_collection["w_l_tile"], axis=-1)
-                    w_a = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
-                    right = tf.einsum(
-                        "aknl,anl->akl", w_a, right, name=f"reshape_left_{self.name}"
-                    )
-                    right = right * self.norm_right
-                else:
-                    w = tf.gather(
-                        self.rght_out, self.right_collection["w_l_tile"], axis=-1
-                    )
-                    right = tf.einsum("knl,anl->akl", w, right) * self.norm_right
+        # if self.is_left_right_equal:
+        #     right = left
+        # else:
+        right = input_data[self.right.name]
+        if self.do_reshape:
+            if self.chemical_embeding is not None:
+                w = tf.einsum("zd,dknl->zknl", z_d, self.rght_out)
+                w = tf.gather(w, self.right_collection["w_l_tile"], axis=-1)
+                w_a = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
+                right = tf.einsum(
+                    "aknl,anl->akl", w_a, right, name=f"reshape_left_{self.name}"
+                )
+                right = right * self.norm_right
+            else:
+                w = tf.gather(self.rght_out, self.right_collection["w_l_tile"], axis=-1)
+                right = tf.einsum("knl,anl->akl", w, right) * self.norm_right
         lft = tf.gather(left, self.left_ind, axis=2)
         rght = tf.gather(right, self.right_ind, axis=2)
 
@@ -1292,7 +1450,7 @@ class FunctionReduce(TPEquivariantInstruction):
             ls_max = [ls_max] * len(instructions)
         self.ls_max = ls_max
         self.n_out = n_out
-        self.allowed_l_p = allowed_l_p
+        self.allowed_l_p = [list(lp) for lp in allowed_l_p]
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
         self.chemical_embedding = chemical_embedding
@@ -1586,7 +1744,8 @@ class FunctionReduceN(TPEquivariantInstruction):
         self.ls_max = ls_max
         self.n_out = n_out
         self.out_norm = out_norm
-        self.allowed_l_p = allowed_l_p
+        # enforce conversion to list of lists
+        self.allowed_l_p = [list(lp) for lp in allowed_l_p]
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
         self.chemical_embedding = chemical_embedding
@@ -1629,7 +1788,7 @@ class FunctionReduceN(TPEquivariantInstruction):
                 if [l, p] in self.allowed_l_p:
                     for m in range(-l, l + 1):
                         lbl = 0 if p > 0 else 1
-                        # TODO: rethink how to define history here. Then, possibly move to the base class method
+                        # TODO:  possibly move to the base class method
                         collector_data.append([l, m, f"", p, l])
         self.coupling_meta_data = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
@@ -1797,7 +1956,7 @@ class FunctionReduceN(TPEquivariantInstruction):
                     setattr(
                         self,
                         f"norm_{k}",
-                        tf.constant(1 / n_in**0.5, dtype=float_dtype),  # maybe???
+                        tf.constant(1 / n_in**0.5, dtype=float_dtype),
                     )
 
             elif self.init_vars == "zeros":
@@ -1902,7 +2061,7 @@ class FCRight2Left(TPEquivariantInstruction):
         name: str,
         n_out: int,
         left_coefs: bool = True,
-        is_central_atom_type_dependent: bool = False,
+        is_central_atom_type_dependent: list[bool] | bool = None,
         number_of_atom_types: int = None,
         init_vars: Literal["random", "zeros"] = "random",
         norm_out: bool = False,
@@ -1916,7 +2075,22 @@ class FCRight2Left(TPEquivariantInstruction):
         # assert left.n_out == n_out
         self.n_out = n_out
 
-        self.is_central_atom_type_dependent = is_central_atom_type_dependent
+        if is_central_atom_type_dependent is None:
+            self.is_central_atom_type_dependent = [False, False]
+        else:
+            if isinstance(is_central_atom_type_dependent, list):
+                self.is_central_atom_type_dependent = is_central_atom_type_dependent
+            elif isinstance(is_central_atom_type_dependent, bool):
+                self.is_central_atom_type_dependent = [
+                    is_central_atom_type_dependent,
+                    is_central_atom_type_dependent,
+                ]
+            else:
+                raise ValueError(
+                    f"Unexpected type for :is_central_atom_type_dependent:"
+                    f" {type(is_central_atom_type_dependent)} in"
+                    f" {self.__class__.__name__}_{self.name}"
+                )
         self.number_of_atom_types = number_of_atom_types
         self.norm_out = norm_out
         assert init_vars in [
@@ -1925,11 +2099,13 @@ class FCRight2Left(TPEquivariantInstruction):
         ], f'Unknown variable initialization "{init_vars}"'
         self.init_vars = init_vars
 
-        if self.is_central_atom_type_dependent:
-            assert self.number_of_atom_types is not None
-            self.eq = "aknw,anw->wak"
-        else:
-            self.eq = "knw,anw->wak"
+        # if self.is_central_atom_type_dependent:
+        #     assert self.number_of_atom_types is not None
+        #     self.eq = "aknw,anw->wak"
+        # else:
+        #     self.eq = "knw,anw->wak"
+        self.eq_elem = "aknw,anw->wak"
+        self.eq = "knw,anw->wak"
 
         self.coupling_meta_data = self.left.coupling_meta_data.copy()
 
@@ -1971,7 +2147,7 @@ class FCRight2Left(TPEquivariantInstruction):
     def build(self, float_dtype):
         if self.left_coefs:
             self.w_tile_left = tf.constant(self.w_tile_left, dtype=tf.int32)
-            if self.is_central_atom_type_dependent:
+            if self.is_central_atom_type_dependent[0]:
                 c_shape_left = [
                     self.number_of_atom_types,
                     self.n_out,
@@ -1984,7 +2160,7 @@ class FCRight2Left(TPEquivariantInstruction):
                     self.left.n_out,
                     self.w_shape_left,
                 ]
-        if self.is_central_atom_type_dependent:
+        if self.is_central_atom_type_dependent[1]:
             c_shape_right = [
                 self.number_of_atom_types,
                 self.n_out,
@@ -2025,10 +2201,11 @@ class FCRight2Left(TPEquivariantInstruction):
         left = input_data[self.left.name]
         if self.left_coefs:
             w_left = tf.gather(self.w_left, self.w_tile_left, axis=-1)
-            if self.is_central_atom_type_dependent:
+            if self.is_central_atom_type_dependent[0]:
                 w_left = tf.gather(w_left, input_data[constants.ATOMIC_MU_I], axis=0)
                 left = (
-                    tf.einsum(self.eq, w_left, left, name=f"ein_left") * self.norm_left
+                    tf.einsum(self.eq_elem, w_left, left, name=f"ein_left")
+                    * self.norm_left
                 )
             else:
                 left = (
@@ -2039,10 +2216,16 @@ class FCRight2Left(TPEquivariantInstruction):
 
         right = tf.gather(input_data[self.right.name], self.collect_from, axis=-1)
         w_right = tf.gather(self.w_right, self.w_tile_right, axis=-1)
-        if self.is_central_atom_type_dependent:
+        if self.is_central_atom_type_dependent[1]:
             w_right = tf.gather(w_right, input_data[constants.ATOMIC_MU_I], axis=0)
-
-        right = tf.einsum(self.eq, w_right, right, name=f"ein_right") * self.norm_right
+            right = (
+                tf.einsum(self.eq_elem, w_right, right, name=f"ein_right")
+                * self.norm_right
+            )
+        else:
+            right = (
+                tf.einsum(self.eq, w_right, right, name=f"ein_right") * self.norm_right
+            )
 
         left = tf.tensor_scatter_nd_add(
             left, tf.reshape(self.collect_to, [-1, 1]), right, name=f"add_right_to_left"
@@ -2066,7 +2249,6 @@ class FunctionReduceParticular(TPEquivariantInstruction):
         name: str,
         selected_l: int,
         selected_p: -1 | 1,
-        n_in: int,
         n_out: int,
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
@@ -2075,7 +2257,6 @@ class FunctionReduceParticular(TPEquivariantInstruction):
         self.instructions = instructions
         self.selected_l = selected_l
         self.selected_p = selected_p
-        self.n_in = n_in
         self.n_out = n_out
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
@@ -2093,7 +2274,7 @@ class FunctionReduceParticular(TPEquivariantInstruction):
         for m in range(-self.selected_l, self.selected_l + 1):
             lbl = 0 if self.selected_p > 0 else 1
             collector_data.append(
-                [self.selected_l, m, f"({lbl},0)", self.selected_p, self.selected_l]
+                [self.selected_l, m, f"", self.selected_p, self.selected_l]
             )
         self.coupling_meta_data = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
@@ -2116,19 +2297,20 @@ class FunctionReduceParticular(TPEquivariantInstruction):
                 np.array(instruction_collection["total_sum_ind"]).reshape(-1, 1),
                 dtype=tf.int32,
             )
+            instruction_collection["n_out"] = instr.n_out
             self.selector[instr.name] = instruction_collection
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         for k, v in self.selector.items():
             w_shape = v["w_shape"]
+            n_in = v["n_out"]
             if self.is_central_atom_type_dependent:
-                c_shape = [self.number_of_atom_types, self.n_out, self.n_in, w_shape]
+                c_shape = [self.number_of_atom_types, self.n_out, n_in, w_shape]
             else:
-                c_shape = [self.n_out, self.n_in, w_shape]
+                c_shape = [self.n_out, n_in, w_shape]
 
-            # limit = 1.0
-            limit = (2 / (self.n_in * w_shape)) ** 0.5
+            limit = 1.0
             self.norm = tf.constant(1.0, dtype=float_dtype)
             setattr(
                 self,
@@ -2137,6 +2319,11 @@ class FunctionReduceParticular(TPEquivariantInstruction):
                     tf.random.normal(c_shape, stddev=limit, dtype=float_dtype),
                     name=f"reducing_{k}",
                 ),
+            )
+            setattr(
+                self,
+                f"norm_{k}",
+                tf.constant(1 / n_in**0.5, dtype=float_dtype),
             )
         self.float_dtype = float_dtype
         self.is_built = True
@@ -2169,7 +2356,8 @@ class FunctionReduceParticular(TPEquivariantInstruction):
             else:
                 eq = "knw,anw->wak"
             # w_al = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
-            pr = tf.einsum(eq, w, A_r, name=f"ein_{instr.name}") * self.norm
+            norm = getattr(self, f"norm_{instr.name}")
+            pr = tf.einsum(eq, w, A_r, name=f"ein_{instr.name}") * norm
 
             collection = tf.tensor_scatter_nd_add(
                 collection, instruction_collection["total_sum_ind"], pr
@@ -2208,7 +2396,7 @@ class ZBLPotential(TPInstruction):
         elif isinstance(bonds, str):
             self.input_name = bonds
         else:
-            raise ValueError("Uknown entry for bonds")
+            raise ValueError("Unknown entry for bonds")
 
         self.element_map_symbols = tf.Variable(
             list(element_map.keys()), trainable=False, name="element_map_symbols"
@@ -2218,36 +2406,24 @@ class ZBLPotential(TPInstruction):
         )
 
         self.delta_cutoff = np.array(delta_cutoff).reshape(1, 1)
-        if isinstance(cutoff, float):
+        if isinstance(cutoff, (float, int)):
             self.cutoff = np.array(cutoff).reshape(1, 1)
-            # self.inner_cutoff = np.array(cutoff - delta_cutoff).reshape(1, 1)
-            self.bond_cutoff = False
+            self.bond_zbl_cutoff = False
         elif isinstance(cutoff, dict):
-            self.bond_cutoff = True
+            self.bond_zbl_cutoff = True
             self.nelem = len(element_map)
-            #  { ("H", "H"): 1.23}
-            s = self.nelem * (self.nelem - 1) / 2
-            bon_ind_cut = {}
-            for (el0, el1), cut in cutoff.items():
+
+            expanded_cutoff_dict = process_cutoff_dict(cutoff, element_map)
+            bond_ind_cut = np.zeros((self.nelem, self.nelem))
+            for (el0, el1), cut in expanded_cutoff_dict.items():
                 i0 = element_map[el0]
                 i1 = element_map[el1]
-                mu_ij = (
-                    s
-                    - (self.nelem - np.min([i0, i1]))
-                    * (self.nelem - np.min([i0, i1]) - 1)
-                    / 2
-                    + np.max([i0, i1])
-                )
-                assert int(mu_ij) not in bon_ind_cut, (
-                    f"{self.__repr__()}: "
-                    f"Bond ({el0}, {el1}) cutoff is already set to {bon_ind_cut[int(mu_ij)]} but trying to set"
-                    f" a new value of {cut}. Only one cutoff value per symmetric bond should be provided."
-                )
-                bon_ind_cut[int(mu_ij)] = cut
-            bon_ind_cut = dict(sorted(bon_ind_cut.items()))
-            bond_cuts = np.array([v for k, v in bon_ind_cut.items()]).reshape(-1, 1)
-            self.bond_cutoff_map = bond_cuts
-            # self.inner_cutoff = np.array(bond_cuts - delta_cutoff).reshape(-1, 1)
+                bond_ind_cut[i0, i1] = cut
+                bond_ind_cut[i1, i0] = cut
+
+            self.bond_zbl_cutoff_map = (
+                bond_ind_cut.flatten().reshape(-1, 1).astype(np.float64)
+            )
         else:
             raise ValueError(f"Unsupported cutoff type {type(cutoff)}")
 
@@ -2276,10 +2452,9 @@ class ZBLPotential(TPInstruction):
                 trainable=False,
                 name="ZBL_delta_cutoff",
             )
-            if self.bond_cutoff:
-                self.nelem = tf.constant(self.nelem, dtype=tf.float32)
-                self.bond_cutoff_map = tf.Variable(
-                    self.bond_cutoff_map,
+            if self.bond_zbl_cutoff:
+                self.bond_zbl_cutoff_map = tf.Variable(
+                    self.bond_zbl_cutoff_map,
                     dtype=float_dtype,
                     trainable=False,
                     name="ZBL_cutoff",
@@ -2336,28 +2511,28 @@ class ZBLPotential(TPInstruction):
             + (1 / (nl_dist + self.eps)) * self.d2phi(nl_dist / a) / (a**2)
         )
 
-    def remap_bond_index(self, mu_i, mu_j):
-        mu_ij = tf.cast(
-            tf.concat([tf.expand_dims(mu_i, 1), tf.expand_dims(mu_j, 1)], axis=1),
-            dtype=tf.float32,
-        )
-        s = self.nelem * (self.nelem - 1) / 2
-        mu_ij = (
-            s
-            - (self.nelem - tf.reduce_min(mu_ij, axis=1))
-            * (self.nelem - tf.reduce_min(mu_ij, axis=1) - 1)
-            / 2
-            + tf.reduce_max(mu_ij, axis=1)
-        )
-        return tf.cast(mu_ij, dtype=tf.int32)
+    # def remap_bond_index(self, mu_i, mu_j):
+    #     mu_ij = tf.cast(
+    #         tf.concat([tf.expand_dims(mu_i, 1), tf.expand_dims(mu_j, 1)], axis=1),
+    #         dtype=tf.float32,
+    #     )
+    #     s = self.nelem * (self.nelem - 1) / 2
+    #     mu_ij = (
+    #         s
+    #         - (self.nelem - tf.reduce_min(mu_ij, axis=1))
+    #         * (self.nelem - tf.reduce_min(mu_ij, axis=1) - 1)
+    #         / 2
+    #         + tf.reduce_max(mu_ij, axis=1)
+    #     )
+    #     return tf.cast(mu_ij, dtype=tf.int32)
 
     def frwrd(self, input_data: dict, training=False):
         d = input_data[self.input_name]
         mu_i = input_data[constants.BOND_MU_I]
         mu_j = input_data[constants.BOND_MU_J]
-        if self.bond_cutoff:
-            mu_ij = tf.stop_gradient(self.remap_bond_index(mu_i, mu_j))
-            cutoff = tf.gather(self.bond_cutoff_map, mu_ij)
+        if self.bond_zbl_cutoff:
+            mu_ij = mu_j + mu_i * tf.constant(self.nelem, dtype=mu_i.dtype)
+            cutoff = tf.gather(self.bond_zbl_cutoff_map, mu_ij)
         else:
             cutoff = self.cutoff
 

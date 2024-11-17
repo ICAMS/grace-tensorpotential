@@ -1,0 +1,55 @@
+seed: 42
+cutoff: 6
+cutoff_dict: DEFAULT_CUTOFF_1L #{Mo: 4, MoNb: 3, W: 5, Ta*: 7 }
+
+data:
+  filename: "../data/MoNbTaW_train50.pkl.gz"
+  train_size: 20
+  test_filename: "../data/MoNbTaW_test50.pkl.gz"
+  test_size: 20
+
+potential:
+  preset: "GRACE_1LAYER"
+  scale: True
+  kwargs: { lmax: 2,
+            basis_type: "Cheb",
+            rad_base_normalized: True,
+            n_rad_base: 2,
+            n_rad_max: 2,
+            embedding_size: 2,
+            n_mlp_dens: 1,
+            max_order: 1,
+            zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }
+  }
+
+fit:
+  #  strategy: mirrored
+  loss: {
+    energy: { type: square, weight: 1},#  normalize_by_samples: False},
+    forces: { type: square, weight: 5}, # normalize_by_samples: False},
+
+    switch: { after_iter: 1, energy: { weight: 5 }, forces: { weight: 2 } }
+
+  }
+
+#  normalize_weights: True  # norm per-sample weights to sum-up to one
+#  normalize_force_per_structure: True # force-weights is divided by number of atoms
+
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 0.1, "amsgrad": True }
+  learning_rate_reduction: { patience: 1, factor: 0.8, min: 9.e-2, stop_at_min: True, resume_lr: True }
+  #  optimizer: L-BFGS-B
+  maxiter: 3
+
+  batch_size: 10
+  test_batch_size: 20
+  train_max_n_buckets: 2
+  test_max_n_buckets: 1
+
+
+  checkpoint_freq: 20
+  progressbar: False
+  train_shuffle: True
+  #train_cycle: True
+  jit_compile: False

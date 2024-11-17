@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import itertools
 import json
 import logging
@@ -21,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:
 log = logging.getLogger()
 
 MININTERVAL = 1  # min interval for progress bar, in seconds
+eV_A3_to_GPa = 160.2176621
 
 
 def dump_metrics(filename, metrics):
@@ -125,6 +128,10 @@ def train_one_epoch(
             next(data_iter)  # .get_single_element()
             for _ in range(distr_strategy.num_replicas_in_sync)
         ]
+        # sort b_data by number of total neighbours, in order to rebalance load in multi-GPU env
+        # as GPU:0 should synchronize  grads and apply them
+        # if len(b_data) > 1:
+        #     b_data = sorted(b_data, key=lambda b: len(b[constants.BOND_IND_I]))
         num_processed_batches += len(b_data)
         # TODO: filter out unnecessary data, not to submit to GPU
         t_start = time.perf_counter()
@@ -224,11 +231,11 @@ def train_adam(
     seed=None,
     train_grouping_df=None,
     test_grouping_df=None,
+    compute_init_stats: bool = False,
 ):
     epochs = fit_config.get("maxiter", 500)
     checkpoint_freq = fit_config.get("checkpoint_freq", 10)
     progress_bar = fit_config.get("progressbar", False)
-    tp.epoch = 1
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e99
@@ -240,6 +247,11 @@ def train_adam(
     lr_min = None
     resume_lr = True
     loss_explosion_threshold = None
+
+    if fit_config.get("reset_optimizer", False):
+        log.info("Resetting optimizers by reinitialization")
+        tp.reset_optimizer()
+
     if LEARNING_RATE_REDUCTION in fit_config:
         lr_red_params = fit_config[LEARNING_RATE_REDUCTION]
         patience = lr_red_params.get("patience", None)
@@ -262,22 +274,6 @@ def train_adam(
 
     loss_weights_switch = None
 
-    # adaptive loss weights
-    # TODO: add to doc
-    # is_adaptive_loss_switch = "adaptive_loss_weights" in fit_config
-    # if is_adaptive_loss_switch:
-    #     # initialize loss weights history
-    #     loss_weights_history = defaultdict(list)
-    #     for k, v in tp.loss_function.get_loss_component_weights().items():
-    #         loss_weights_history[k].append(v)
-    #     # initialize contributions
-    #     loss_components_no_weight_history = defaultdict(list)
-    #     adaptive_loss_weights = fit_config["adaptive_loss_weights"]
-    #     log.info(
-    #         f"Adaptive loss component weighting will be used: {adaptive_loss_weights}"
-    #     )
-    #     adaptive_switch_freq = int(adaptive_loss_weights.get("freq", 5))
-
     new_loss_params = {}
     if "loss_weights_switch" in fit_config:
         log.warning("DEPRECATION WARNING!!! Use new loss switch params")
@@ -292,6 +288,75 @@ def train_adam(
         loss_weights_switch = switch_params.pop("after_iter")
         new_loss_params = switch_params
 
+    #### INIT STATS ####
+    if compute_init_stats:
+        tp.epoch = 0
+
+        train_acc_metrics, train_agg_concat_per_structure_metrics = test_one_epoch(
+            tp,
+            train_ds,
+            strategy,
+            cycle=fit_config.get("train_cycle", False),
+            compute_concat_per_structure_metrics=True,
+        )
+        initial_train_metrics = process_acc_metrics(
+            train_acc_metrics, n_batches=len(train_ds)
+        )
+        initial_train_metrics["epoch"] = tp.epoch
+        if train_grouping_df is not None:
+            compute_per_group_metrics(
+                train_grouping_df,
+                train_agg_concat_per_structure_metrics,
+                initial_train_metrics,
+                n_batches=len(train_ds),
+            )
+        # replace "test" with "train" for consistency:
+        initial_train_metrics = {
+            k.replace("test", "train"): v for k, v in initial_train_metrics.items()
+        }
+        dump_metrics(
+            filename=os.path.join(tp.output_dir, "train_metrics.yaml"),
+            metrics=initial_train_metrics,
+        )
+        if test_ds is not None:
+            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
+                tp,
+                test_ds,
+                strategy,
+                cycle=fit_config.get("test_cycle", False),
+                compute_concat_per_structure_metrics=True,
+            )
+            # tp.on_test_end()
+            initial_test_metrics = process_acc_metrics(
+                test_acc_metrics,
+                n_batches=len(test_ds),
+            )
+            initial_test_metrics["epoch"] = tp.epoch
+
+            if test_grouping_df is not None:
+                compute_per_group_metrics(
+                    test_grouping_df,
+                    test_agg_concat_per_structure_metrics,
+                    initial_test_metrics,
+                    n_batches=len(test_ds),
+                )
+
+            msg = generate_train_test_message(
+                initial_train_metrics, initial_test_metrics, tp.epoch, epochs
+            )
+            log.info(msg)
+            # save test metrics to JSON-like file
+            dump_metrics(
+                filename=os.path.join(tp.output_dir, "test_metrics.yaml"),
+                metrics=initial_test_metrics,
+            )
+        else:  # test_ds is None
+            log.info(
+                f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
+            )
+    #### END INIT STATS ####
+
+    tp.epoch = 1
     last_lr_reduction_epoch = 0
     min_lr_achieved = False
     while tp.epoch <= epochs:
@@ -457,56 +522,6 @@ def train_adam(
 
         tp.epoch += 1
 
-        # ADAPTIVE E-F WEIGHTS SWITCHING
-        # if is_adaptive_loss_switch:
-        #     cur_loss_comp_weights = tp.loss_function.get_loss_component_weights()
-        #     loss_comp_names = sorted(cur_loss_comp_weights.keys())
-        #     for cur_loss_comp_name in loss_comp_names:
-        #         k = f"loss_component/{cur_loss_comp_name}/train"
-        #         if k in final_train_metrics:
-        #             loss_components_no_weight_history[cur_loss_comp_name].append(
-        #                 float(final_train_metrics[k])
-        #                 / cur_loss_comp_weights[cur_loss_comp_name]
-        #             )  # l's
-        #     if len(loss_components_no_weight_history[loss_comp_names[0]]) > 1:
-        #         s_list = []
-        #         for k in loss_comp_names:
-        #             lh = loss_components_no_weight_history[k]
-        #             # s_list.append(lh[-1] - lh[-2])
-        #             s_list.append(lh[-1])
-        #         # TODO: some normalization of s_list ?
-        #         s_list = np.array(s_list)
-        #         print("s_list (non-norm)=", s_list)
-        #         s_list /= np.sum(np.abs(s_list)) + 1e-9
-        #         print("s_list (norm)=", s_list)
-        #         beta = adaptive_loss_weights.get("beta", 1.0)  # add to params
-        #         alpha_list = np.exp(beta * s_list) / np.sum(np.exp(beta * s_list))
-        #         print("alpha_list=", alpha_list)
-        #         # loss_weights_history # alpha's # epoch_loss_weight
-        #         for name, alpha in zip(loss_comp_names, alpha_list):
-        #             loss_weights_history[name].append(alpha)
-        #
-        #         # update loss weights
-        #         if (
-        #             len(loss_weights_history[loss_comp_names[0]])
-        #         ) % adaptive_switch_freq == 0:
-        #             print(
-        #                 "adaptive switch: loss_weights_history=", loss_weights_history
-        #             )
-        #             factor = adaptive_loss_weights.get("factor", 1.0)
-        #             upd_weights = {
-        #                 k: factor * np.mean(v) for k, v in loss_weights_history.items()
-        #             }
-        #             log.info(f"Adaptive loss update to weights {upd_weights}")
-        #             tp.loss_function.set_loss_component_weights(upd_weights)
-        #
-        #             # reset loss loss_weights_history
-        #             loss_weights_history = {
-        #                 k: [] for k, v in loss_weights_history.items()
-        #             }
-    # tp.finalize_ema_values()
-    # tp.optimizer.finalize_variable_values(tp.model.trainable_variables)
-
 
 def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
     log.info(
@@ -533,6 +548,7 @@ def train_bfgs(
     seed=None,
     train_grouping_df=None,
     test_grouping_df=None,
+    compute_init_stats: bool = False,
 ):
     epochs = fit_config.get("maxiter", 500)
     checkpoint_freq = fit_config.get("checkpoint_freq", 10)
@@ -541,6 +557,56 @@ def train_bfgs(
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e16
+    tp.epoch = 0
+
+    #### INIT STATS ####
+    if compute_init_stats:
+        train_acc_metrics, train_agg_concat_per_structure_metrics = test_one_epoch(
+            tp, train_ds, strategy, compute_concat_per_structure_metrics=True
+        )
+        initial_train_metrics = process_acc_metrics(
+            train_acc_metrics,
+            n_batches=len(train_ds),
+        )
+        initial_train_metrics["epoch"] = tp.epoch
+        initial_train_metrics = {
+            k.replace("test", "train"): v for k, v in initial_train_metrics.items()
+        }
+        dump_metrics(
+            filename=os.path.join(tp.output_dir, "train_metrics.yaml"),
+            metrics=initial_train_metrics,
+        )
+        if test_ds is not None:
+            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
+                tp, test_ds, strategy, compute_concat_per_structure_metrics=True
+            )
+            initial_test_metrics = process_acc_metrics(
+                test_acc_metrics,
+                n_batches=len(test_ds),
+            )
+            initial_test_metrics["epoch"] = tp.epoch
+            if test_grouping_df is not None:
+                compute_per_group_metrics(
+                    test_grouping_df,
+                    test_agg_concat_per_structure_metrics,
+                    initial_test_metrics,
+                    n_batches=len(test_ds),
+                )
+            dump_metrics(
+                filename=os.path.join(tp.output_dir, "test_metrics.yaml"),
+                metrics=initial_test_metrics,
+            )
+            msg = generate_train_test_message(
+                initial_train_metrics, initial_test_metrics, tp.epoch, epochs
+            )
+            log.info(msg)
+            current_test_loss = initial_test_metrics["total_loss/test"]
+            best_test_loss = current_test_loss
+        else:
+            log.info(
+                f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
+            )
+    #### END INIT STATS ####
 
     tp.epoch = 1
     opt = fit_config["optimizer"]
@@ -701,9 +767,9 @@ def normalize_group_metrics(total_metrics, num_struct, num_atoms, n_batches):
             elif "df" in k:
                 final_metrics["mae/f_comp"] = v / num_atoms / 3
             elif "dv" in k:
-                final_metrics["mae/virial"] = v / num_struct
+                final_metrics["mae/virial"] = v / num_struct / 6
             elif "stress" in k:
-                final_metrics["mae/stress"] = v / num_struct
+                final_metrics["mae/stress"] = v / num_struct / 6
         elif "sqr" in k:
             if "depa" in k:
                 final_metrics["rmse/depa"] = np.sqrt(v / num_struct)
@@ -712,9 +778,9 @@ def normalize_group_metrics(total_metrics, num_struct, num_atoms, n_batches):
             elif "df" in k:
                 final_metrics["rmse/f_comp"] = np.sqrt(v / num_atoms / 3)
             elif "dv" in k:
-                final_metrics["rmse/virial"] = np.sqrt(v / num_struct)
+                final_metrics["rmse/virial"] = np.sqrt(v / num_struct / 6)
             elif "stress" in k:
-                final_metrics["rmse/stress"] = np.sqrt(v / num_struct)
+                final_metrics["rmse/stress"] = np.sqrt(v / num_struct / 6)
         elif "loss" in k:
             # overall loss should be normalized by number of structures
             final_metrics[k] = float(v) / n_batches  # per dataset
@@ -757,28 +823,26 @@ def try_load_checkpoint(
 
 
 def generate_train_test_message(final_train_metrics, final_test_metrics, epoch, epochs):
-    msg = f"Iteration #{epoch}/{epochs} TRAIN(TEST): "
+    METRICS_SKIP_LIST = [
+        "mae/de",
+        "rmse/de",
+        "rmse/virial",
+        "mae/virial",
+        "epoch",
+        "per_group_metrics",
+    ]
+    if epoch == 0:
+        msg = f"INITIAL    TRAIN(TEST): "
+    else:
+        msg = f"Iteration #{epoch}/{epochs} TRAIN(TEST): "
     for k in final_train_metrics:
-        if (
-            k
-            in [
-                "mae/de",
-                "rmse/de",
-                "rmse/virial",
-                "mae/virial",
-                "epoch",
-                "per_group_metrics",
-            ]
-            or "total_time" in k
-            or "loss_component" in k
-        ):
+        if k in METRICS_SKIP_LIST or "total_time" in k or "loss_component" in k:
             continue
         if k == "total_loss/train":
-            msg += f"{k}: {final_train_metrics[k]:.3e} "
+            msg += f"total_loss: {final_train_metrics[k]:.3e} "
             msg += f"({final_test_metrics['total_loss/test']:.3e}) "
         elif "stress" in k:
             # convert eV/A^3 -> GPa
-            eV_A3_to_GPa = 160.2176621
             msg += f"{k}(GPa): {final_train_metrics[k]*eV_A3_to_GPa:.3e} "
             if k in final_test_metrics:
                 msg += f"({final_test_metrics[k]*eV_A3_to_GPa:.3e}) "

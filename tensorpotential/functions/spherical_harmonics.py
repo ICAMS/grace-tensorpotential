@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import tensorflow as tf
 
 from numpy import pi as np_pi
