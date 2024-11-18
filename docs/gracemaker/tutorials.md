@@ -315,13 +315,6 @@ Note: The currently available GRACE-1LAYER models do not support MPI paralleliza
 
 Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
 
-
-
-
-=======
-
-Here’s an edited version with improved grammar and style:
-
 ---
 
 ### 3.3. Usage in LAMMPS
