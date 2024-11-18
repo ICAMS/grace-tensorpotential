@@ -8,7 +8,7 @@ software geared towards support for multi-component materials and graph architec
 
 ## Series of ACE models
 
-![Line of ACE models](../imgs/models.png){ align=left }
+![Line of ACE models](imgs/models.png){ align=left }
 
 
 ## Features
