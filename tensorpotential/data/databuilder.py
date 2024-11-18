@@ -413,7 +413,9 @@ class GeometricalDataBuilder(AbstractDataBuilder):
         pad_nat, pad_nneigh, pad_nstruct = get_padding_dims(batch, max_pad_dict)
 
         max_nat = np.array(max_pad_dict[constants.PAD_MAX_N_ATOMS]).astype(np.int32)
-        max_structs = max_pad_dict[constants.PAD_MAX_N_STRUCTURES].astype(np.int32)
+        max_structs = np.array(max_pad_dict[constants.PAD_MAX_N_STRUCTURES]).astype(
+            np.int32
+        )
 
         batch[constants.N_ATOMS_BATCH_TOTAL] = max_nat
         batch[constants.N_STRUCTURES_BATCH_TOTAL] = max_structs
