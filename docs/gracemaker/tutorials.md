@@ -333,5 +333,3 @@ The usage of foundation models in LAMMPS is the same as for custom-parameterized
 Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
 
 ---
-
-This version improves clarity, grammar, and consistency while ensuring readability. Let me know if further adjustments are needed!
