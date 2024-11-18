@@ -302,22 +302,6 @@ Note that the additional parameters are optional. Default values are provided fo
 For more details, refer to the Jupyter notebook `3-foundation-models/1-python-ase/using-grace-fm.ipynb`.
 
 ### 3.3. Usage in LAMMPS
-The usage of foundation models in LAMMPS is the same as for custom-parameterized GRACE potentials. Examples are provided in the following directories:
-
-* `3-foundation-models/2-lammps/1-Pt-surface`: Simulation of an oxygen molecule on a Pt (100) surface with GRACE-2LAYER.
-* `3-foundation-models/2-lammps/2-ethanol-water`: Simulation of ethanol and water with GRACE-1LAYER.
-
-Note: The currently available GRACE-1LAYER models do not support MPI parallelization. Updated models with MPI support will be released in the future.
-
----
-
-## Tutorial 4. Fine-Tuning Foundation GRACE Models.
-
-Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
-
----
-
-### 3.3. Usage in LAMMPS
 
 The usage of foundation models in LAMMPS is the same as for custom-parameterized GRACE potentials. Examples are provided in the following directories:
 
