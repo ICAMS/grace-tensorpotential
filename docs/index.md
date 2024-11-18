@@ -8,7 +8,7 @@ software geared towards support for multi-component materials and graph architec
 
 ## Series of ACE models
 
-![Line of ACE models](https://github.com/ICAMS/grace-tensorpotential/blob/master/docs/imgs/models.png){ align=left }
+![Series of ACE models](models.png)
 
 
 ## Features
