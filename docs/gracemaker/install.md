@@ -51,7 +51,7 @@ pip install .
 TensorFlow should be installed automatically. However, to manually install TensorFlow with GPU support:
 
 ```bash
-pip install tensorflow[and-cuda]<=2.16
+pip install tensorflow[and-cuda]==2.16.2
 ```
 
 * (Optional) Download foundation models (these will be stored in `$HOME/.cache/grace`):
