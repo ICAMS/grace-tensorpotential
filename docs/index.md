@@ -2,9 +2,16 @@
 
 `gracemaker` is a tool for fitting interatomic potentials in a general non-linear Graph Atomic Cluster Expansion (GRACE) form.
 
-Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
+Project GRACEmaker is a heavily modified and in large parts rewritten version of the [PACEmaker](https://pacemaker.readthedocs.io/)
+software geared towards support for multi-component materials and graph architectures.
 
-# Features
+
+## Series of ACE models
+
+![Line of ACE models](../imgs/models.png){ align=left }
+
+
+## Features
 
 * Support for multi-component material systems with unlimited number of interacting elements.
 * Extension of the local ACE models to also include semi-local interactions (a.k.a. message passing).
@@ -19,24 +26,24 @@ Project GRACEmaker is a heavily modified and in large parts rewritten version of
   
     * **GRACE-2L**: Semi-local, non-linear model offering state-of-the-art accuracy. 
     Utilizes TensorFlow library to run simulations in LAMMPS or in python.
-    Best applied for simulating molecular systems and materials with up to hundred thousand of atoms.
+    Best applied for simulating molecular systems and materials with up to tens of thousand of atoms.
 
-# What's next ?
+## What's next ?
 * [Installation](gracemaker/install)
 * [Quick start](gracemaker/quickstart)
 * [Tutorials](gracemaker/tutorials)
 * [FAQ](gracemaker/faq)
 
-# Documentation
+## Documentation
 
 Please use the navigation bar on the left to explore documentation
 
-# License  
+## License  
 
 This code and the foundation models are distributed under the [Academic Software License](https://github.com/ICAMS/grace-tensorpotential/blob/master/LICENSE.md).  
 
 
-# Citation
+## Citation
 
 Please cite following papers if you use GRACEmkaer in your work:
 
