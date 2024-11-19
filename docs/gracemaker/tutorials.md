@@ -3,7 +3,7 @@
 ### Prerequisites  
 
 - **Operating System**: Linux or macOS (on macOS, you may need to install a custom `tensorflow`).  
-  - **Note for Windows**: If using WSL, GPU support is not available.  
+  - **Note for Windows**: GPU support is available only on WSL.  
 - **Hardware**: A GPU is highly recommended. Multicore CPUs are significantly slower but still functional.  
 - **Software**: `gracemaker` must be installed (see [Installation](../install)).  
 
