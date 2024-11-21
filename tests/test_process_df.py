@@ -31,12 +31,3 @@ def test_compute_convex_hull():
 
     assert np.allclose(echmin, 0.0)
     assert np.allclose(echmax, 0.435098487307693)
-
-
-# def test_compute_convex_hull_HME21():
-#     fname = str(prefix / "data" / "HME21_test_clean_small.pkl.gz")
-#     df = pd.read_pickle(fname)
-#     df["energy_per_atom"] = df["energy"] / df["NUMBER_OF_ATOMS"]
-#     assert E_CHULL_DIST_PER_ATOM not in df.columns
-#     with pytest.raises(RuntimeError):
-#         compute_convexhull_dist(df, verbose=True)
