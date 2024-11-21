@@ -43,6 +43,12 @@ MODELS_METADATA = {
         "description": "A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 6 Å cutoff.",
         "license": "Academic Software License",
     },
+    "MP_GRACE_2L_r6_11Nov2024": {
+        "url": "https://ruhr-uni-bochum.sciebo.de/s/42Ivgi3eaLCynwC/download",
+        "dirname": "MP_GRACE_2L_r6_11Nov2024",
+        "description": "A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 6 Å cutoff. (version: 11 Nov 2024)",
+        "license": "Academic Software License",
+    },
     "MP_GRACE_2L_r5_4Nov2024": {
         "url": "https://ruhr-uni-bochum.sciebo.de/s/CJgOzdmGwcjDUPM/download",
         "dirname": "MP-GRACE-2L-r5_4Nov2024",
