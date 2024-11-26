@@ -1,5 +1,9 @@
 # Tutorials  
 
+### Video-tutorial
+
+* !!NEW!! [Video tutorial](https://www.youtube.com/watch?v=rndnkiu9LGE)
+
 ### Prerequisites  
 
 - **Operating System**: Linux or macOS (on macOS, you may need to install a custom `tensorflow`).  

@@ -29,6 +29,7 @@ software geared towards support for multi-component materials and graph architec
     Best applied for simulating molecular systems and materials with up to tens of thousand of atoms.
 
 ## What's next ?
+* !!NEW!! [Video tutorial](https://www.youtube.com/watch?v=rndnkiu9LGE)
 * [Installation](gracemaker/install)
 * [Quick start](gracemaker/quickstart)
 * [Tutorials](gracemaker/tutorials)
