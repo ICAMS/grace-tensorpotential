@@ -92,3 +92,11 @@ or
 ```bash
 export TF_CPP_MIN_LOG_LEVEL=3
 ```  
+
+## How to Provide Custom Weights
+
+To assign custom weights to each structure, include the following columns in the DataFrame:
+
+* `energy_weight`: A single value representing the weight for each structure.
+* `force_weight`: A per-atom array with a size equal to the number of atoms in the structure.
+* `virial_weight`: (optional): A six-component array representing the weight for virial terms.
