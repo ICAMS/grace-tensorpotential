@@ -1,31 +1,29 @@
 from __future__ import annotations
 
 import gc
+import itertools
 import logging
 import os
 import signal
 import threading
 import time
+from abc import ABC, abstractmethod
+from collections import defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
+from itertools import combinations_with_replacement
 
 import numpy as np
 import pandas as pd
-
-from abc import ABC, abstractmethod
 from ase import Atoms
-from collections import defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
+from ase.stress import full_3x3_to_voigt_6_stress
+from matscipy.neighbours import neighbour_list as nl
 from tqdm import tqdm
-from itertools import combinations_with_replacement
 
 from tensorpotential import constants
-from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL
+from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL, STRESS_COL
 from tensorpotential.utils import process_cutoff_dict
 
-from matscipy.neighbours import neighbour_list as nl
-
 # from ase.neighborlist import neighbor_list as nl
-
-from ase.stress import full_3x3_to_voigt_6_stress
 
 DEFAULT_STRESS_UNITS = "eV/A3"
 MININTERVAL = 2  # min interval for progress bar
@@ -80,9 +78,14 @@ def generate_batches_df(structures_df, batch_size):
     structures_df["bid"] = np.arange(len(structures_df)) // batch_size
     structures_df["structure_ind"] = structures_df.index
     batch_df = structures_df.groupby("bid").agg(
-        {"nat": "sum", "nneigh": "sum", "nstruct": "sum", "structure_ind": list}
+        {
+            "n_atoms": "sum",
+            "n_neighbours": "sum",
+            "n_structures": "sum",
+            "structure_ind": list,
+        }
     )
-    assert batch_df["nstruct"].sum() == len(structures_df)
+    assert batch_df["n_structures"].sum() == len(structures_df)
     return batch_df
 
 
@@ -110,21 +113,18 @@ def get_padding_dims(batch, max_pad_dict):
 
 def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
     """Split data into buckets based on number of atoms and number of neighbors."""
-    nat = [get_number_of_real_atoms(d) for d in data_dict_list]
+    n_atoms = [get_number_of_real_atoms(d) for d in data_dict_list]
     nneighbors = [get_number_of_real_neigh(d) for d in data_dict_list]
 
-    structures_df = pd.DataFrame({"nat": nat, "nneigh": nneighbors})
-    structures_df["nstruct"] = 1
+    structures_df = pd.DataFrame({"n_atoms": n_atoms, "n_neighbours": nneighbors})
+    structures_df["n_structures"] = 1
     try:
-        structures_df["nneigh"] = structures_df["nneigh"].map(sum)
+        structures_df["n_neighbours"] = structures_df["n_neighbours"].map(sum)
     except TypeError:
         pass
-    # index: bid,   "nat", "nneigh", "nstruct", "structure_ind"
+    # index: bid,   "n_atoms", "n_neighbours", "n_structures", "structure_ind"
     batches_df = generate_batches_df(structures_df, batch_size)
-    batches_df = batches_df.sort_values(
-        ["nneigh", "nat", "nstruct"], ascending=False
-    ).reset_index(drop=True)
-    buckets_list = np.array_split(batches_df, max_n_buckets)
+    buckets_list = split_batches_into_buckets(batches_df, max_n_buckets)
 
     data_batches = []
     max_pad_batches = []
@@ -135,13 +135,13 @@ def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
         buckets_list, total=len(buckets_list), mininterval=MININTERVAL
     ):
         # bucket = collection of batches (repr as pd.DataFrame)
-        max_nstruct = bucket["nstruct"].max()
-        max_nat = bucket["nat"].max()
-        max_nneigh = bucket["nneigh"].max()
+        max_nstruct = bucket["n_structures"].max()
+        max_nat = bucket["n_atoms"].max()
+        max_nneigh = bucket["n_neighbours"].max()
 
-        # pad at least one atom and structure if has to pad nneigh
-        is_pad_nneigh = np.any(bucket["nneigh"] != max_nneigh)
-        is_pad_atoms = np.any(bucket["nat"] != max_nat) or is_pad_nneigh
+        # pad at least one atom and structure if has to pad n_neighbours
+        is_pad_nneigh = np.any(bucket["n_neighbours"] != max_nneigh)
+        is_pad_atoms = np.any(bucket["n_atoms"] != max_nat) or is_pad_nneigh
         is_pad_struct = is_pad_atoms
 
         if is_pad_atoms:
@@ -163,6 +163,21 @@ def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
             )
 
     return data_batches, max_pad_batches
+
+
+def split_batches_into_buckets(batches_df, max_n_buckets):
+    # dynamic bucket splitting, where split boundary is determined based on increase of nneigh
+    batches_df = batches_df.sort_values(
+        ["n_neighbours", "n_atoms", "n_structures"], ascending=False
+    ).reset_index(drop=True)
+    batches_df["d_neigh"] = batches_df["n_neighbours"].diff()
+    boundaries_df = batches_df.sort_values("d_neigh").dropna()
+    split_inds = boundaries_df.iloc[: max_n_buckets - 1].index.sort_values()
+    batches_df = batches_df.drop(columns=["d_neigh"])
+    buckets_list = np.array_split(batches_df, split_inds)
+
+    # buckets_list = np.array_split(batches_df, max_n_buckets) # naive static splitting
+    return buckets_list
 
 
 class AbstractDataBuilder(ABC):
@@ -274,14 +289,14 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             [self.elements_map[s] for s in ase_atoms.get_chemical_symbols()]
         )
 
-        nat_per_specie = defaultdict(int)
-        total_nei_per_specie = defaultdict(int)
-        u_i, n_j = np.unique(ind_i, return_counts=True)
+        # nat_per_specie = defaultdict(int)
+        # total_nei_per_specie = defaultdict(int)
+        # u_i, n_j = np.unique(ind_i, return_counts=True)
 
-        for at_i, nb_i in zip(u_i, n_j):
-            specie_i = atomic_mu_i[at_i]
-            nat_per_specie[specie_i] += 1
-            total_nei_per_specie[specie_i] += nb_i
+        # for at_i, nb_i in zip(u_i, n_j):
+        #     specie_i = atomic_mu_i[at_i]
+        #     nat_per_specie[specie_i] += 1
+        #     total_nei_per_specie[specie_i] += nb_i
 
         all_atom_ind = np.arange(len(ase_atoms))
         if np.unique(ind_i).shape[0] < all_atom_ind.shape[0]:
@@ -320,8 +335,21 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             constants.N_ATOMS_BATCH_REAL: np.array(len(ase_atoms)).astype(np.int32),
             constants.N_STRUCTURES_BATCH_REAL: np.array(1).astype(np.int32),
             constants.N_NEIGHBORS_REAL: np.array(len(bond_vector)).astype(np.int32),
-            "nat_per_specie": nat_per_specie,
-            "total_nei_per_specie": total_nei_per_specie,
+            # "nat_per_specie": nat_per_specie,
+            # "total_nei_per_specie": total_nei_per_specie,
+        }
+
+    def get_sample_dtypes(self):
+        return {
+            constants.ATOMIC_MU_I: np.int32,
+            constants.BOND_VECTOR: self.float_dtype,
+            constants.BOND_MU_I: np.int32,
+            constants.BOND_MU_J: np.int32,
+            constants.BOND_IND_I: np.int32,
+            constants.BOND_IND_J: np.int32,
+            constants.N_ATOMS_BATCH_REAL: np.int32,
+            constants.N_STRUCTURES_BATCH_REAL: np.int32,
+            constants.N_NEIGHBORS_REAL: np.int32,
         }
 
     def extract_from_row(self, row, **kwarg):
@@ -394,19 +422,44 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                 map_bonds_to_structure
             ).astype(np.int32)
 
-        nat_per_specie = defaultdict(int)
-        total_nei_per_specie = defaultdict(int)
-        for data_dict in pre_batch_list:
-            nps = data_dict["nat_per_specie"]
-            tnps = data_dict["total_nei_per_specie"]
-            for k, v in nps.items():
-                nat_per_specie[k] += v
-            for k, v in tnps.items():
-                total_nei_per_specie[k] += v
-        res_dict["nat_per_specie"] = nat_per_specie
-        res_dict["total_nei_per_specie"] = total_nei_per_specie
+        # nat_per_specie = defaultdict(int)
+        # total_nei_per_specie = defaultdict(int)
+        # for data_dict in pre_batch_list:
+        #     nps = data_dict["nat_per_specie"]
+        #     tnps = data_dict["total_nei_per_specie"]
+        #     for k, v in nps.items():
+        #         nat_per_specie[k] += v
+        #     for k, v in tnps.items():
+        #         total_nei_per_specie[k] += v
+        # res_dict["nat_per_specie"] = nat_per_specie
+        # res_dict["total_nei_per_specie"] = total_nei_per_specie
 
         return res_dict
+
+    def get_batch_dtypes(self):
+        sample_dtypes = self.get_sample_dtypes()
+        order = [
+            constants.BOND_VECTOR,
+            constants.BOND_MU_I,
+            constants.BOND_MU_J,
+            constants.ATOMIC_MU_I,
+            constants.BOND_IND_I,
+            constants.BOND_IND_J,
+            constants.N_ATOMS_BATCH_REAL,
+            constants.N_STRUCTURES_BATCH_REAL,
+            constants.N_NEIGHBORS_REAL,
+        ]
+
+        batch_dtypes_dict = {k: sample_dtypes[k] for k in order}
+
+        batch_dtypes_dict[constants.N_ATOMS_BATCH_TOTAL] = np.int32
+        batch_dtypes_dict[constants.N_STRUCTURES_BATCH_TOTAL] = np.int32
+        batch_dtypes_dict[constants.ATOMS_TO_STRUCTURE_MAP] = np.int32
+
+        if self.is_fit_stress:
+            batch_dtypes_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.int32
+
+        return batch_dtypes_dict
 
     def pad_batch(self, batch, max_pad_dict):
         """Inplace pad of batch"""
@@ -488,6 +541,9 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
         normalize_force_per_structure=True,
         is_fit_stress=False,
         stress_units=None,
+        energy_col=ENERGY_CORRECTED_COL,
+        forces_col=FORCES_COL,
+        stress_col=STRESS_COL,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -497,6 +553,9 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
         self.normalize_weights = normalize_weights
         self.normalize_force_per_structure = normalize_force_per_structure
         self.is_fit_stress = is_fit_stress
+        self.energy_col = energy_col
+        self.forces_col = forces_col
+        self.stress_col = stress_col
 
         self.stress_conversion_factor = {
             None: 1.0,  # default
@@ -548,10 +607,10 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
 
     def extract_from_row(self, row, **kwarg):
         res = {
-            constants.DATA_REFERENCE_ENERGY: np.array(
-                row[ENERGY_CORRECTED_COL]
-            ).reshape(-1, 1),
-            constants.DATA_REFERENCE_FORCES: np.array(row[FORCES_COL]),
+            constants.DATA_REFERENCE_ENERGY: np.array(row[self.energy_col]).reshape(
+                -1, 1
+            ),
+            constants.DATA_REFERENCE_FORCES: np.array(row[self.forces_col]),
         }
         if constants.DATA_STRUCTURE_ID in kwarg:
             res[constants.DATA_STRUCTURE_ID] = kwarg[constants.DATA_STRUCTURE_ID]
@@ -582,8 +641,8 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
             default_stress_weight = np.array(0.0).reshape(-1, 1)
 
             if np.all(ase_atoms.pbc):
-                if "stress" in row.index:
-                    stress = row["stress"]
+                if self.stress_col in row.index:
+                    stress = row[self.stress_col]
                 else:
                     raise ValueError(
                         "Fit stress is requested, but no stress was found."
@@ -618,6 +677,22 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
                 res[constants.DATA_VOLUME] = np.array(max_val).reshape(-1, 1)
             res[constants.DATA_REFERENCE_VIRIAL] *= self.stress_conversion_factor
         return res
+
+    def get_sample_dtypes(self):
+        sample_dtypes = {
+            constants.DATA_REFERENCE_ENERGY: np.float64,
+            constants.DATA_REFERENCE_FORCES: np.float64,
+            constants.DATA_STRUCTURE_ID: np.int32,
+            self.energy_weight: np.float64,
+            self.force_weight: np.float64,
+        }
+
+        if self.is_fit_stress:
+            sample_dtypes[constants.DATA_REFERENCE_VIRIAL] = np.float64
+            sample_dtypes[self.virial_weight] = np.float64
+            sample_dtypes[constants.DATA_VOLUME] = np.float64
+
+        return sample_dtypes
 
     def join_to_batch(self, pre_batch_list: list):
         res_dict = {}
@@ -668,6 +743,9 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
             )
 
         return res_dict
+
+    def get_batch_dtypes(self):
+        return self.get_sample_dtypes()
 
     def pad_batch(self, batch, max_pad_dict):
         pad_nat, pad_nneigh, pad_nstruct = get_padding_dims(batch, max_pad_dict)
@@ -918,28 +996,52 @@ def process_dataframe(df_or_ase_atoms_list, data_builders, iterator_func):
 
 
 def parallel_process_dataframe(
-    df_or_ase_atoms_list, data_builders, iterator_func, max_workers
+    df_or_ase_atoms_list,
+    data_builders,
+    iterator_func,
+    max_workers,
+    chunksize=2500,
 ):
+    logging.info(f"Parallel data processing: {max_workers=}, {chunksize=}")
+    chunks = (
+        df_or_ase_atoms_list.iloc[i * chunksize : (i + 1) * chunksize]
+        for i in range(len(df_or_ase_atoms_list) // chunksize)
+    )
+
+    # Add a tail chunk if there's a remainder
+    if len(df_or_ase_atoms_list) % chunksize != 0:
+        tail_start = (len(df_or_ase_atoms_list) // chunksize) * chunksize
+        tail_chunk = [
+            df_or_ase_atoms_list.iloc[tail_start:]
+        ]  # Wrap in a list to make it iterable
+        chunks = itertools.chain(
+            chunks, tail_chunk
+        )  # Lazily chain the main chunks with the tail chunk
+
     data_dict_list = []
     # Use ProcessPoolExecutor to parallelize row processing
     with ProcessPoolExecutor(
         max_workers=max_workers,
-        initializer=start_thread_to_terminate_when_parent_process_dies,  # +
+        initializer=start_thread_to_terminate_when_parent_process_dies,
         initargs=(os.getpid(),),
-    ) as executor:
-        # Submit tasks for each row in df_or_ase_atoms_list
-        futures = [
-            executor.submit(process_row, row_ind, row, data_builders)
-            for row_ind, row in df_or_ase_atoms_list.iterrows()
-        ]
+    ) as executor, tqdm(
+        total=len(df_or_ase_atoms_list), mininterval=MININTERVAL
+    ) as pbar:
+        for chunk in chunks:
+            # Submit tasks for each row in df_or_ase_atoms_list
+            futures = [
+                executor.submit(process_row, row_ind, row, data_builders)
+                for row_ind, row in chunk.iterrows()
+            ]
 
-        # Collect results as they are completed
-        for future in iterator_func(
-            futures, total=len(futures), mininterval=MININTERVAL
-        ):
-            data_dict = future.result()
-            data_dict_list.append(data_dict)
-
+            # Collect results as they are completed
+            for future in futures:
+                data_dict = future.result()
+                data_dict_list.append(data_dict)
+                pbar.update(1)
+    assert len(data_dict_list) == len(
+        df_or_ase_atoms_list
+    ), "Data loss during parallel processing"
     return data_dict_list
 
 

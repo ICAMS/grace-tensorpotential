@@ -8,6 +8,77 @@ from tensorpotential import constants
 from tensorpotential.tpmodel import TPModel
 
 
+def energy_offset_error(e_true, e_pred, e_weight=None):
+    n_vals = tf.shape(e_true)[0]
+    # true energy composition
+    etr_1 = tf.reshape(tf.tile(e_true, [1, n_vals]), [-1, 1])
+    etr_2 = tf.tile(e_true, [n_vals, 1])
+    etr_off = tf.abs(etr_1 - etr_2)
+    ##################################################################################
+    # Or stricktly upper part
+    # etr_1 = tf.tile(e_true, [1, n_vals])
+    # etr_2 = tf.reshape(tf.tile(e_true, [tf.shape(e_true)[0], 1]), [n_vals, n_vals])
+    # etr_off = tf.abs(etr_1 - etr_2)
+    # ones = tf.ones_like(etr_1)
+    # mask_a = tf.linalg.band_part(
+    #     ones, 0, -1
+    # )  # Upper triangular matrix of 0s and 1s
+    # mask_b = tf.linalg.band_part(ones, 0, 0)  # Diagonal matrix of 0s and 1s
+    # mask = tf.cast(mask_a - mask_b, dtype=tf.bool)  # Make a bool mask
+    # etr_off = tf.boolean_mask(tf.abs(etr_1 - etr_2), mask)
+    ###################################################################################
+    # pred energy composition
+    epr_1 = tf.reshape(tf.tile(e_pred, [1, n_vals]), [-1, 1])
+    epr_2 = tf.tile(e_pred, [n_vals, 1])
+    epr_off = tf.abs(epr_1 - epr_2)
+    # weights composition
+    if e_weight is not None:
+        w_1 = tf.reshape(tf.tile(e_weight, [1, n_vals]), [-1, 1])
+        w_2 = tf.tile(e_weight, [n_vals, 1])
+        w_off = w_1 * w_2
+        w_off = tf.where(w_off != 0, tf.sqrt(w_off + 1e-16), w_off)
+    else:
+        w_off = None
+
+    return etr_off, epr_off, w_off
+
+
+def huber(error: tf.Tensor, delta=1.0):
+    """Computes Huber loss value.
+
+    Args:
+        error: tensor of true targets minus predicted targets.
+        delta: A float, the point where the Huber loss function changes from a
+            quadratic to linear. Defaults to `1.0`.
+
+    Returns:
+        Tensor with one scalar loss entry per sample.
+    """
+
+    delta = tf.convert_to_tensor(delta, dtype=error.dtype)
+    abs_error = tf.abs(error)
+    half = tf.convert_to_tensor(0.5, dtype=abs_error.dtype)
+    return tf.where(
+        abs_error <= delta,
+        half * tf.math.square(error),
+        delta * abs_error - half * tf.math.square(delta),
+    )
+
+
+def compute_nat_per_structure(input_data):
+    nat_per_struc = tf.math.unsorted_segment_sum(
+        tf.ones_like(input_data[constants.ATOMS_TO_STRUCTURE_MAP]),
+        input_data[constants.ATOMS_TO_STRUCTURE_MAP],
+        num_segments=input_data[constants.N_STRUCTURES_BATCH_TOTAL],
+    )
+    nat_per_struc = tf.reshape(nat_per_struc, [-1, 1])
+    # Replace zeros with ones
+    nat_per_struc = tf.where(
+        tf.equal(nat_per_struc, 0), tf.ones_like(nat_per_struc), nat_per_struc
+    )
+    return nat_per_struc
+
+
 class LossComponent(tf.Module, ABC):
     """
     Base class for computing loss components
@@ -69,6 +140,142 @@ class LossComponent(tf.Module, ABC):
         )
 
         return loss_component * self.loss_component_weight
+
+
+class HuberLoss(LossComponent, ABC):
+    def __init__(
+        self,
+        loss_component_weight,
+        delta=1.0,
+        name="HuberLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        self.delta = delta
+
+    def build(self, float_dtype):
+        super().build(float_dtype)
+        self.delta = tf.Variable(
+            self.delta, dtype=float_dtype, trainable=False, name=self.name + "_delta"
+        )
+
+    @abstractmethod
+    def compute_loss_component(self, **kwargs):
+        raise NotImplementedError()
+
+    def set_loss_component_params(self, params: dict):
+        super().set_loss_component_params(params)
+        if "delta" in params:
+            self.delta.assign(params["delta"])
+
+    def __repr__(self):
+        try:
+            val = self.delta.numpy()
+        except:
+            val = self.delta
+        return super().__repr__() + f"(delta={val})"
+
+
+class WeightedOffsetEnergyLoss(LossComponent):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_ENERGY_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.N_STRUCTURES_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+        constants.ATOMS_TO_STRUCTURE_MAP: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        name="WeightedOffsetEnergyLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super(WeightedOffsetEnergyLoss, self).__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        self.corresponding_metrics = None
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        e_true = input_data[constants.DATA_REFERENCE_ENERGY]
+        e_weight = input_data[constants.DATA_ENERGY_WEIGHTS]
+        e_pred = predictions[constants.PREDICT_TOTAL_ENERGY]
+
+        nat_per_struc = tf.cast(
+            compute_nat_per_structure(input_data), dtype=e_true.dtype
+        )
+        e_true /= nat_per_struc
+        e_pred /= nat_per_struc
+
+        etr_off, epr_off, w_off = energy_offset_error(e_true, e_pred, e_weight)
+
+        delta_e2 = tf.square(etr_off - epr_off) * 0.5
+        loss_e = tf.reduce_sum(w_off * delta_e2)
+        if self.normalize_by_samples:
+            loss_e /= tf.reduce_sum(w_off)
+
+        return loss_e
+
+
+class WeightedOffsetEnergyHuberLoss(HuberLoss):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_ENERGY_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.N_STRUCTURES_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+        constants.ATOMS_TO_STRUCTURE_MAP: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        delta=1.0,
+        name="WeightedOffsetEnergyHuberLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            delta=delta,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        e_true = input_data[constants.DATA_REFERENCE_ENERGY]
+        e_pred = predictions[constants.PREDICT_TOTAL_ENERGY]
+        e_weight = input_data[constants.DATA_ENERGY_WEIGHTS]
+
+        nat_per_struc = tf.cast(
+            compute_nat_per_structure(input_data), dtype=e_true.dtype
+        )
+        e_true /= nat_per_struc
+        e_pred /= nat_per_struc
+
+        etr_off, epr_off, w_off = energy_offset_error(
+            e_true=e_true, e_pred=e_pred, e_weight=e_weight
+        )
+
+        error = tf.math.subtract(etr_off, epr_off)
+        h_loss = huber(error, delta=self.delta)
+
+        loss_e = tf.reduce_sum(0.5 * w_off * h_loss)
+        if self.normalize_by_samples:
+            loss_e /= tf.reduce_sum(w_off)  # divide by real number of structures
+        return loss_e
 
 
 class WeightedSSEEnergyLoss(LossComponent):
@@ -264,62 +471,6 @@ class WeightedSSEStressLoss(LossComponent):
                 tf.reduce_sum(v_weight) * 6
             )  # divide by sum of weights * 6 (Voigt comps)
         return loss_v
-
-
-def huber(error: tf.Tensor, delta=1.0):
-    """Computes Huber loss value.
-
-    Args:
-        error: tensor of true targets minus predicted targets.
-        delta: A float, the point where the Huber loss function changes from a
-            quadratic to linear. Defaults to `1.0`.
-
-    Returns:
-        Tensor with one scalar loss entry per sample.
-    """
-
-    delta = tf.convert_to_tensor(delta, dtype=error.dtype)
-    abs_error = tf.abs(error)
-    half = tf.convert_to_tensor(0.5, dtype=abs_error.dtype)
-    return tf.where(
-        abs_error <= delta,
-        half * tf.math.square(error),
-        delta * abs_error - half * tf.math.square(delta),
-    )
-
-
-class HuberLoss(LossComponent):
-    def __init__(
-        self,
-        loss_component_weight,
-        delta=1.0,
-        name="HuberLoss",
-        normalize_by_samples: bool = True,
-    ):
-        super().__init__(
-            loss_component_weight=loss_component_weight,
-            name=name,
-            normalize_by_samples=normalize_by_samples,
-        )
-        self.delta = delta
-
-    def build(self, float_dtype):
-        super().build(float_dtype)
-        self.delta = tf.Variable(
-            self.delta, dtype=float_dtype, trainable=False, name=self.name + "_delta"
-        )
-
-    def set_loss_component_params(self, params: dict):
-        super().set_loss_component_params(params)
-        if "delta" in params:
-            self.delta.assign(params["delta"])
-
-    def __repr__(self):
-        try:
-            val = self.delta.numpy()
-        except:
-            val = self.delta
-        return super().__repr__() + f"(delta={val})"
 
 
 class WeightedHuberEnergyPerAtomLoss(HuberLoss):

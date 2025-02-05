@@ -126,7 +126,7 @@ class ChebSqrRadialBasisFunction(RadialBasisFunction):
         nfunc: int,
         rcut: float,
         p: int = 5,
-        normalized: bool = True,
+        normalized: bool = False,
         kind: int = 1,
         reversed: bool = False,
         **kwargs,

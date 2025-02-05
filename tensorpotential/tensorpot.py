@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import logging
 import os
+
 import tensorflow as tf
 
+from tensorpotential.loss import LossFunction
 from tensorpotential.metrics import ComputeMetrics
 from tensorpotential.tpmodel import (
     TPModel,
     ComputeBatchEnergyAndForces,
     ComputeStructureEnergyAndForcesAndVirial,
 )
-from tensorpotential.loss import LossFunction
 
 
 def get_output_dir(seed=42):
@@ -199,7 +200,9 @@ class TensorPotential:
                 logging.info(f"Loaded checkpoint from {checkpoint_name}")
         else:
             if verbose:
-                logging.info(f"FAILED Loaded checkpoint from {checkpoint_name}")
+                logging.info(
+                    f"FAILED Loaded checkpoint from {checkpoint_name} (path does not exist)"
+                )
 
     def save_model(self, path, jit_compile=True):
         """saves model for serving"""
@@ -323,9 +326,12 @@ class TensorPotential:
         def value_fn(ctx):
             return input_data[ctx.replica_id_in_sync_group]
 
-        distributed_values = self.strategy.experimental_distribute_values_from_function(
-            value_fn
-        )
+        if isinstance(input_data, list):  # manual list/tuple of batches
+            distributed_values = (
+                self.strategy.experimental_distribute_values_from_function(value_fn)
+            )
+        else:  # already dict of PerReplica or of tensors
+            distributed_values = input_data  #
 
         results = self.strategy.run(self.train_step, args=(distributed_values,))
         self.reduce_dict(results)
@@ -377,9 +383,12 @@ class TensorPotential:
         def value_fn(ctx):
             return input_data[ctx.replica_id_in_sync_group]
 
-        distributed_values = self.strategy.experimental_distribute_values_from_function(
-            value_fn
-        )
+        if isinstance(input_data, list):  # manual list/tuple of batches
+            distributed_values = (
+                self.strategy.experimental_distribute_values_from_function(value_fn)
+            )
+        else:  # already dict of PerReplica or of tensors
+            distributed_values = input_data
 
         results = self.strategy.run(self.test_step, args=(distributed_values,))
         self.reduce_dict(results)

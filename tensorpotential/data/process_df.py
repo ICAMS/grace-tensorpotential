@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
-
-
-from collections import Counter, defaultdict
 from scipy.spatial import ConvexHull
 
 try:
@@ -32,6 +30,7 @@ E_FORMATION_PER_ATOM = "e_formation_per_atom"
 EFFECTIVE_ENERGY = "effective_energy"
 ENERGY_CORRECTED_COL = "energy_corrected"
 FORCES_COL = "forces"
+STRESS_COL = "stress"
 
 SINGLE_ATOM_ENERGY_DICT = {
     # energy computed with default VASP_NM settings (500eV, Gaussian smearing, sigma=0.1, min 10x10x10 A cell, single atom, NM)

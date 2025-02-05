@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import glob
+import json
 import logging
-import numpy as np
 import os
-import pandas as pd
+import random
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from itertools import cycle
 
-from tensorpotential.data.weighting import EnergyBasedWeightingPolicy
+import numpy as np
+import pandas as pd
+import tensorflow as tf
 
 from tensorpotential import constants as tc
 from tensorpotential.data.databuilder import (
@@ -20,10 +26,8 @@ from tensorpotential.data.process_df import (
     compute_convexhull_dist,
     E_CHULL_DIST_PER_ATOM,
 )
-
+from tensorpotential.data.weighting import EnergyBasedWeightingPolicy
 from tensorpotential.tensorpot import get_output_dir
-from collections import defaultdict
-
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
@@ -32,6 +36,12 @@ log = logging.getLogger()
 
 TRAINING_SET_FNAME = "training_set.pkl.gz"
 TESTING_SET_FNAME = "test_set.pkl.gz"
+
+
+@dataclass
+class MyInputContext:
+    input_pipeline_id: int
+    num_input_pipelines: int
 
 
 def sizeof_fmt(file_name_or_size, suffix="B"):
@@ -153,13 +163,353 @@ def check_weighting(train_df, test_df):
         )
 
 
-def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=1234):
+def read_saved_dataset_stats(dataset_path):
+    with open(os.path.join(dataset_path, "stats.json"), "r") as f:
+        stats = json.load(f)
+    return stats
+
+
+def compute_saved_dataset_num_of_batches(dataset_paths):
+    n_batches = sum([len(tf.data.Dataset.load(fname)) for fname in dataset_paths])
+    return n_batches
+
+
+def compute_number_of_batches(dds, key):
+    n_batch = 0
+    for b in dds:
+        tensor = b[key]
+        if hasattr(tensor, "values"):
+            if all((v.shape.rank > 0 and v.shape[0] > 0) for v in tensor.values):
+                n_batch += 1
+        else:
+            n_batch += 1
+    return n_batch
+
+
+def limit_dataset_size(current_size, limit_size):
+    # further limit train size to train_size
+    if limit_size is not None:
+        # if limit_size < 1:
+        #     # limit_size is a fraction
+        #     limit_size = max(1, int(limit_size * current_size))
+        return min(current_size, limit_size)
+    return current_size
+
+
+class FutureDistributedDataset:
+    def __init__(self, data_config):
+        self.data_config = data_config
+        self.dataset_path = data_config["path"]  # point to stage3 folder
+        self.train_size = data_config.get("train_size")
+        self.test_dataset_path = data_config.get("test_path")
+        self.test_size = data_config.get("test_size")
+        self.test_shards = data_config.get("test_shards")
+
+        if "*" not in self.dataset_path:
+            self.dataset_path = os.path.join(self.dataset_path, "shard_*-of-*")
+
+        log.info(f"Initial TRAIN dataset path: {self.dataset_path}")
+        self.datasets_filenames = glob.glob(self.dataset_path)
+        log.info(f"Initial TRAIN dataset: {len(self.datasets_filenames)} shards found")
+        # random.shuffle(self.datasets_filenames)  # shuffle
+
+        if self.test_dataset_path is not None:
+            if "*" not in self.test_dataset_path:
+                self.test_dataset_path = os.path.join(
+                    self.test_dataset_path, "shard_*-of-*"
+                )
+            log.info(f"Initial TEST dataset path: {self.test_dataset_path}")
+            self.test_datasets_filenames = glob.glob(self.test_dataset_path)
+            # random.shuffle(self.test_datasets_filenames)  # shuffle
+        else:
+            self.test_datasets_filenames = None
+
+        # option to have single-stream dataset
+        self.distribute_values = self.data_config.get("distribute_values", False)
+
+    def generate_dataset(self, strategy, signatures=None):
+        def filter_batch_by_signature(batch):
+            return {k: v for k, v in batch.items() if k in signatures}
+
+        # imitation of single-GPU context for distribute-values fit
+        single_context = MyInputContext(input_pipeline_id=0, num_input_pipelines=1)
+
+        def dataset_fn(
+            context, shard_filenames, n_take=None, n_skip=None, n_take2=None
+        ):
+            """Distributed loading of certain shards only"""
+            total = context.num_input_pipelines
+            ind = context.input_pipeline_id
+            original_datasets = [
+                tf.data.Dataset.load(filepath, compression="GZIP")
+                for filepath in shard_filenames[ind::total]
+            ]
+            dataset = tf.data.Dataset.from_tensor_slices(original_datasets).interleave(
+                lambda x: x,
+                cycle_length=min(4, len(original_datasets)),
+                num_parallel_calls=1,
+            )
+            if signatures:
+                dataset = dataset.map(filter_batch_by_signature)
+            dataset = dataset.prefetch(16)
+            if n_take:
+                dataset = dataset.take(n_take)
+            if n_skip:
+                dataset = dataset.skip(n_skip)
+            if n_take2:
+                dataset = dataset.take(n_take2)
+            return dataset
+
+        test_ds = None
+        train_ds = None
+
+        # CASE 1: exact test dataset (options train_size and test_size are possible)
+        if self.test_dataset_path is not None:
+            log.info("Case 1")
+
+            train_n_batch = limit_dataset_size(
+                compute_saved_dataset_num_of_batches(self.datasets_filenames),
+                self.train_size,
+            )
+
+            test_n_batch = limit_dataset_size(
+                compute_saved_dataset_num_of_batches(self.test_datasets_filenames),
+                self.test_size,
+            )
+
+            if self.distribute_values:
+                log.info(
+                    f"DISTRIBUTED VALUES dataset: {len(self.datasets_filenames)} shards found in {self.dataset_path}"
+                )
+                train_ds = dataset_fn(
+                    single_context, self.datasets_filenames, n_take=self.train_size
+                )
+                log.info(
+                    f"DISTRIBUTED VALUES TEST dataset: {len(self.test_datasets_filenames)} shards found in {self.test_dataset_path}"
+                )
+                test_ds = dataset_fn(
+                    single_context, self.test_datasets_filenames, n_take=self.test_size
+                )
+            else:
+                log.info(
+                    f"DISTRIBUTED TRAIN dataset: {len(self.datasets_filenames)} shards found in {self.dataset_path}"
+                )
+                train_ds = strategy.distribute_datasets_from_function(
+                    lambda context: dataset_fn(
+                        context, self.datasets_filenames, n_take=self.train_size
+                    ),
+                )
+
+                log.info(
+                    f"DISTRIBUTED TEST dataset: {len(self.test_datasets_filenames)} shards found in {self.test_dataset_path}"
+                )
+                test_ds = strategy.distribute_datasets_from_function(
+                    lambda context: dataset_fn(
+                        context, self.test_datasets_filenames, n_take=self.test_size
+                    ),
+                )
+
+        # CASE 2/3: no test_path, but test_shards or test_size provided - split test from train
+        elif self.test_shards or self.test_size:
+            # CASE 2: split test from train using test_shards
+            if self.test_shards:
+                log.info("Case 2")  # num of shards is provided
+                log.info(
+                    f"TEST set: request to split {self.test_shards} shards from train set"
+                )
+                assert (
+                    self.test_shards > 0
+                ), "test_shards must be integer or float, greater than zero (number of shards)"
+                if self.test_shards < 1:
+                    self.test_shards = max(
+                        int(np.floor(self.test_shards * len(self.datasets_filenames))),
+                        1,
+                    )
+                assert self.test_shards < len(
+                    self.datasets_filenames
+                ), f"`test_shards`={self.test_shards} must be less than num of shards ({len(self.datasets_filenames)})"
+
+                self.datasets_filenames, self.test_datasets_filenames = (
+                    self.datasets_filenames[: -self.test_shards],
+                    self.datasets_filenames[-self.test_shards :],
+                )
+
+                train_n_batch = limit_dataset_size(
+                    compute_saved_dataset_num_of_batches(self.datasets_filenames),
+                    self.train_size,
+                )
+
+                test_n_batch = limit_dataset_size(
+                    compute_saved_dataset_num_of_batches(self.test_datasets_filenames),
+                    self.test_size,
+                )
+                logging.info(
+                    f"Number of train shards: {len(self.datasets_filenames)}, test shards: {len(self.test_datasets_filenames)}"
+                )
+                if self.distribute_values:
+                    raise NotImplementedError()
+                else:
+                    train_ds = strategy.distribute_datasets_from_function(
+                        lambda context: dataset_fn(
+                            context, self.datasets_filenames, n_take=self.train_size
+                        ),
+                    )
+                    test_ds = strategy.distribute_datasets_from_function(
+                        lambda context: dataset_fn(
+                            context, self.test_datasets_filenames, n_take=self.test_size
+                        ),
+                    )
+
+            # CASE 3: split test from train using test_size (num of test batches)
+            elif self.test_size:
+                log.info("Case 3")
+                assert isinstance(
+                    self.test_size, int
+                ), "test_size must be integer (number of batches)"
+
+                train_n_batch = compute_saved_dataset_num_of_batches(
+                    self.datasets_filenames
+                )
+                assert self.test_size < train_n_batch, (
+                    f"Requested number of test batches ({self.test_size}) is greater or equal than total number of "
+                    f"provided train batches ({train_n_batch})"
+                )
+
+                if self.distribute_values:
+                    log.info("Case 3: distributed values")
+                    test_ds = dataset_fn(
+                        single_context, self.datasets_filenames, n_take=self.test_size
+                    )
+
+                    train_ds = dataset_fn(
+                        single_context,
+                        self.datasets_filenames,
+                        n_skip=self.test_size,
+                        n_take2=self.train_size,  # could be None
+                    )
+                else:
+                    test_ds = strategy.distribute_datasets_from_function(
+                        lambda context: dataset_fn(
+                            context, self.datasets_filenames, n_take=self.test_size
+                        ),
+                    )
+                    train_ds = strategy.distribute_datasets_from_function(
+                        lambda context: dataset_fn(
+                            context,
+                            self.datasets_filenames,
+                            n_skip=self.test_size,
+                            n_take2=self.train_size,  # could be None
+                        ),
+                    )
+
+                test_n_batch = self.test_size
+                train_n_batch -= test_n_batch  # reduce num of available batches
+                train_n_batch = limit_dataset_size(train_n_batch, self.train_size)
+        # CASE 4: No test set
+        else:
+            log.info("Case 4")
+            if self.distribute_values:
+                raise NotImplementedError()
+            else:
+                train_n_batch = limit_dataset_size(
+                    compute_saved_dataset_num_of_batches(self.datasets_filenames),
+                    self.train_size,
+                )
+
+                train_ds = strategy.distribute_datasets_from_function(
+                    lambda context: dataset_fn(
+                        context, self.datasets_filenames, n_take=self.train_size
+                    ),
+                )
+
+        # count only batches, complete over all replicas
+        train_n_batch = (
+            train_n_batch
+            // strategy.num_replicas_in_sync
+            * strategy.num_replicas_in_sync
+        )
+        logging.info(
+            f"TRAIN number of batches (aligned): total - {train_n_batch}, per-replica - {train_n_batch//strategy.num_replicas_in_sync}"
+        )
+        train_ds.n_batch = train_n_batch  # TODO: fix "monkey patching"
+        train_ds.distribute_values = self.distribute_values
+
+        if test_ds is not None:
+            test_n_batch = (
+                test_n_batch
+                // strategy.num_replicas_in_sync
+                * strategy.num_replicas_in_sync
+            )
+            logging.info(
+                f"TEST number of batches (aligned): total - {test_n_batch}, per-replica - {test_n_batch//strategy.num_replicas_in_sync}"
+            )
+            test_ds.n_batch = test_n_batch
+            test_ds.distribute_values = self.distribute_values
+
+        return train_ds, test_ds
+
+
+def load_and_prepare_distributed_datasets(args_yaml, seed=1234, strategy=None):
+    data_config = args_yaml[tc.INPUT_DATA_SECTION]
+    potential_config = args_yaml[tc.INPUT_POTENTIAL_SECTION]
+    dataset_path = data_config["path"]  # point to stage3 folder
+    test_dataset_path = data_config.get("test_path")
+    test_size = data_config.get("test_size")
+    test_shards = data_config.get("test_shards")
+
+    shift = 0
+    scale = 1.0
+    stats = read_saved_dataset_stats(dataset_path)
+    element_map = stats["element_map"]
+    scale_value = stats["scale"]
+    avg_n_neigh = stats["avg_n_neigh"]
+
+    if potential_config.get("scale", False):
+        scale_opt = potential_config["scale"]
+        if isinstance(scale_opt, float):
+            scale = scale_opt
+            log.info(f"Data scale: {scale}")
+        else:
+            scale = scale_value
+            scale = max(1e-1, scale)  # prevent too small values
+            if scale < 0.8:
+                log.warning(
+                    f"Constant potential::{scale=} is possibly too small. Consider setting it manually unless you know "
+                    f"what you are doing"
+                )
+            log.info(f"Data (auto) scale: {scale}")
+
+    data_stats = {
+        "avg_n_neigh": avg_n_neigh,
+        "constant_out_shift": shift,
+        "constant_out_scale": scale,
+        "atomic_shift_map": None,
+    }
+
+    return (
+        FutureDistributedDataset(data_config),
+        test_dataset_path or test_size or test_shards,  # mocking test dataset
+        element_map,
+        data_stats,
+        None,  # train_grouping_df
+        None,  # test_grouping_df
+    )
+
+
+def load_and_prepare_datasets(
+    args_yaml, batch_size, test_batch_size=None, seed=1234, strategy=None
+):
     # TODO: Need to use constants module.
     #  Too many strings are in here....
     data_config = args_yaml[tc.INPUT_DATA_SECTION]
     potential_config = args_yaml[tc.INPUT_POTENTIAL_SECTION]
     fit_config = args_yaml[tc.INPUT_FIT_SECTION]
     rcut = args_yaml[tc.INPUT_CUTOFF]
+    if data_config.get("distributed", False):
+        log.info("Precomputed and/or distributed dataset(s) will be used")
+        return load_and_prepare_distributed_datasets(
+            args_yaml, seed=seed, strategy=strategy
+        )
 
     # check if fit stress
     is_fit_stress = tc.INPUT_FIT_LOSS in fit_config and (
@@ -169,9 +519,9 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
 
     # load data (no yet preprocessing)
     train_df, test_df = load_train_test_datasets(data_config, seed=seed)
-    train_df["NUMBER_OF_ATOMS"] = train_df["ase_atoms"].map(len)
+    train_df["NUMBER_OF_ATOMS"] = train_df[tc.COLUMN_ASE_ATOMS].map(len)
     if test_df is not None:
-        test_df["NUMBER_OF_ATOMS"] = test_df["ase_atoms"].map(len)
+        test_df["NUMBER_OF_ATOMS"] = test_df[tc.COLUMN_ASE_ATOMS].map(len)
 
     if tc.INPUT_FIT_LOSS_ENERGY in fit_config[tc.INPUT_FIT_LOSS]:
         if tc.INPUT_REFERENCE_ENERGY in data_config:
@@ -253,6 +603,7 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             log.info(f"Data scale: {scale}")
         else:
             rms_f = np.vstack(train_df["forces"].to_numpy())
+            # TODO: currently per-component, need to be per-vector or per-component
             scale = np.sqrt(np.mean(rms_f**2))
             scale = max(1e-1, scale)  # prevent too small values
             if scale < 0.8:
@@ -307,9 +658,16 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         elements = extract_elements(train_df)
         if has_test_set:
             elements.update(extract_elements(test_df))
+        elements = list(sorted(elements))
+        element_map = {e: i for i, e in enumerate(elements)}
         log.info("Extract elements from train and test datasets")
-    elements = list(sorted(elements))
-    element_map = {e: i for i, e in enumerate(elements)}
+    elif isinstance(elements, list):
+        log.info("Elements are provided as list")
+        elements = list(elements)
+        element_map = {e: i for i, e in enumerate(elements)}
+    elif isinstance(elements, dict):
+        log.info("Elements are provided as dict")
+        element_map = elements
     log.info(f"Elements mapping: {element_map}")
 
     # apply E,F weights (i.e. energy-based weights)
@@ -367,11 +725,6 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
             except AttributeError as e:
                 raise NameError(f"Could not find data builder {db_name}")
 
-    # if tc.INPUT_FIT_LOSS_EFG in fit_config[tc.INPUT_FIT_LOSS]:
-    #     from tensorpotential.experimental.efg.databuilder import ReferenceEFGDataBuilder
-    #
-    #     data_builders.append(ReferenceEFGDataBuilder())
-
     # preprocess data
     log.info("Train set processing")
     max_n_buckets = fit_config.get("train_max_n_buckets", 5)
@@ -397,22 +750,29 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
     else:
         logging.info(f"[TRAIN] dataset stats:  num. batches: {len(train_batches)}")
     # compute average number of neighbours over TRAIN set
-    total_number_neigh = sum(b[tc.N_NEIGHBORS_REAL] for b in train_batches)
-    total_number_atoms = sum(b[tc.N_ATOMS_BATCH_REAL] for b in train_batches)
+    avg_n_neigh = potential_config.get("avg_n_neigh")
+    if avg_n_neigh is None:
+        total_number_neigh = sum(b[tc.N_NEIGHBORS_REAL] for b in train_batches)
+        total_number_atoms = sum(b[tc.N_ATOMS_BATCH_REAL] for b in train_batches)
+        avg_n_neigh = total_number_neigh / total_number_atoms
+        logging.info(f"Average number of neighbors (computed): {avg_n_neigh}")
+    else:
+        logging.info(f"Average number of neighbors (provided): {avg_n_neigh}")
+
     # compute avg number of neighbors per element
-    nat_per_specie = defaultdict(int)
-    total_nei_per_specie = defaultdict(int)
-    for b in train_batches:
-        nps = b["nat_per_specie"]
-        tnps = b["total_nei_per_specie"]
-        for k, v in nps.items():
-            nat_per_specie[k] += v
-        for k, v in tnps.items():
-            total_nei_per_specie[k] += v
-    avg_n_neigh_per_specie = {}
-    for k, v in nat_per_specie.items():
-        val = v if v > 0 else 1.0
-        avg_n_neigh_per_specie[k] = total_nei_per_specie[k] / val
+    # nat_per_specie = defaultdict(int)
+    # total_nei_per_specie = defaultdict(int)
+    # for b in train_batches:
+    #     nps = b["nat_per_specie"]
+    #     tnps = b["total_nei_per_specie"]
+    #     for k, v in nps.items():
+    #         nat_per_specie[k] += v
+    #     for k, v in tnps.items():
+    #         total_nei_per_specie[k] += v
+    # avg_n_neigh_per_specie = {}
+    # for k, v in nat_per_specie.items():
+    #     val = v if v > 0 else 1.0
+    #     avg_n_neigh_per_specie[k] = total_nei_per_specie[k] / val
     # log.info(f"Average per specie nnei: {avg_n_neigh_per_specie}")
 
     if has_test_set:
@@ -442,8 +802,6 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
     else:
         # tuple_of_test_datasets = None
         test_batches = None
-    avg_n_neigh = total_number_neigh / total_number_atoms
-    logging.info(f"Average number of neighbors: {avg_n_neigh}")
     # esa_dict: el -> e0
     # element_map: el -> mu
     # atomic_shift_map :  mu -> e0
@@ -453,10 +811,10 @@ def load_and_prepare_datasets(args_yaml, batch_size, test_batch_size=None, seed=
         if esa_dict is not None
         else None
     )
-    use_per_specie_n_nei = args_yaml.get(tc.INPUT_USE_PER_SPECIE_N_NEI, False)
+    # use_per_specie_n_nei = args_yaml.get(tc.INPUT_USE_PER_SPECIE_N_NEI, False)
     data_stats = {
         "avg_n_neigh": (
-            avg_n_neigh if not use_per_specie_n_nei else avg_n_neigh_per_specie
+            avg_n_neigh  # if not use_per_specie_n_nei else avg_n_neigh_per_specie
         ),
         "constant_out_shift": shift,
         "constant_out_scale": scale,
@@ -488,3 +846,88 @@ def get_group_mapping_df(df):
         [col for col in df.columns if col.startswith("group__")] + ["NUMBER_OF_ATOMS"]
     ]
     return gdf
+
+
+def key_for_batch_dict(batch_dict):
+    return (
+        batch_dict[tc.BOND_VECTOR].shape[0],
+        batch_dict[tc.N_ATOMS_BATCH_TOTAL].numpy(),
+        batch_dict[tc.N_STRUCTURES_BATCH_TOTAL].numpy(),
+    )
+
+
+def regroup_dataset_to_iterator(ds, n_group=1, regroup_window_factor=32):
+    if n_group == 1:
+        return ds
+
+    def sorting_generator(batched_dataset, window_size, sort_key_fn=key_for_batch_dict):
+        """Sorts batches within a window and returns a new generator with partially sorted batches."""
+
+        buffer = []
+        for batch in batched_dataset:
+            buffer.append(batch)
+            if len(buffer) == window_size:
+                # Sort the current chunk of batches
+                buffer.sort(key=sort_key_fn)
+                for sorted_batch in buffer:
+                    yield sorted_batch
+                buffer = []
+
+        # Yield any remaining batches
+        if buffer:
+            buffer.sort(key=sort_key_fn)
+            for sorted_batch in buffer:
+                yield sorted_batch
+
+    # deferred generator
+    return sorting_generator(ds, window_size=n_group * regroup_window_factor)
+
+
+def regroup_similar_batches(ds, n_group=1):
+    if n_group == 1:
+        return ds
+
+    if is_tf_distr_dataset(ds):
+        return ds
+
+    # this is actually a sorting algorithm:
+    # Step 1: Create buckets_dict
+    buckets_dict = defaultdict(deque)
+    for batch_dict in ds:
+        key = key_for_batch_dict(batch_dict)
+        buckets_dict[key].append(batch_dict)
+
+    # Step 2: Shuffle the keys and the contents of each bucket
+    keys = list(buckets_dict.keys())
+    random.shuffle(keys)
+
+    # Step 3: Create interleaved chunks
+    grouped_ds = []
+    buckets_iter = cycle(keys)  # Cycle through keys repeatedly
+    non_empty_keys = set(keys)  # Track keys with remaining elements
+
+    while non_empty_keys:
+        key = next(buckets_iter)  # Get the next key in a round-robin manner
+        if key in non_empty_keys:
+            bucket = buckets_dict[key]
+            # Extract a chunk of size n_group
+            if len(bucket) >= n_group:
+                chunk = [bucket.popleft() for _ in range(n_group)]
+                grouped_ds.extend(chunk)
+            else:
+                non_empty_keys.remove(key)
+    # add "leftovers"
+    for key in keys:
+        if buckets_dict[key]:
+            grouped_ds.extend(buckets_dict[key])
+
+    # for batch_dict in grouped_ds:
+    #     print(key_for_batch_dict(batch_dict))
+    assert len(grouped_ds) == len(ds)
+    return grouped_ds
+
+
+def is_tf_distr_dataset(dataset):
+    from tensorflow.python.distribute.input_lib import DistributedDatasetsFromFunction
+
+    return isinstance(dataset, (tf.data.Dataset, DistributedDatasetsFromFunction))

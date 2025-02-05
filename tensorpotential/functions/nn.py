@@ -5,7 +5,7 @@ import tensorflow as tf
 from typing import Callable, Optional
 
 
-ACTIVATION_DICT = {"tanh": tf.nn.tanh}
+ACTIVATION_DICT = {"tanh": tf.nn.tanh, "silu": tf.nn.silu, "sigmoid": tf.nn.sigmoid}
 
 
 class DenseLayer(tf.Module):

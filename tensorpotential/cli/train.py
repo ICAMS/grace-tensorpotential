@@ -4,17 +4,21 @@ import itertools
 import json
 import logging
 import os.path
+import time
 from collections import defaultdict
 
 import numpy as np
-import time
-
 import pandas as pd
+import tensorflow as tf
 from scipy.optimize import minimize
 from tqdm import tqdm
 
 from tensorpotential import constants
-import tensorflow as tf
+from tensorpotential.cli.data import (
+    regroup_similar_batches,
+    is_tf_distr_dataset,
+    regroup_dataset_to_iterator,
+)
 
 LEARNING_RATE_REDUCTION = "learning_rate_reduction"
 
@@ -47,30 +51,46 @@ def metrics_to_string(metrics):
 
 def test_one_epoch(
     tp,
-    tuple_of_datasets,
+    dataset,
     distr_strategy,
     cycle=True,
     compute_concat_per_structure_metrics=False,
+    chunk_batches=False,
+    regroup_window_factor=None,
 ):
+    is_tf_dataset = is_tf_distr_dataset(dataset)
+    n_batch = get_dataset_num_batches(dataset)
+
+    if chunk_batches and distr_strategy.num_replicas_in_sync > 1:
+        if is_tf_dataset and dataset.distribute_values and regroup_window_factor:
+            dataset = regroup_dataset_to_iterator(
+                dataset,
+                n_group=distr_strategy.num_replicas_in_sync,
+                regroup_window_factor=regroup_window_factor,
+            )
+            is_tf_dataset = False
+
     acc_metrics = {}
-    data_iter = iter(tuple_of_datasets)
+    data_iter = iter(dataset)
     if cycle or distr_strategy.num_replicas_in_sync > 1:
-        data_iter = itertools.cycle(data_iter)
-    n_batch = len(tuple_of_datasets)
+        if not is_tf_dataset:
+            data_iter = itertools.cycle(data_iter)
     steps = int(
         np.round(np.ceil(n_batch / distr_strategy.num_replicas_in_sync))
     )  # ! extra batch will be processed
-    # steps = n_batch // distr_strategy.num_replicas_in_sync  # tail batch will be dropped !
     steps = max(steps, 1)
     num_processed_batches = 0
     total_time = 0
     agg_concat_per_structure_metrics = defaultdict(list)
     for i in range(steps):
-        b_data = [
-            next(data_iter)  # .get_single_element()
-            for _ in range(distr_strategy.num_replicas_in_sync)
-        ]  # list of num_replicas_in_sync batch_dicts
-        num_processed_batches += len(b_data)
+        if is_tf_dataset:
+            b_data = next(data_iter)
+        else:
+            b_data = [
+                next(data_iter)  # .get_single_element()
+                for _ in range(distr_strategy.num_replicas_in_sync)
+            ]  # list of num_replicas_in_sync batch_dicts
+        num_processed_batches += distr_strategy.num_replicas_in_sync
         # TODO: filter out unnecessary data, not to submit to GPU
         t_start = time.perf_counter()
         out = tp.distributed_test_step(b_data)
@@ -84,7 +104,9 @@ def test_one_epoch(
             concatenate_per_structure_metrics(
                 out, b_data, agg_concat_per_structure_metrics
             )
+        del b_data
     # log.info(f"[TEST]: processed batches/total batches: {num_processed_batches}/{n_batch}")
+    del data_iter
     acc_metrics["total_time/test"] = total_time
     if compute_concat_per_structure_metrics:
         return acc_metrics, agg_concat_per_structure_metrics
@@ -94,22 +116,47 @@ def test_one_epoch(
 
 def train_one_epoch(
     tp,
-    tuple_of_datasets,
+    train_dataset,
     distr_strategy,
     progress_bar=False,
     desc=None,
     shuffle=False,
     cycle=False,
     compute_concat_per_structure_metrics=False,
+    chunk_batches=False,
+    regroup_window_factor=None,
 ):
+    is_tf_dataset = is_tf_distr_dataset(train_dataset)
+    n_batch = get_dataset_num_batches(train_dataset)
     acc_metrics = {}
     if shuffle or distr_strategy.num_replicas_in_sync > 1:
-        tuple_of_datasets = list(tuple_of_datasets)
-        np.random.shuffle(tuple_of_datasets)
-    data_iter = iter(tuple_of_datasets)
+        if is_tf_dataset:
+            # TODO: shuffle train_dataset
+            pass
+        else:
+            train_dataset = list(train_dataset)
+            np.random.shuffle(train_dataset)
+    if chunk_batches and distr_strategy.num_replicas_in_sync > 1:
+        # group similar buckets together
+        if not is_tf_dataset:
+            train_dataset = regroup_similar_batches(
+                train_dataset, n_group=distr_strategy.num_replicas_in_sync
+            )
+        elif (
+            is_tf_dataset and train_dataset.distribute_values and regroup_window_factor
+        ):
+            train_dataset = regroup_dataset_to_iterator(
+                train_dataset,
+                n_group=distr_strategy.num_replicas_in_sync,
+                regroup_window_factor=regroup_window_factor,
+            )
+            is_tf_dataset = False
+
+    data_iter = iter(train_dataset)
     if cycle or distr_strategy.num_replicas_in_sync > 1:
-        data_iter = itertools.cycle(data_iter)
-    n_batch = len(tuple_of_datasets)
+        if not is_tf_dataset:
+            data_iter = itertools.cycle(data_iter)
+
     # TODO: decide the strategy for batches: add extra or remove tail?
     # steps = int(np.round(np.ceil(n_batch / distr_strategy.num_replicas_in_sync))) # ! extra batch will be processed
     steps = (
@@ -124,15 +171,14 @@ def train_one_epoch(
     total_time = 0
     agg_concat_per_structure_metrics = defaultdict(list)
     for i in pbar:
-        b_data = [
-            next(data_iter)  # .get_single_element()
-            for _ in range(distr_strategy.num_replicas_in_sync)
-        ]
-        # sort b_data by number of total neighbours, in order to rebalance load in multi-GPU env
-        # as GPU:0 should synchronize  grads and apply them
-        # if len(b_data) > 1:
-        #     b_data = sorted(b_data, key=lambda b: len(b[constants.BOND_IND_I]))
-        num_processed_batches += len(b_data)
+        if is_tf_dataset:
+            b_data = next(data_iter)
+        else:
+            b_data = [
+                next(data_iter)  # .get_single_element()
+                for _ in range(distr_strategy.num_replicas_in_sync)
+            ]
+        num_processed_batches += distr_strategy.num_replicas_in_sync
         # TODO: filter out unnecessary data, not to submit to GPU
         t_start = time.perf_counter()
         out = tp.distributed_train_step(b_data)
@@ -145,6 +191,8 @@ def train_one_epoch(
             concatenate_per_structure_metrics(
                 out, b_data, agg_concat_per_structure_metrics
             )
+        del b_data
+    del data_iter
     # log.info(f"[TRAIN]: processed batches/total batches: {num_processed_batches}/{n_batch}")
     acc_metrics["total_time/train"] = total_time
     if compute_concat_per_structure_metrics:
@@ -154,19 +202,29 @@ def train_one_epoch(
 
 
 def concatenate_per_structure_metrics(out, b_data, agg_concat_per_structure_metrics):
-    # cur_structure_ids = []
-    for b in b_data:
-        # cur_structure_ids += list(b[constants.DATA_STRUCTURE_ID])
-        agg_concat_per_structure_metrics[constants.DATA_STRUCTURE_ID] += [
-            ind
-            for ind in b[constants.DATA_STRUCTURE_ID].numpy().reshape(-1)
-            if ind != -1
-        ]
+    if isinstance(b_data, list):  # manual dataset
+        for b in b_data:
+            # cur_structure_ids += list(b[constants.DATA_STRUCTURE_ID])
+            agg_concat_per_structure_metrics[constants.DATA_STRUCTURE_ID] += [
+                ind
+                for ind in b[constants.DATA_STRUCTURE_ID].numpy().reshape(-1)
+                if ind != -1
+            ]
+    elif isinstance(b_data, dict):  # tf.data.Dataset (distributed or not)
+        # convert PerReplica to tensors and loop over
+        try:
+            it = b_data[constants.DATA_STRUCTURE_ID].values  # distributed
+        except AttributeError:
+            it = [b_data[constants.DATA_STRUCTURE_ID]]  # serial
+
+        for structure_ind_tensor in it:
+            agg_concat_per_structure_metrics[constants.DATA_STRUCTURE_ID] += [
+                ind for ind in structure_ind_tensor.numpy().reshape(-1) if ind != -1
+            ]
 
     # cur_metrics_per_struct_dict = defaultdict(list)
     for metric_name, metric_values in out.items():
         if metric_name.endswith("per_struct"):
-            # cur_metrics_per_struct_dict[metric_name] += list(metric_values.numpy())
             agg_concat_per_structure_metrics[metric_name] += list(
                 metric_values.numpy().reshape(-1)
             )
@@ -222,6 +280,12 @@ def train_bfgs_one_epoch(
         return acc_metrics
 
 
+def get_dataset_num_batches(dataset):
+
+    if dataset is not None:
+        return dataset.n_batch if is_tf_distr_dataset(dataset) else len(dataset)
+
+
 def train_adam(
     tp,
     fit_config,
@@ -231,11 +295,13 @@ def train_adam(
     seed=None,
     train_grouping_df=None,
     test_grouping_df=None,
-    compute_init_stats: bool = False,
 ):
+    compute_init_stats = fit_config.get("eval_init_stats", False)
     epochs = fit_config.get("maxiter", 500)
     checkpoint_freq = fit_config.get("checkpoint_freq", 10)
     progress_bar = fit_config.get("progressbar", False)
+    group_similar_batches = fit_config.get("group_similar_batches", True)
+    regroup_window_factor = fit_config.get("regroup_window_factor", 128)
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e99
@@ -247,6 +313,10 @@ def train_adam(
     lr_min = None
     resume_lr = True
     loss_explosion_threshold = None
+
+    n_batches = get_dataset_num_batches(train_ds)
+
+    test_n_batches = get_dataset_num_batches(test_ds)
 
     if fit_config.get("reset_optimizer", False):
         log.info("Resetting optimizers by reinitialization")
@@ -263,6 +333,14 @@ def train_adam(
         )
         resume_lr = lr_red_params.get("resume_lr")
         loss_explosion_threshold = lr_red_params.get("loss_explosion_threshold")
+
+    if group_similar_batches and strategy.num_replicas_in_sync > 1:
+        n_group = strategy.num_replicas_in_sync
+        log.info(f"Regroup similar TRAIN batches by group of {n_group}")
+        train_ds = regroup_similar_batches(train_ds, n_group=n_group)
+        if test_ds is not None:
+            log.info(f"Regroup similar TEST batches by group of {n_group}")
+            test_ds = regroup_similar_batches(test_ds, n_group=n_group)
 
     if not resume_lr:
         lr = fit_config["opt_params"]["learning_rate"]
@@ -298,9 +376,11 @@ def train_adam(
             strategy,
             cycle=fit_config.get("train_cycle", False),
             compute_concat_per_structure_metrics=True,
+            chunk_batches=group_similar_batches,
+            regroup_window_factor=regroup_window_factor,
         )
         initial_train_metrics = process_acc_metrics(
-            train_acc_metrics, n_batches=len(train_ds)
+            train_acc_metrics, n_batches=n_batches
         )
         initial_train_metrics["epoch"] = tp.epoch
         if train_grouping_df is not None:
@@ -308,7 +388,7 @@ def train_adam(
                 train_grouping_df,
                 train_agg_concat_per_structure_metrics,
                 initial_train_metrics,
-                n_batches=len(train_ds),
+                n_batches=n_batches,
             )
         # replace "test" with "train" for consistency:
         initial_train_metrics = {
@@ -325,11 +405,13 @@ def train_adam(
                 strategy,
                 cycle=fit_config.get("test_cycle", False),
                 compute_concat_per_structure_metrics=True,
+                chunk_batches=group_similar_batches,
+                regroup_window_factor=regroup_window_factor,
             )
             # tp.on_test_end()
             initial_test_metrics = process_acc_metrics(
                 test_acc_metrics,
-                n_batches=len(test_ds),
+                n_batches=test_n_batches,
             )
             initial_test_metrics["epoch"] = tp.epoch
 
@@ -338,7 +420,7 @@ def train_adam(
                     test_grouping_df,
                     test_agg_concat_per_structure_metrics,
                     initial_test_metrics,
-                    n_batches=len(test_ds),
+                    n_batches=test_n_batches,
                 )
 
             msg = generate_train_test_message(
@@ -371,13 +453,15 @@ def train_adam(
             shuffle=fit_config.get("train_shuffle", False),
             cycle=fit_config.get("train_cycle", False),
             compute_concat_per_structure_metrics=True,
+            chunk_batches=group_similar_batches,
+            regroup_window_factor=regroup_window_factor,
         )
 
         # manually rewrite values with EMA after each epoch before applying (use_ema is checking inside)
         tp.optimizer.finalize_variable_values(tp.model.trainable_variables)
         # post_process agg_metrics
         final_train_metrics = process_acc_metrics(
-            train_acc_metrics, n_batches=len(train_ds)
+            train_acc_metrics, n_batches=n_batches
         )
         final_train_metrics["epoch"] = tp.epoch
         # TODO: compute per-group metrics from train_agg_concat_per_structure_metrics and train_grouping_df
@@ -386,7 +470,7 @@ def train_adam(
                 train_grouping_df,
                 train_agg_concat_per_structure_metrics,
                 final_train_metrics,
-                n_batches=len(train_ds),
+                n_batches=n_batches,
             )
         dump_metrics(
             filename=os.path.join(tp.output_dir, "train_metrics.yaml"),
@@ -403,11 +487,13 @@ def train_adam(
                 strategy,
                 cycle=fit_config.get("test_cycle", False),
                 compute_concat_per_structure_metrics=True,
+                chunk_batches=group_similar_batches,
+                regroup_window_factor=regroup_window_factor,
             )
             # tp.on_test_end()
             final_test_metrics = process_acc_metrics(
                 test_acc_metrics,
-                n_batches=len(test_ds),
+                n_batches=test_n_batches,
             )
             final_test_metrics["epoch"] = tp.epoch
 
@@ -416,7 +502,7 @@ def train_adam(
                     test_grouping_df,
                     test_agg_concat_per_structure_metrics,
                     final_test_metrics,
-                    n_batches=len(test_ds),
+                    n_batches=test_n_batches,
                 )
 
             msg = generate_train_test_message(
@@ -548,16 +634,25 @@ def train_bfgs(
     seed=None,
     train_grouping_df=None,
     test_grouping_df=None,
-    compute_init_stats: bool = False,
 ):
+    compute_init_stats = fit_config.get("eval_init_stats", False)
     epochs = fit_config.get("maxiter", 500)
     checkpoint_freq = fit_config.get("checkpoint_freq", 10)
 
     progress_bar = fit_config.get("progressbar", False)
+    group_similar_batches = fit_config.get("group_similar_batches", True)
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e16
     tp.epoch = 0
+
+    if group_similar_batches and strategy.num_replicas_in_sync > 1:
+        n_group = strategy.num_replicas_in_sync
+        log.info(f"Regroup similar TRAIN batches by group of {n_group}")
+        train_ds = regroup_similar_batches(train_ds, n_group=n_group)
+        if test_ds is not None:
+            log.info(f"Regroup similar TEST batches by group of {n_group}")
+            test_ds = regroup_similar_batches(test_ds, n_group=n_group)
 
     #### INIT STATS ####
     if compute_init_stats:

@@ -4,8 +4,10 @@ import gc
 import importlib
 import logging
 import os
-import sys
 import re
+import sys
+
+from tensorpotential.cli.data import FutureDistributedDataset
 
 try:
     import readline
@@ -184,11 +186,7 @@ def construct_model(
     return instructions_list
 
 
-def convert_to_tensors_for_model(
-    tp,
-    train_data,
-    test_data,
-):
+def convert_to_tensors_for_model(tp, train_data, test_data, strategy):
     """
     Converts a train and test data into a tf.Tensor using only keys from tp.model's signature
 
@@ -198,6 +196,13 @@ def convert_to_tensors_for_model(
     :return: tuple of train data and test data
     """
     sigs = tp.get_model_grad_signatures()
+
+    if isinstance(train_data, FutureDistributedDataset):
+        train_data, test_data = train_data.generate_dataset(
+            strategy=strategy, signatures=sigs
+        )
+        return train_data, test_data
+
     train_batches = []
     with tf.device("CPU"):
         # use deque for train_data in order to efficiently popleft and reduce immediate memory usage
@@ -265,9 +270,9 @@ def build_metrics_function(fit_config, extra_loss_components=None):
 
     if extra_loss_components is not None:
         for loss_component in extra_loss_components:
-            extra_metric = loss_component.corresponding_metrics()
+            extra_metric = loss_component.corresponding_metrics
             if extra_metric is not None:
-                metrics_list.append(extra_metric)
+                metrics_list.append(extra_metric())
     # if tc.INPUT_FIT_LOSS_EFG in fit_loss:
     #     from tensorpotential.experimental.efg.metrics import AtomicEFGMetrics
     #

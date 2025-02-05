@@ -1,33 +1,29 @@
 from setuptools import setup, find_packages
 
-setup(
-    name="tensorpotential",
-    version="0.4.4",
-    packages=find_packages(include=["tensorpotential", "tensorpotential.*"]),
-    url="https://github.com/ICAMS/grace-tensorpotential",
-    license="Academic Software License (ASL)",
-    author="Anton Bochkarev, Yury Lysogorskiy",
-    author_email="anton.bochkarev@rub.de, yury.lysogorskiy@rub.de",
-    description="Graph Atomic Cluster Expansion (GRACE)",
-    long_description="Graph Atomic Cluster Expansion (GRACE)",
-    python_requires="<3.12",
-    install_requires=[
-        "scipy",
-        "tensorflow<2.17",
-        "matscipy",
-        "numpy",
-        "sympy",
-        "pandas<3.0.0",
-        "ase",
-        "pyyaml>=6.0.2",
-        "tqdm",
-    ],
-    scripts=[
-        "bin/gracemaker",
-        "bin/grace_models",
-        "bin/grace_collect",
-        "bin/extxyz2df",
-    ],
-    package_data={"tensorpotential": ["resources/input_template.yaml"]},
-    include_package_data=True,
-)
+# (Optional) Version reading from pyproject.toml
+# import pathlib
+# import toml
+#
+# HERE = pathlib.Path(__file__).parent
+# TOML_PATH = HERE / "pyproject.toml"
+# TOML_DATA = toml.load(TOML_PATH)
+# VERSION = TOML_DATA["project"]["version"]
+
+
+if __name__ == "__main__":
+    setup(
+        # version=VERSION # (Optional) when version is read from pyproject.toml
+        packages=find_packages(include=["tensorpotential", "tensorpotential.*"]),
+        package_data={"tensorpotential": ["resources/input_template.yaml"]},
+        include_package_data=True,
+        version="0.4.5",  ### UPD in pyproject.toml to avoid confusion
+        scripts=[
+            "bin/gracemaker",
+            "bin/grace_models",
+            "bin/grace_collect",
+            "bin/extxyz2df",
+            "bin/df2extxyz",
+            "bin/grace_preprocess",
+            "bin/grace_predict",
+        ],
+    )

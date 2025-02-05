@@ -69,3 +69,13 @@ __all__ = [
     "LinearOut2EquivarTarget",
     "BondSpecificRadialBasisFunction",
 ]
+
+try:
+    from tensorpotential.experimental.instructions.aux_compute import (
+        InvariantLayerRMSNorm,
+        InvariantGate,
+    )
+
+    __all__.extend(["InvariantLayerRMSNorm", "InvariantGate"])
+except ImportError:
+    pass

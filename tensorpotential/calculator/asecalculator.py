@@ -2,17 +2,249 @@ from __future__ import annotations
 
 import numpy as np
 import time
+import bisect
 
 from tensorflow.data import Dataset
 
-from typing import Any
+from typing import Any, Dict, Tuple, Optional, List
 from itertools import combinations_with_replacement
 from ase.calculators.calculator import Calculator, all_changes
 
 from tensorpotential.tensorpot import TensorPotential
 from tensorpotential.tpmodel import extract_cutoff_and_elements, extract_cutoff_matrix
-from tensorpotential.data.databuilder import construct_batches, GeometricalDataBuilder
+from tensorpotential.data.databuilder import (
+    construct_batches,
+    GeometricalDataBuilder,
+    get_number_of_real_atoms,
+    get_number_of_real_neigh,
+    AbstractDataBuilder,
+)
 from tensorpotential import constants
+
+
+class PaddingManager:
+    """
+    Manages padding for batches of atomic structures to ensure consistent input sizes for models.
+
+    This class handles padding based on either a fraction of neighbors or a fixed number of atoms,
+    or a combination of both. It maintains a history of padding bounds to reuse existing bounds
+    if possible and to potentially reduce padding if it becomes excessive.
+
+    Args:
+        data_builders (List[DataBuilderProtocol]): A list of DataBuilder objects that handle
+            data extraction, batching, and padding for different aspects of the atomic structures.
+        pad_neighbors_fraction (Optional[float]):  Fraction of real neighbors to add as padding.
+            Must be between 0 and 1 inclusive if provided. Defaults to 0.10. If None, neighbor padding
+            is not based on a fraction.
+        pad_atoms_number (Optional[int]): Number of atoms to add as padding. Must be a positive integer
+            if provided. Defaults to 10. If None, atom padding is not based on a fixed number.
+        max_number_reduction_recompilation (Optional[int]): Maximum number of times padding can be
+            reduced and recompilation triggered. If None, padding reduction is disabled. Defaults to 3.
+        debug_padding (bool): Enables debug logging for padding operations. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        data_builders: List[AbstractDataBuilder],
+        pad_neighbors_fraction: Optional[float] = 0.10,
+        pad_atoms_number: Optional[int] = 10,
+        max_number_reduction_recompilation: Optional[int] = 3,
+        debug_padding: bool = False,
+    ):
+
+        self.padding_fraction_history = []
+        if pad_neighbors_fraction is not None:
+            if not 0 < pad_neighbors_fraction <= 1:
+                raise ValueError(
+                    f"pad_neighbors_fraction must be a fraction between 0 and 1, but got {pad_neighbors_fraction}"
+                )
+
+        if pad_atoms_number is not None:
+            if not isinstance(pad_atoms_number, int):
+                raise TypeError(
+                    f"pad_atoms_number must be an integer, but got {type(pad_atoms_number)}"
+                )
+            if not pad_atoms_number > 0:
+                raise ValueError(
+                    f"pad_atoms_number must be larger than 0, but got {pad_atoms_number}"
+                )
+
+        self.data_builders: List[AbstractDataBuilder] = data_builders
+        self.pad_neighbors_fraction: Optional[float] = pad_neighbors_fraction
+        self.pad_atoms_number: Optional[int] = pad_atoms_number
+        self.max_number_reduction_recompilation: Optional[int] = (
+            max_number_reduction_recompilation
+        )
+        self.number_reduction_recompilation: int = 0
+        self.debug_padding: bool = debug_padding
+
+        # List of tuples (max_atoms, max_neighbors)
+        self.padding_bounds: List[Tuple[int, int]] = []
+
+    def find_upper_padding_bound(
+        self, max_nat: int, max_nneigh: int
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Finds the smallest existing padding bound in history that is greater than or equal to
+        the current required bounds (max_nat, max_nneigh).
+
+        Args:
+            max_nat (int): The maximum number of atoms in the current batch.
+            max_nneigh (int): The maximum number of neighbors in the current batch.
+
+        Returns:
+            Optional[Tuple[int, int]]: An existing upper padding bound (max_atoms, max_neighbors)
+                                        from history if found, otherwise None.
+        """
+        current_bound: Tuple[int, int] = (max_nat, max_nneigh)
+        for upper_bound_tuple in self.padding_bounds:
+            if (
+                upper_bound_tuple[0] >= current_bound[0]
+                and upper_bound_tuple[1] >= current_bound[1]
+            ):  # Component-wise comparison (atoms and neighbors)
+                return upper_bound_tuple
+        return None  # Explicitly return None if no suitable bound is found
+
+    def get_padded_bound(self, nreal_atoms: int, nreal_neigh: int) -> Tuple[int, int]:
+        """
+        Calculates the padded bounds for atoms and neighbors based on the configured padding parameters.
+
+        Args:
+            nreal_atoms (int): The number of real atoms in the current structure.
+            nreal_neigh (int): The number of real neighbors in the current structure.
+
+        Returns:
+            Tuple[int, int]: The calculated padded bounds as a tuple (max_atoms, max_neighbors).
+        """
+        current_max_neighbors: int
+        if self.pad_neighbors_fraction is not None:
+            current_max_neighbors = max(
+                256,
+                int(np.ceil(nreal_neigh + nreal_neigh * self.pad_neighbors_fraction)),
+            )
+        else:
+            # No padding for neighbors if fraction is None
+            current_max_neighbors = nreal_neigh
+
+        current_max_atoms: int
+        if self.pad_atoms_number is not None:
+            current_max_atoms = int(nreal_atoms + self.pad_atoms_number)
+        else:
+            current_max_atoms = nreal_atoms  # No padding for atoms if number is None
+
+        return current_max_atoms, current_max_neighbors
+
+    def get_data(self, atoms) -> Dict[str, Any]:
+        """
+        Processes the input atomic structure (atoms) to extract data, batch it, and apply padding.
+
+        This method orchestrates the data processing pipeline:
+        1. Extracts data features from the atomic structure using DataBuilders.
+        2. Joins the extracted data into a batch format.
+        3. Determines and applies padding to the batch based on the current padding strategy
+           and history.
+
+        Args:
+            atoms: An atomic structure object (e.g., ASE Atoms object).
+
+        Returns:
+            Dict[str, Any]: The processed and padded batch of data.
+        """
+        # Stage 1: Data Extraction
+        data_dict: Dict[str, Any] = {}
+        for data_builder in self.data_builders:
+            data_dict.update(data_builder.extract_from_ase_atoms(atoms))
+
+        # Stage 2: Batching
+        batch_group: List[Dict[str, Any]] = [
+            data_dict
+        ]  # Consider if batch_group is always of size 1
+        batch: Dict[str, Any] = {}
+        for data_builder in self.data_builders:
+            batch.update(data_builder.join_to_batch(batch_group))
+
+        # Stage 3: Determine Real Number of Atoms and Neighbors
+        nreal_atoms: int = get_number_of_real_atoms(batch)
+        nreal_neigh: int = get_number_of_real_neigh(batch)
+
+        if self.debug_padding:
+            print(f"nreal_atoms={nreal_atoms}, nreal_neigh={nreal_neigh}")
+
+        # Stage 4: Padding
+        if self.pad_atoms_number and self.pad_neighbors_fraction:
+            if not self.padding_bounds:
+                # FIRST TIME - NO current_max_neighbors and current_max_atoms, setup with padded threshold
+                upper_bound = self.get_padded_bound(nreal_atoms, nreal_neigh)
+                # insert into ordered list
+                if self.debug_padding:
+                    print(f"Adding initial padding bound: {upper_bound}")
+                bisect.insort(self.padding_bounds, upper_bound)
+            else:
+                # extract padding bounds from self.padding_bounds
+                upper_bound: Optional[Tuple[int, int]] = self.find_upper_padding_bound(
+                    nreal_atoms, nreal_neigh
+                )
+                if self.debug_padding:
+                    print(f"extract padding bounds: {upper_bound}")
+                if upper_bound is None:
+                    upper_bound = self.get_padded_bound(nreal_atoms, nreal_neigh)
+                    # insert into ordered list
+                    if self.debug_padding:
+                        print(f"Adding new maximum padding bound: {upper_bound}")
+                    # if upper_bound not in self.padding_bounds:
+                    bisect.insort(self.padding_bounds, upper_bound)
+                else:
+                    # check if too large padding
+                    if self.is_large_padding(nreal_atoms, nreal_neigh, upper_bound):
+                        if self.max_number_reduction_recompilation is not None and (
+                            self.number_reduction_recompilation
+                            < self.max_number_reduction_recompilation
+                        ):
+                            self.number_reduction_recompilation += 1
+                            upper_bound = self.get_padded_bound(
+                                nreal_atoms, nreal_neigh
+                            )
+                            # insert into ordered list
+                            if self.debug_padding:
+                                print(
+                                    f"Reducing padding and adding new bound: {upper_bound}"
+                                )
+                            # if upper_bound not in self.padding_bounds:
+                            bisect.insort(self.padding_bounds, upper_bound)
+                        elif self.debug_padding:
+                            print(
+                                f"Padding reduction skipped or max reductions reached. Keeping bound: {upper_bound}"
+                            )
+                    elif self.debug_padding:
+                        print(f"Using existing padding bound: {upper_bound}")
+
+            pad_max_n_atoms, pad_max_n_neighbors = upper_bound
+
+            batch_max_pad_dict: Dict[str, int] = {
+                constants.PAD_MAX_N_STRUCTURES: 1,
+                constants.PAD_MAX_N_ATOMS: pad_max_n_atoms,
+                constants.PAD_MAX_N_NEIGHBORS: pad_max_n_neighbors,
+            }
+
+            padding_fraction = (pad_max_n_atoms + pad_max_n_neighbors) / (
+                nreal_atoms + nreal_neigh
+            ) - 1
+            if self.debug_padding:
+                print("padding_fraction={:.2f}".format(padding_fraction))
+                self.padding_fraction_history.append(padding_fraction)
+
+            for data_builder in self.data_builders:
+                data_builder.pad_batch(batch, batch_max_pad_dict)
+
+        return batch
+
+    def is_large_padding(self, nreal_atoms, nreal_neigh, upper_bound):
+        npad_atoms = upper_bound[0] - nreal_atoms
+        npad_neigh = upper_bound[1] - nreal_neigh
+        padding_fraction = (npad_atoms + npad_neigh) / (nreal_atoms + nreal_neigh)
+        return (
+            npad_atoms + npad_neigh > 1000
+        ) and padding_fraction > self.pad_neighbors_fraction
 
 
 class TPCalculator(Calculator):
@@ -36,34 +268,18 @@ class TPCalculator(Calculator):
         self,
         model: list[Any] | Any,
         cutoff: float = None,
-        pad_neighbors_fraction: float | None = 0.05,
-        pad_atoms_number: int | None = 1,
+        pad_neighbors_fraction: float | None = 0.25,
+        pad_atoms_number: int | None = 10,
         min_dist=None,
         extra_properties: list[str] = None,
         truncate_extras_by_natoms: bool = False,
+        max_number_reduction_recompilation: int | None = 2,
+        debug_padding=False,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
+        self.data = None
         self.cutoff = cutoff
-        # self.model_type = None
-        if pad_neighbors_fraction is not None:
-            assert (
-                0 < pad_neighbors_fraction <= 1
-            ), f"pad_neighbors_fraction must be a fraction between 0 and 1"
-        self.pad_neighbors_fraction = pad_neighbors_fraction
-        self.current_max_neighbors = None
-
-        if pad_atoms_number is not None:
-            assert 0 < pad_atoms_number, f"pad_atoms_number must be larger than 0"
-            assert isinstance(
-                pad_atoms_number, int
-            ), f"pad_atoms_number must be an integer"
-        self.pad_atoms_number = pad_atoms_number
-        self.current_max_atoms = None
-        if self.pad_atoms_number is not None:
-            assert (
-                self.pad_neighbors_fraction is not None
-            ), f"Padding natoms only is not supported"
 
         self.eval_time = 0
         self.basis = None
@@ -157,14 +373,24 @@ class TPCalculator(Calculator):
                 el0, el1 = inv_element_map[comb[0]], inv_element_map[comb[1]]
                 self.cutoff_dict[(el0, el1)] = matrix[comb[0], comb[1]]
 
-        self.data_builders = [
-            GeometricalDataBuilder(
-                elements_map=self.element_map,
-                cutoff=self.cutoff,
-                cutoff_dict=self.cutoff_dict,
-            )
-        ]
+        self.geom_data_builder = GeometricalDataBuilder(
+            elements_map=self.element_map,
+            cutoff=self.cutoff,
+            cutoff_dict=self.cutoff_dict,
+        )
+        self.data_builders = [self.geom_data_builder]
+        if constants.ATOMIC_MAGMOM in self.data_keys:
+            from tensorpotential.experimental.mag.databuilder import MagMomDataBuilder
 
+            self.data_builders.append(MagMomDataBuilder())
+
+        self.padding_manager = PaddingManager(
+            data_builders=self.data_builders,
+            pad_neighbors_fraction=pad_neighbors_fraction,
+            pad_atoms_number=pad_atoms_number,
+            max_number_reduction_recompilation=max_number_reduction_recompilation,
+            debug_padding=debug_padding,
+        )
 
     def get_data(self, atoms):
         current_symbs = atoms.symbols.species()
@@ -174,63 +400,12 @@ class TPCalculator(Calculator):
             f"contains {current_symbs}"
         )
 
-        if self.pad_neighbors_fraction is not None or self.pad_atoms_number is not None:
-            if self.current_max_neighbors is None or self.current_max_atoms is None:
-                data, stats = construct_batches(
-                    [atoms],
-                    self.data_builders,
-                    verbose=False,
-                    batch_size=1,
-                    max_n_buckets=1,
-                    return_padding_stats=True,
-                    gc_collect=False,
-                )
-                max_nneigh = stats["nreal_neigh"]
-                max_at = stats["nreal_atoms"]
+        data = self.padding_manager.get_data(atoms)
 
-                self.current_max_neighbors = np.ceil(
-                    max_nneigh + max_nneigh * self.pad_neighbors_fraction
-                ).astype(int)
+        self.data = data
 
-                if self.pad_atoms_number is not None:
-                    self.current_max_atoms = int(max_at + self.pad_atoms_number)
-                else:
-                    self.current_max_atoms = max_at
-
-            # if self.current_max_neighbors is not None or self.current_max_atoms is not None:
-            data, stats = construct_batches(
-                [atoms],
-                self.data_builders,
-                verbose=False,
-                batch_size=1,
-                max_n_buckets=1,
-                return_padding_stats=True,
-                external_max_nneigh=self.current_max_neighbors,
-                external_max_nat=self.current_max_atoms,
-                gc_collect=False,
-            )
-            max_nneigh = stats["nreal_neigh"]
-            if max_nneigh > self.current_max_neighbors:
-                self.current_max_neighbors = np.ceil(
-                    max_nneigh + max_nneigh * self.pad_neighbors_fraction
-                ).astype(int)
-
-            max_at = stats["nreal_atoms"]
-            if max_at > self.current_max_atoms:
-                self.current_max_atoms = np.array(
-                    max_at + self.pad_atoms_number
-                ).astype(int)
-        else:
-            data = construct_batches(
-                [atoms],
-                self.data_builders,
-                verbose=False,
-                batch_size=1,
-                max_n_buckets=None,
-                gc_collect=False,
-            )
-
-        data = {k: v for k, v in data[0].items() if k in self.data_keys}
+        # filtering
+        data = {k: v for k, v in data.items() if k in self.data_keys}
         self.current_min_dist = np.min(
             np.linalg.norm(data[constants.BOND_VECTOR], axis=1)
         )
@@ -239,6 +414,20 @@ class TPCalculator(Calculator):
                 f"Minimal bond distance {self.current_min_dist} is smaller than {self.min_dist}"
             )
         self.data = Dataset.from_tensors(data).get_single_element()
+
+    def find_upper_padding_bound(self, max_nat):
+        # find first entry, when max_nat<=
+        for ind, upper_bound_tuple in enumerate(self.padding_history):
+            if upper_bound_tuple[0] >= max_nat:
+                break
+        # shift further, until same max_nat
+        while (
+            ind + 1 < len(self.padding_history)
+            and self.padding_history[ind + 1][0] == upper_bound_tuple[0]
+        ):
+            ind += 1
+        upper_bound_tuple = self.padding_history[ind]
+        return upper_bound_tuple
 
     def calculate(
         self,
@@ -257,7 +446,7 @@ class TPCalculator(Calculator):
 
         t0 = time.perf_counter()
 
-        outputs = []
+        self.outputs = []
         energy_list = []
         forces_list = []
         stress_list = []
@@ -269,9 +458,9 @@ class TPCalculator(Calculator):
 
         for model in self.models:
             output = model.compute(self.data)
-            outputs.append(output)
+            self.outputs.append(output)
 
-        for output in outputs:
+        for output in self.outputs:
             if "energy" in self.compute_properties:
                 e = output.get(constants.PREDICT_TOTAL_ENERGY, None)
                 if e is None:

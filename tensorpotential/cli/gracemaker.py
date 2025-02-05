@@ -3,31 +3,29 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import numpy as np
 import os
 import sys
+
+import numpy as np
 import yaml
-
-import tensorflow as tf
-
 from ase.data import chemical_symbols
 
+from tensorpotential import constants as tc
 from tensorpotential.cli.data import load_and_prepare_datasets
-from tensorpotential.cli.train import try_load_checkpoint, train_adam, train_bfgs
-from tensorpotential.tensorpot import TensorPotential, get_output_dir
 from tensorpotential.cli.prepare import (
     construct_model,
     convert_to_tensors_for_model,
     construct_model_functions,
     generate_template_input,
 )
-from tensorpotential import constants as tc
-from tensorpotential.loss import *
-from tensorpotential.metrics import *
+from tensorpotential.cli.train import try_load_checkpoint, train_adam, train_bfgs
 from tensorpotential.instructions.base import (
     load_instructions_list,
     save_instructions_list,
 )
+from tensorpotential.loss import *
+from tensorpotential.metrics import *
+from tensorpotential.tensorpot import TensorPotential, get_output_dir
 
 MODEL_CONFIG_YAML = "model.yaml"
 
@@ -164,6 +162,42 @@ def build_parser():
     return parser
 
 
+def add_loaded_model_parameter(potential_file_name, args_yaml):
+    log.info(f"Loading model config from `{potential_file_name}`")
+    with open(potential_file_name, "rt") as f:
+        list_of_dict_instructions = yaml.safe_load(f)
+    for ins_dict in list_of_dict_instructions:
+        if "ScalarChemicalEmbedding" in ins_dict["__cls__"]:
+            element_map = ins_dict["element_map"]
+            assert isinstance(element_map, dict), "Element map is not a dict"
+            log.info(f"Setting {tc.INPUT_POTENTIAL_SECTION}::elements to {element_map}")
+            args_yaml[tc.INPUT_POTENTIAL_SECTION]["elements"] = element_map
+        if tc.INPUT_CUTOFF in ins_dict:
+            args_yaml[tc.INPUT_CUTOFF] = ins_dict[tc.INPUT_CUTOFF]
+            log.info(f"Setting data::{tc.INPUT_CUTOFF} to {args_yaml[tc.INPUT_CUTOFF]}")
+        if tc.INPUT_CUTOFF_DICT in ins_dict:
+            args_yaml[tc.INPUT_CUTOFF_DICT] = ins_dict[tc.INPUT_CUTOFF_DICT]
+            log.info(
+                f"Setting data::{tc.INPUT_CUTOFF_DICT} to {args_yaml[tc.INPUT_CUTOFF_DICT]}"
+            )
+        if "ConstantScaleShiftTarget" in ins_dict["__cls__"]:
+            scale = ins_dict["scale"]
+            args_yaml[tc.INPUT_POTENTIAL_SECTION]["scale"] = scale
+            log.info(f"Setting {tc.INPUT_POTENTIAL_SECTION}::scale to {scale}")
+            # shift = ins_dict["shift"]
+            # if shift != 0:
+            #     args_yaml[tc.INPUT_POTENTIAL_SECTION]["shift"] = shift
+        if "avg_n_neigh" in ins_dict:
+            args_yaml[tc.INPUT_POTENTIAL_SECTION]["avg_n_neigh"] = ins_dict[
+                "avg_n_neigh"
+            ]
+            log.info(
+                f"Setting {tc.INPUT_POTENTIAL_SECTION}::avg_n_neigh to {ins_dict['avg_n_neigh']}"
+            )
+
+    return args_yaml
+
+
 def main(argv=None, strategy=None, strategy_desc=""):
     if argv is None:
         argv = []
@@ -175,20 +209,9 @@ def main(argv=None, strategy=None, strategy_desc=""):
     if args_parse.template:
         generate_template_input()
 
-    log.info("=" * 40)
-    log.info(" " * 12 + "Start GRACEmaker")
-    log.info("=" * 40)
-    log.info(f"Tensorflow version: {tf.__version__}")
-    log.info("Loading {}... ".format(input_yaml_filename))
     with open(input_yaml_filename) as f:
         args_yaml = yaml.safe_load(f)
-    assert isinstance(args_yaml, dict)
-
     seed = args_parse.seed or args_yaml.get("seed", 1)
-    data_config = args_yaml["data"]
-    potential_config = args_yaml["potential"]
-    fit_config = args_yaml["fit"]
-
     output_dir = get_output_dir(seed=seed)
     if "log" in args_parse:
         log_file_name = os.path.join(output_dir, args_parse.log)
@@ -197,6 +220,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
         formatter = logging.Formatter(LOG_FMT)
         fileh.setFormatter(formatter)
         log.addHandler(fileh)
+
+    log.info("=" * 40)
+    log.info(" " * 12 + "Start GRACEmaker")
+    log.info("=" * 40)
+    log.info(f"Tensorflow version: {tf.__version__}")
+    log.info("Loaded {}... ".format(input_yaml_filename))
+    assert isinstance(args_yaml, dict)
+
+    potential_config = args_yaml["potential"]
+    fit_config = args_yaml["fit"]
 
     log.info(f"Set seed to {seed}")
     np.random.seed(seed)
@@ -223,26 +256,22 @@ def main(argv=None, strategy=None, strategy_desc=""):
     log.info(f"Replica ID in sync group: {replica_id_in_sync_group}")
 
     rcut = args_yaml["cutoff"]
-    # Adjust batch size
-    global_batch_size = fit_config.get("batch_size")
-    batch_size = global_batch_size // strategy.num_replicas_in_sync
-    global_batch_size_adj = batch_size * strategy.num_replicas_in_sync
+    batch_size = fit_config.get(
+        "batch_size", 8
+    )  # TODO: get batch_size from stats.json for distributed dataset
+    global_batch_size = batch_size * strategy.num_replicas_in_sync
     log.info(
-        f"Global TRAIN batch size - requested: {global_batch_size} / adjusted: {global_batch_size_adj}, "
+        f"Global TRAIN batch size - requested: {global_batch_size}, "
         f"num. replicas: {strategy.num_replicas_in_sync}, minibatch size: {batch_size}"
     )
-    global_batch_size = global_batch_size_adj
 
-    global_test_batch_size = fit_config.get("test_batch_size")
-    test_batch_size = None
-    if global_test_batch_size:
-        test_batch_size = global_test_batch_size // strategy.num_replicas_in_sync
-        global_test_batch_size_adj = test_batch_size * strategy.num_replicas_in_sync
+    test_batch_size = fit_config.get("test_batch_size", 1)
+    if test_batch_size:
+        global_test_batch_size = test_batch_size * strategy.num_replicas_in_sync
         log.info(
-            f"Global TEST batch size - requested: {global_test_batch_size} / adjusted: {global_test_batch_size_adj}, "
+            f"Global TEST batch size - requested: {global_test_batch_size}, "
             f"num. replicas: {strategy.num_replicas_in_sync}, minibatch size: {test_batch_size}"
         )
-        global_test_batch_size = global_test_batch_size_adj
 
     float_dtype_param = potential_config.get("float_dtype", "float64")
     float_dtype = {
@@ -275,9 +304,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
         log.info(f"Exiting...")
         sys.exit(0)
 
-    # loss function spec from fit_config
-    model_fns = construct_model_functions(fit_config)
-    log.info(f"Loss function: {model_fns.loss_fn}")
+    potential_file_name = args_parse.potential or potential_config.get("filename")
+    if potential_file_name:
+        # model will be loaded from file,
+        # need inject some parameters (cutoff, elements, scale, shift) into args_yaml
+        log.info("Model YAML file is provided, try to adjust input")
+        args_yaml = add_loaded_model_parameter(potential_file_name, args_yaml)
 
     # no need to perform expensive data processing if mode
     if not args_parse.save_model:
@@ -290,11 +322,13 @@ def main(argv=None, strategy=None, strategy_desc=""):
             train_grouping_df,
             test_grouping_df,
         ) = load_and_prepare_datasets(
-            args_yaml, batch_size, test_batch_size=test_batch_size, seed=seed
+            args_yaml,
+            batch_size,
+            test_batch_size=test_batch_size,
+            seed=seed,
+            strategy=strategy,
         )
         has_test_set = test_data is not None
-
-    potential_file_name = args_parse.potential or potential_config.get("filename")
 
     if args_parse.just_save:
         (
@@ -318,15 +352,19 @@ def main(argv=None, strategy=None, strategy_desc=""):
         )
     else:
         if args_parse.save_model:
-            potential_file_name = potential_file_name or os.path.join(output_dir,MODEL_CONFIG_YAML)
+            potential_file_name = potential_file_name or os.path.join(
+                output_dir, MODEL_CONFIG_YAML
+            )
 
-        if potential_file_name and os.path.isfile(potential_file_name):
+        if potential_file_name:
+            # load from potential_file_name
             log.info(f"Loading model config from `{potential_file_name}`")
             pot = load_instructions_list(potential_file_name)
         elif not args_parse.save_model:
             cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
             if cut_dict:
                 log.info(f"User-defined cutoff dict: {cut_dict}")
+            log.info(f"Constructing model from config")
             pot = construct_model(
                 potential_config,
                 element_map=element_map,
@@ -334,12 +372,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 cutoff_dict=cut_dict,
                 **data_stats,
             )
-            potential_file_name = os.path.join(output_dir,MODEL_CONFIG_YAML)
+            potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
             log.info(f"Saving model config to {potential_file_name}")
             save_instructions_list(potential_file_name, pot)
         else:  # save model, but initialized from scratch
             # TODO: should be possible
             raise ValueError("Cannot save just-initialized model")
+
+    # loss function spec from fit_config
+    model_fns = construct_model_functions(fit_config)
+    log.info(f"Loss function: {model_fns.loss_fn}")
 
     if args_parse.eager:
         log.warning("Eager execution")
@@ -412,13 +454,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
     log.info("Convert data to tensors")
     train_batches, test_batches = convert_to_tensors_for_model(
-        tp, train_data, test_data
+        tp, train_data, test_data, strategy=strategy
     )
     del train_data
     del test_data
     gc.collect()
 
-    compute_init_stats = args_yaml[tc.INPUT_FIT_SECTION].get("eval_init_stats", False)
     #  Run training
     try:
         if opt in ["L-BFGS-B", "BFGS"]:
@@ -432,7 +473,6 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 seed=seed,
                 train_grouping_df=train_grouping_df,
                 test_grouping_df=test_grouping_df,
-                compute_init_stats=compute_init_stats,
             )
         elif opt == "Adam":
             log.info("Start Adam optimization")
@@ -445,7 +485,6 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 seed=seed,
                 train_grouping_df=train_grouping_df,
                 test_grouping_df=test_grouping_df,
-                compute_init_stats=compute_init_stats,
             )
         else:
             raise ValueError(

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import urllib
 import tarfile
@@ -34,15 +36,15 @@ MODELS_METADATA = {
         "description": "A one-layer local GRACE model parameterized on MPTraj dataset, with fixed 6 Å cutoff.",
         "license": "Academic Software License",
     },
+    "MP_GRACE_1L_r6_07Nov2024": {
+        "url": "https://ruhr-uni-bochum.sciebo.de/s/d92rGQiRlieY6tJ/download",
+        "dirname": "MP_GRACE_1L_r6_07Nov2024",
+        "description": "A one-layer local GRACE model parameterized on MPTraj dataset, with fixed 6 Å cutoff.",
+        "license": "Academic Software License",
+    },
     #######################
     # 2-layer
     #######################3
-    "MP_GRACE_2L_r6_29Aug2024": {
-        "url": "https://ruhr-uni-bochum.sciebo.de/s/H3xk6orpnFdIZwp/download",
-        "dirname": "MP-GRACE-2L-r6_29Aug2024",
-        "description": "A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 6 Å cutoff.",
-        "license": "Academic Software License",
-    },
     "MP_GRACE_2L_r6_11Nov2024": {
         "url": "https://ruhr-uni-bochum.sciebo.de/s/42Ivgi3eaLCynwC/download",
         "dirname": "MP_GRACE_2L_r6_11Nov2024",
@@ -56,8 +58,41 @@ MODELS_METADATA = {
         """ Currently the best among GRACE models on MatBench Discovery leaderboard.""",
         "license": "Academic Software License",
     },
-
+    "MP_GRACE_2L_r5_07Nov2024": {
+        "url": "https://ruhr-uni-bochum.sciebo.de/s/nWyVO8xC38DJw4z/download",
+        "dirname": "MP_GRACE_2L_r5_07Nov2024",
+        "description": """A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 5 Å cutoff."""
+        """ Currently the best among GRACE models on MatBench Discovery leaderboard.""",
+        "license": "Academic Software License",
+    },
+    ########################################################
+    ### Pre-ftited on OMat24, fine tuned on sAlex+MPTraj  ##
+    ########################################################
+    "GRACE_2L_OAM_28Jan25": {
+        "url": "https://ruhr-uni-bochum.sciebo.de/s/4zVTfzxornWfS4T/download",
+        "dirname": "GRACE-2L-OAM_28Jan25",
+        "description": """A two-layer semi-local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, """
+        """with fixed 6 Å cutoff.""",
+        "license": "Academic Software License",
+    },
+    "GRACE-1L-OAM_2Feb25": {
+        "url": "https://ruhr-uni-bochum.sciebo.de/s/gFAv8pX2DJbk1kb/download",
+        "dirname": "GRACE-1L-OAM_2Feb25",
+        "description": """A single-layer local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, """
+        """with fixed 6 Å cutoff.""",
+        "license": "Academic Software License",
+    },
 }
+
+# automatically try to import experimental models
+try:
+    from tensorpotential.experimental.calculator.foundation_models import (
+        MODELS_METADATA as MODEL_METADATA_EXPERIMENTAL,
+    )
+
+    MODELS_METADATA.update(MODEL_METADATA_EXPERIMENTAL)
+except ImportError:
+    pass
 
 MODELS_NAME_LIST = list(MODELS_METADATA.keys())
 
@@ -94,9 +129,11 @@ def download_fm(model):
 
 def grace_fm(
     model: str,
-    pad_neighbors_fraction: float = 0.05,
-    pad_atoms_number: int = 1,
+    pad_neighbors_fraction: float | None = 0.25,
+    pad_atoms_number: int | None = 10,
+    max_number_reduction_recompilation: int | None = 2,
     min_dist=None,
+    **kwargs
 ):
     from tensorpotential.calculator.asecalculator import TPCalculator
 
@@ -108,7 +145,9 @@ def grace_fm(
         model=model_path,
         pad_neighbors_fraction=pad_neighbors_fraction,
         pad_atoms_number=pad_atoms_number,
+        max_number_reduction_recompilation=max_number_reduction_recompilation,
         min_dist=min_dist,
+        **kwargs
     )
     return calc
 

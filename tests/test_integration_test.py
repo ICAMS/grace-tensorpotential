@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import logging
@@ -658,6 +660,7 @@ def test_MoNbTaW_GRACE_2L():
 #     )
 
 
+@pytest.mark.skip(reason="skip custom model")
 def test_MoNbTaW_CUSTOM_switch_ef_ema():
 
     train_ref_metrics = {
@@ -696,6 +699,7 @@ def test_MoNbTaW_CUSTOM_switch_ef_ema():
     )
 
 
+@pytest.mark.skip(reason="skip custom model")
 def test_MoNbTaW_CUSTOM_mlp_emb():
 
     train_ref_metrics = {

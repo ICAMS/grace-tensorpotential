@@ -1736,6 +1736,7 @@ class FunctionReduceN(TPEquivariantInstruction):
         init_vars: Literal["random", "zeros"] = "random",
         init_target_value: Literal["zeros", "ones"] = "zeros",
         simplify: bool = False,
+        scale=1.0,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
         self.instructions = instructions
@@ -1750,14 +1751,6 @@ class FunctionReduceN(TPEquivariantInstruction):
         self.number_of_atom_types = number_of_atom_types
         self.chemical_embedding = chemical_embedding
         self.downscale_embedding_size = downscale_embedding_size
-
-        # if self.chemical_embedding is not None:
-        #     self.downscale_embedding = DenseLayer(
-        #         n_in=self.chemical_embedding.embedding_size,
-        #         n_out=self.downscale_embedding_size,
-        #         name="DownscalingEmbedding",
-        #     )
-
         self.n_instr = len(self.instructions)
         assert init_vars in [
             "random",
@@ -1769,7 +1762,7 @@ class FunctionReduceN(TPEquivariantInstruction):
             "ones",
         ], f'Unknown target initialization "{init_target_value}"'
         self.init_collection = init_target_value
-
+        self.scale = scale
         if self.is_central_atom_type_dependent:
             assert (
                 self.number_of_atom_types is not None
@@ -1938,7 +1931,7 @@ class FunctionReduceN(TPEquivariantInstruction):
                         self,
                         f"norm_{k}",
                         tf.constant(
-                            1.0
+                            self.scale
                             / (n_in * w_shape * self.downscale_embedding_size) ** 0.5,
                             dtype=float_dtype,
                         ),
@@ -1956,7 +1949,7 @@ class FunctionReduceN(TPEquivariantInstruction):
                     setattr(
                         self,
                         f"norm_{k}",
-                        tf.constant(1 / n_in**0.5, dtype=float_dtype),
+                        tf.constant(self.scale / n_in**0.5, dtype=float_dtype),
                     )
 
             elif self.init_vars == "zeros":
@@ -1973,7 +1966,7 @@ class FunctionReduceN(TPEquivariantInstruction):
                 setattr(
                     self,
                     f"norm_{k}",
-                    tf.constant(1.0, dtype=float_dtype),
+                    tf.constant(1.0 / n_in**0.5, dtype=float_dtype),
                 )
             else:
                 raise NotImplementedError(
@@ -2045,6 +2038,169 @@ class FunctionReduceN(TPEquivariantInstruction):
         collection = tf.transpose(collection, [1, 2, 0])
 
         return collection
+
+
+@capture_init_args
+class CollectInvatBasis(TPEquivariantInstruction):
+    input_tensor_spec = {
+        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+        constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        instructions: list[TPEquivariantInstruction],
+        name: str,
+        ls_max: list[int] | int,
+        n_out: int,
+        allowed_l_p: list[list],
+        out_norm: bool = False,
+        is_central_atom_type_dependent: bool = False,
+        number_of_atom_types: int = None,
+        init_vars: Literal["random", "zeros"] = "random",
+        scale=1.0,
+    ):
+        super().__init__(name=name, lmax=np.max(ls_max))
+        self.instructions = instructions
+
+        if isinstance(ls_max, int):
+            ls_max = [ls_max] * len(instructions)
+        assert np.max(ls_max) == 0
+
+        self.ls_max = ls_max
+        self.n_out = n_out
+        self.out_norm = out_norm
+        # enforce conversion to list of lists
+        self.allowed_l_p = [list(lp) for lp in allowed_l_p]
+        self.is_central_atom_type_dependent = is_central_atom_type_dependent
+        self.number_of_atom_types = number_of_atom_types
+        self.n_instr = len(self.instructions)
+
+        assert init_vars in [
+            "random",
+            "zeros",
+        ], f'Unknown variable initialization "{init_vars}"'
+        self.init_vars = init_vars
+
+        self.scale = scale
+        if self.is_central_atom_type_dependent:
+            assert self.number_of_atom_types is not None
+
+        instr_names = [instr.name for instr in self.instructions]
+        assert len(instr_names) == len(set(instr_names)), "duplicate instruction names"
+        assert len(instr_names) == len(
+            self.ls_max
+        ), f"provide lmax to collect for every instruction, error in {self.__class__.__name__}_{self.name}"
+
+        collector_data = []
+        for p in [-1, 1]:
+            for l in range(self.lmax + 1):
+                if [l, p] in self.allowed_l_p:
+                    for m in range(-l, l + 1):
+                        lbl = 0 if p > 0 else 1
+                        collector_data.append([l, m, f"", p, l])
+        self.coupling_meta_data = pd.DataFrame(
+            collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
+        )
+
+        self.collector = {}
+        for instr, instr_lmax in zip(self.instructions, self.ls_max):
+            instruction_collection = instr.collect_functions(
+                max_l=instr_lmax, l_p_list=self.allowed_l_p
+            )
+            instruction_collection["total_sum_ind"] = []
+            for index, row in instruction_collection["collect_meta_df"].iterrows():
+                for idx, rw in self.coupling_meta_data.iterrows():
+                    if (
+                        (row["l"] == rw["l"])
+                        & (row["m"] == rw["m"])
+                        & (row["parity"] == rw["parity"])
+                    ):
+                        instruction_collection["total_sum_ind"].append(idx)
+
+            instruction_collection["total_sum_ind"] = tf.constant(
+                np.array(instruction_collection["total_sum_ind"]).reshape(-1, 1),
+                dtype=tf.int32,
+            )
+            instruction_collection["n_out"] = instr.n_out
+            self.collector[instr.name] = instruction_collection
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype):
+        if not self.is_built:
+            size = 0
+            for k, v in self.collector.items():
+                w_shape = v["w_shape"]
+                n_in = v["n_out"]
+                size += w_shape * n_in
+            if self.is_central_atom_type_dependent:
+                c_shape = [self.number_of_atom_types, self.n_out, size]
+            else:
+                c_shape = [self.n_out, size]
+
+            name_v = "full"
+            if self.init_vars == "random":
+                limit = 1
+                setattr(
+                    self,
+                    f"reducing_{name_v}",
+                    tf.Variable(
+                        tf.random.normal(
+                            c_shape,
+                            stddev=self.scale * limit,
+                            dtype=float_dtype,
+                        ),
+                        name=f"reducing_{name_v}",
+                    ),
+                )
+            elif self.init_vars == "zeros":
+                coeff = np.zeros(c_shape)
+                setattr(
+                    self,
+                    f"reducing_{name_v}",
+                    tf.Variable(
+                        coeff,
+                        dtype=float_dtype,
+                        name=f"reducing_{name_v}",
+                    ),
+                )
+            else:
+                raise NotImplementedError(
+                    f"FunctionCollector.init = {self.init_vars} is unknown"
+                )
+
+            self.norm = tf.constant(1 / size, dtype=float_dtype)
+            self.float_dtype = float_dtype
+            self.is_built = True
+
+    def frwrd(self, input_data, training=False):
+        collection = []
+        for instr in self.instructions:
+            instruction_collection = self.collector[instr.name]
+            A = tf.gather(
+                input_data[instr.name],
+                instruction_collection["func_collect_ind"],
+                axis=2,
+            )
+            shp = tf.shape(A)
+            A = tf.reshape(A, [-1, shp[1] * shp[2]])
+            rms = tf.math.rsqrt(tf.reduce_mean(A**2, axis=-1, keepdims=True) + 1e-16)
+            collection += [A * rms]
+            # collection += [A]
+        basis = tf.concat(collection, axis=1)
+
+        # rms = tf.math.rsqrt(tf.reduce_mean(basis**2, axis=-1, keepdims=True) + 1e-16)
+        # basis *= rms
+
+        w = getattr(self, f"reducing_full")
+        if self.is_central_atom_type_dependent:
+            w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
+            eq = "akn,an->ak"
+        else:
+            eq = "kn,an->ak"
+        pr = tf.einsum(eq, w, basis, name=f"ein_basis") * self.norm
+
+        return pr[:, :, tf.newaxis]
 
 
 @capture_init_args
