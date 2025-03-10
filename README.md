@@ -15,6 +15,9 @@ Project GRACEmaker is a heavily modified and in large parts rewritten version of
 
 Please see [documentation](https://gracemaker.readthedocs.io/) for installation instructions and examples. 
 
+Also, join ACE support Zulip channel for additional resources:
+https://acesupport.zulipchat.com/join/xtwxu2grjbtg64m3vnhypi6p/
+
 # Reference
 Please see 
 * [Anton Bochkarev, Yury Lysogorskiy, and Ralf Drautz Graph Atomic Cluster Expansion for Semilocal Interactions beyond Equivariant Message Passing. Phys. Rev. X 14, 021036 (2024)](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.14.021036)
