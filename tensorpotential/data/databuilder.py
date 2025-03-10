@@ -176,12 +176,15 @@ def split_batches_into_buckets(batches_df, max_n_buckets):
     batches_df = batches_df.drop(columns=["d_neigh"])
     buckets_list = np.array_split(batches_df, split_inds)
 
-    # buckets_list = np.array_split(batches_df, max_n_buckets) # naive static splitting
+    buckets_list = np.array_split(batches_df, max_n_buckets)  # naive static splitting
     return buckets_list
 
 
 class AbstractDataBuilder(ABC):
-    def __init__(self, float_dtype: np.float32 | np.float64 = np.float64):
+    def __init__(self, float_dtype: str = "float64"):
+        dtypes = {"float64": np.float64, "float32": np.float32}
+        assert float_dtype in dtypes, f"float_dtype must be in {list(dtypes.keys())}"
+        float_dtype = dtypes[float_dtype]
         self.float_dtype = float_dtype
 
     @abstractmethod
@@ -520,7 +523,7 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             key = constants.BOND_VECTOR
             a = batch[key]
             batch[key] = np.pad(
-                a, ((0, pad_nneigh), (0, 0)), mode="constant", constant_values=1e6
+                a, ((0, pad_nneigh), (0, 0)), mode="constant", constant_values=52.0
             )
 
             if self.is_fit_stress:
@@ -673,24 +676,24 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
                 res[self.virial_weight] = default_stress_weight
 
                 # largest possible value
-                max_val = np.finfo(np.float64).max
+                max_val = np.finfo(self.float_dtype).max
                 res[constants.DATA_VOLUME] = np.array(max_val).reshape(-1, 1)
             res[constants.DATA_REFERENCE_VIRIAL] *= self.stress_conversion_factor
         return res
 
     def get_sample_dtypes(self):
         sample_dtypes = {
-            constants.DATA_REFERENCE_ENERGY: np.float64,
-            constants.DATA_REFERENCE_FORCES: np.float64,
+            constants.DATA_REFERENCE_ENERGY: self.float_dtype,
+            constants.DATA_REFERENCE_FORCES: self.float_dtype,
             constants.DATA_STRUCTURE_ID: np.int32,
-            self.energy_weight: np.float64,
-            self.force_weight: np.float64,
+            self.energy_weight: self.float_dtype,
+            self.force_weight: self.float_dtype,
         }
 
         if self.is_fit_stress:
-            sample_dtypes[constants.DATA_REFERENCE_VIRIAL] = np.float64
-            sample_dtypes[self.virial_weight] = np.float64
-            sample_dtypes[constants.DATA_VOLUME] = np.float64
+            sample_dtypes[constants.DATA_REFERENCE_VIRIAL] = self.float_dtype
+            sample_dtypes[self.virial_weight] = self.float_dtype
+            sample_dtypes[constants.DATA_VOLUME] = self.float_dtype
 
         return sample_dtypes
 
@@ -798,7 +801,7 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
                 )
 
                 # volumes
-                max_val = np.finfo(np.float64).max
+                max_val = np.finfo(self.float_dtype).max
                 k = constants.DATA_VOLUME
                 batch[k] = np.pad(
                     batch[k],
@@ -809,8 +812,8 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
 
     def postprocess_dataset(self, batches):
         if self.normalize_weights:
-            energy_weight_sum = np.sum(np.sum(b[self.energy_weight]) for b in batches)
-            forces_weight_sum = np.sum(np.sum(b[self.force_weight]) for b in batches)
+            energy_weight_sum = np.sum([np.sum(b[self.energy_weight]) for b in batches])
+            forces_weight_sum = np.sum([np.sum(b[self.force_weight]) for b in batches])
 
             for b in batches:
                 b[self.energy_weight] /= energy_weight_sum

@@ -497,7 +497,12 @@ def load_and_prepare_distributed_datasets(args_yaml, seed=1234, strategy=None):
 
 
 def load_and_prepare_datasets(
-    args_yaml, batch_size, test_batch_size=None, seed=1234, strategy=None
+    args_yaml,
+    batch_size,
+    test_batch_size=None,
+    seed=1234,
+    strategy=None,
+    float_dtype: str = "float64",
 ):
     # TODO: Need to use constants module.
     #  Too many strings are in here....
@@ -677,12 +682,14 @@ def load_and_prepare_datasets(
 
     if data_config.get("save_dataset", True):
         training_set_full_fname = os.path.join(get_output_dir(seed), TRAINING_SET_FNAME)
+        os.makedirs(os.path.dirname(training_set_full_fname), exist_ok=True)
         log.info(f"Saving current training set to {training_set_full_fname}")
         train_df.to_pickle(training_set_full_fname)
         if has_test_set:
             testing_set_full_fname = os.path.join(
                 get_output_dir(seed), TESTING_SET_FNAME
             )
+            os.makedirs(os.path.dirname(testing_set_full_fname), exist_ok=True)
             log.info(f"Saving current test set to {testing_set_full_fname}")
             test_df.to_pickle(testing_set_full_fname)
 
@@ -695,6 +702,7 @@ def load_and_prepare_datasets(
             cutoff=rcut,
             cutoff_dict=user_cutoff_dict,
             is_fit_stress=is_fit_stress,
+            float_dtype=float_dtype,
         ),
     ]
     if (
@@ -709,6 +717,7 @@ def load_and_prepare_datasets(
                 ),
                 is_fit_stress=is_fit_stress,
                 stress_units=stress_units,
+                float_dtype=float_dtype,
             ),
         )
     extras = data_config.get("extra_components", None)
@@ -721,7 +730,7 @@ def load_and_prepare_datasets(
         for db_name, db_config in extras.items():
             try:
                 db = getattr(mod, db_name)
-                data_builders.append(db(**db_config))
+                data_builders.append(db(**db_config, float_dtype=float_dtype))
             except AttributeError as e:
                 raise NameError(f"Could not find data builder {db_name}")
 
@@ -758,22 +767,6 @@ def load_and_prepare_datasets(
         logging.info(f"Average number of neighbors (computed): {avg_n_neigh}")
     else:
         logging.info(f"Average number of neighbors (provided): {avg_n_neigh}")
-
-    # compute avg number of neighbors per element
-    # nat_per_specie = defaultdict(int)
-    # total_nei_per_specie = defaultdict(int)
-    # for b in train_batches:
-    #     nps = b["nat_per_specie"]
-    #     tnps = b["total_nei_per_specie"]
-    #     for k, v in nps.items():
-    #         nat_per_specie[k] += v
-    #     for k, v in tnps.items():
-    #         total_nei_per_specie[k] += v
-    # avg_n_neigh_per_specie = {}
-    # for k, v in nat_per_specie.items():
-    #     val = v if v > 0 else 1.0
-    #     avg_n_neigh_per_specie[k] = total_nei_per_specie[k] / val
-    # log.info(f"Average per specie nnei: {avg_n_neigh_per_specie}")
 
     if has_test_set:
         log.info("Test set processing")

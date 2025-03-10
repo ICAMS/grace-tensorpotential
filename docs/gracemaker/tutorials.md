@@ -318,6 +318,32 @@ The usage of foundation models in LAMMPS is the same as for custom-parameterized
 
 ## Tutorial 4: Fine-Tuning Foundation GRACE Models
 
-Fine-tuning foundation GRACE models can only be performed using checkpoints, which will be published at a later date.
+Fine-tuning foundation GRACE models can only be performed using checkpoints and not saved models.
+
+```yaml
+...
+
+potential:
+  finetune_foundation_model: GRACE-1L-OAM
+#  reduce_elements: True # select from original models only elements presented in the dataset  
+fit:
+
+  # set small learning rate
+  opt_params: {learning_rate: 0.001,  ... }
+  
+  # evaluate initial metrics
+  eval_init_stats: True
+  
+  # reset_optimizer: True
+```
+
+If you want manually specify model and checkpoint, then 
+
+```yaml
+potential:
+  filename: /path/to/model.yaml
+  checkpoint_name: /path/to/checkpoints/checkpoint.best_test_loss
+#  reduce_elements: True 
+```
 
 ---

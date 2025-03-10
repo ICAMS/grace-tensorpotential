@@ -7,6 +7,7 @@ import re
 import dataclasses
 import copy
 import yaml
+from tensorpotential.instructions.base import TPInstruction, TPEquivariantInstruction
 
 
 @dataclasses.dataclass
@@ -275,7 +276,9 @@ def extract_const_shift_scale(fs_ins_dict):
         return None
 
 
-def export_to_yaml(fs_ins: List, filename: str):
+def export_to_yaml(
+    fs_ins_dict: list[TPInstruction] | dict[str, TPInstruction], filename: str
+):
     # to avoid circular import
     from tensorpotential.instructions.compute import (
         RadialBasis,
@@ -287,7 +290,9 @@ def export_to_yaml(fs_ins: List, filename: str):
     )
     from tensorpotential.instructions.output import FSOut2ScalarTarget
 
-    fs_ins_dict = {ins.name: ins for ins in fs_ins}
+    fs_ins_dict = fs_ins_dict
+    if isinstance(fs_ins_dict, list):
+        fs_ins_dict = {ins.name: ins for ins in fs_ins_dict}
 
     rad_basis = fs_ins_dict["RadialBasis"]
     assert isinstance(rad_basis, RadialBasis)
@@ -314,13 +319,15 @@ def export_to_yaml(fs_ins: List, filename: str):
     cutoff = rad_basis.basis_function.rcut
     nradmax = lin_rad_fun.n_rad_max
 
-    assert collector_ins.chemical_embedding is None
+    # assert collector_ins.chemical_embedding is None
     assert collector_ins.is_central_atom_type_dependent
     ndens = collector_ins.n_out
 
     collector_dict = collector_ins.collector
 
-    A_ins_dict = {ins.name: ins for ins in fs_ins if ins.name in collector_dict}
+    A_ins_dict: dict[str, TPEquivariantInstruction] = {
+        ins.name: ins for _, ins in fs_ins_dict.items() if ins.name in collector_dict
+    }
 
     A_ins = A_ins_dict["A"]
     init_coupling_symbols(A_ins)

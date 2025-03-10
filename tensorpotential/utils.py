@@ -4,8 +4,11 @@ import os
 import re
 
 import os.path as p
-import pandas as pd
+import sys
+import time
 
+import pandas as pd
+import logging
 from yaml import safe_load
 
 
@@ -139,7 +142,7 @@ def plot_many_fits(fits, k="rmse/f_comp", plot_test=True, plot_train=False):
         plot_fit(f, k=k, plot_test=plot_test, plot_train=plot_train)
 
 
-def update_fit_metrics(fit_dict, folders):
+def update_fit_metrics(fit_dict, folders, wait_time_seconds=3600):
     """
     Update INPLACE fit metrics for multiple folders.
 
@@ -163,11 +166,24 @@ def update_fit_metrics(fit_dict, folders):
     - If an error occurs during loading, it catches the exception and prints an error message.
     """
     for f in folders:
-        if f in fit_dict and fit_dict[f].get("finished", False):
-            continue
+        if f in fit_dict:
+            res = fit_dict[f]
+            if res.get("finished", False):
+                continue
+
+            test_fname = os.path.join(f, "test_metrics.yaml")
+            last_timestamp = os.path.getmtime(test_fname)
+            current_time = time.time()
+            pass_time = current_time - last_timestamp
+            if pass_time > wait_time_seconds:
+                print(
+                    f"{f} - no update for {int(pass_time//3600)}h:{int((pass_time % 3600)//60)}m:{int((pass_time % 3600) % 60)}s, mark as finished"
+                )
+                res["finished"] = True
+                continue
         try:
             fd = load_fit(f)
-            print(f, len(fd["test"]))
+            print(f"{f}: {len(fd['test'])} epochs")
             fit_dict[f] = fd
         except Exception as e:
             print("Error:", e)
@@ -251,6 +267,7 @@ def plot_dashboard(
     fit_dict={}
     folders = discovery_fit_folders('/path/to/root/')
     update_fit_metrics(fit_dict, folders)
+    fkey='mae/f_comp'
     common_prefix, df, gdf=process_fit_dict(fit_dict, fkey=fkey, align_folder=True)
 
     fig, ax_e, ax_f = plot_dashboard(fit_dict)
@@ -788,3 +805,116 @@ default_input_dict = {
         "train_shuffle": True,
     },
 }
+
+
+def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_path):
+    from tensorpotential import TensorPotential
+    from tensorpotential.instructions.compute import ScalarChemicalEmbedding
+
+    tp = TensorPotential(potential=instructions_dict)
+    logging.info(f"Loading checkpoint from {checkpoint_path}")
+    tp.load_checkpoint(
+        checkpoint_name=checkpoint_path,
+        expect_partial=True,
+        verbose=True,
+        raise_errors=True,
+    )
+
+    new_element_map = {e: i for i, e in enumerate(elements_to_select)}
+    # selection of ChemicalEmbedding
+    Z = None
+    for name, ins in instructions_dict.items():
+        if isinstance(ins, ScalarChemicalEmbedding):
+            if Z is None:
+                Z = ins
+                break
+    if Z is None:
+        raise ValueError("No ScalarChemicalEmbedding found in instructions dict")
+
+    index_to_select = Z.get_index_to_select(elements_to_select)
+
+    if len(index_to_select) != len(elements_to_select):
+        available_elements_set = set(Z.element_map_symbols.numpy())
+        missing_elements = set(elements_to_select) - available_elements_set
+        raise ValueError(
+            f"Not all elements are presented in the model. Missing elements: {missing_elements}.\n"
+            f"Available elements: {available_elements_set}"
+        )
+
+    logging.info(
+        f"Selecting {len(index_to_select)} elements, index_to_select={index_to_select.numpy()}"
+    )
+
+    objects_to_patch_dict = {}
+    logging.info(f"Analyzing instructions  to patch:")
+    for name, ins in instructions_dict.items():
+        patch_dict = ins.prepare_variables_for_selected_elements(index_to_select)
+        if patch_dict:
+            objects_to_patch_dict[name] = patch_dict
+            logging.info(f" - {name}: {len(patch_dict)} tensors to patch")
+
+    # patching
+    logging.info(f"Patching trainable variables:")
+    for ins_name, patch_dict in objects_to_patch_dict.items():
+        ins = instructions_dict[ins_name]
+        for var_name, var in patch_dict.items():
+            logging.info(f" - {ins.name}.{var_name}: shape={var.shape}")
+            setattr(ins, var_name, var)
+
+    logging.info(f"Patching model variables:")
+    for name, ins in instructions_dict.items():
+        if hasattr(ins, "patch_init_args"):
+            logging.info(f" - {ins.name}")
+            ins.patch_init_args(new_element_map)
+
+    return tp
+
+
+def convert_model_reduce_elements(
+    element_map,
+    potential_file_name,
+    checkpoint_name,
+    new_potential_file_name,
+    new_checkpoint_name,
+):
+
+    from tensorpotential.instructions.base import (
+        load_instructions,
+        save_instructions_dict,
+    )
+    from tensorpotential.tensorpot import TensorPotential
+
+    instructions_dict = load_instructions(potential_file_name)
+    if not isinstance(instructions_dict, dict):
+        logging.info(
+            f"Model in {potential_file_name} is NOT in new format (dict-like)."
+            + " Convert it using `grace_utils update_model`"
+        )
+        sys.exit(0)
+    tp = TensorPotential(potential=instructions_dict)
+    logging.info(f"Loading checkpoint from {checkpoint_name}")
+    tp.load_checkpoint(
+        checkpoint_name=checkpoint_name,
+        expect_partial=True,
+        verbose=True,
+        raise_errors=True,
+    )
+
+    elements_to_select = element_map
+
+    if isinstance(element_map, dict):
+        # ensure it is list with correct order
+        inv_dict = {i: e for e, i in element_map.items()}
+        elements_to_select = [inv_dict[i] for i in range(len(element_map))]
+
+    tp = select_elements_in_model(
+        elements_to_select=elements_to_select,
+        instructions_dict=instructions_dict,
+        checkpoint_path=checkpoint_name,
+    )
+
+    logging.info(f"Saving converted checkpoint to {new_checkpoint_name}")
+    tp.save_checkpoint(checkpoint_name=new_checkpoint_name, verbose=True)
+
+    logging.info(f"Saving converted model to {new_potential_file_name}")
+    save_instructions_dict(new_potential_file_name, instructions_dict)

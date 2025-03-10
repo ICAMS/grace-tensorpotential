@@ -95,4 +95,4 @@ def custom_model(
         out_instr = CreateOutputTarget(name=constants.PREDICT_ATOMIC_ENERGY)
         LinearOut2Target(origin=[I_l], target=out_instr)
 
-    return instructor.instruction_list
+    return instructor.get_instructions()

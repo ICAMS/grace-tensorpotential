@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from typing import Literal
+from typing import Literal, List, Tuple
 from ase.data import atomic_numbers
 from ase.units import _eps0, _e
 from itertools import product, combinations_with_replacement
@@ -36,6 +37,8 @@ from tensorpotential.functions.radial import (
     GaussianRadialBasisFunction,
     ChebSqrRadialBasisFunction,
     compute_cheb_radial_basis,
+    compute_sin_bessel_radial_basis,
+    cutoff_func_p_order_poly,
 )
 from tensorpotential.functions.spherical_harmonics import SphericalHarmonics
 
@@ -136,13 +139,13 @@ class ScaledBondVector(TPInstruction):
             self.bond_length = bond_length.name
         elif isinstance(bond_length, str):
             self.bond_length = bond_length
-        self._epsilon = 1e-32
         self.epsilon = None
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        self.epsilon = tf.constant(self._epsilon, dtype=float_dtype)
-        self.is_built = True
+        if not self.is_built:
+            self.epsilon = tf.constant(1e-10, dtype=float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
         r_ij = input_data[constants.BOND_VECTOR]
@@ -300,6 +303,7 @@ class RadialBasis(TPInstruction):
             self.basis_function = ChebSqrRadialBasisFunction(**kwargs)
         else:
             raise ValueError(f"Unknown type of the radial basis, {basis_type}")
+        self.nfunc = self.basis_function.nfunc
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
@@ -358,6 +362,10 @@ class BondSpecificRadialBasisFunction(TPInstruction):
         basis_type: str = "Cheb",
         nfunc: int = 8,
         name: str = "BondSpecificRadialBasisFunction",
+        normalize: bool = False,
+        init_gamma: float = 1.0,
+        trainable: bool = False,
+        **kwargs,
     ):
         super().__init__(name=name)
         if isinstance(bonds, TPInstruction):
@@ -374,6 +382,7 @@ class BondSpecificRadialBasisFunction(TPInstruction):
         self.cutoff_dict = process_cutoff_dict(cutoff_dict, element_map)
         self.default_cutoff = cutoff
         self.cutoff_function_param = cutoff_function_param
+        self.normalize = normalize
 
         # by construction, this includes ALL combinations, initialized with default cutoff
         bond_ind_cut = np.ones((self.nelem, self.nelem)) * self.default_cutoff
@@ -386,9 +395,14 @@ class BondSpecificRadialBasisFunction(TPInstruction):
                 bond_ind_cut[i1, i0] = cut
 
         self.bond_cutoff_map = bond_ind_cut.flatten().reshape(-1, 1).astype(np.float64)
+        self.nfunc = nfunc
 
         self.basis_type = basis_type
-        self.nfunc = nfunc
+        if self.basis_type == "Gaussian":
+            max_cut = np.max(self.bond_cutoff_map)
+            self.grid = np.linspace(0, max_cut, self.nfunc).reshape(1, -1)
+            self.scales = np.ones_like(self.grid) * init_gamma
+            self.trainable = trainable
 
     def build(self, float_dtype):
         if not self.is_built:
@@ -398,6 +412,13 @@ class BondSpecificRadialBasisFunction(TPInstruction):
                 trainable=False,
                 name="RBF_cutoff",
             )
+            if self.basis_type == "Gaussian":
+                self.grid = tf.Variable(
+                    self.grid, dtype=float_dtype, trainable=self.trainable
+                )
+                self.scales = tf.Variable(
+                    self.scales, dtype=float_dtype, trainable=self.trainable
+                )
             self.is_built = True
 
     def frwrd(self, input_data: dict, training: bool = False):
@@ -410,8 +431,19 @@ class BondSpecificRadialBasisFunction(TPInstruction):
             basis = compute_cheb_radial_basis(
                 d, self.nfunc, cutoff, self.cutoff_function_param
             )
+        elif self.basis_type == "RadSinBessel":
+            basis = compute_sin_bessel_radial_basis(
+                d,
+                self.nfunc,
+                cutoff,
+                self.cutoff_function_param,
+                normalized=self.normalize,
+            )
+        elif self.basis_type == "Gaussian":
+            basis = tf.math.exp(-(self.scales**2) * (d - self.grid) ** 2)
+            basis *= cutoff_func_p_order_poly(d / cutoff, self.cutoff_function_param)
         else:
-            raise NotImplementedError("Cheb basis only for now")
+            raise NotImplementedError("Cheb or RadSinBessel basis only for now")
         return tf.where(d >= cutoff, tf.zeros_like(basis, dtype=d.dtype), basis)
 
 
@@ -428,16 +460,13 @@ class LinearRadialFunction(TPInstruction):
         lmax: int,
         basis: RadialBasis | TPInstruction | str = None,
         input_shape: int = None,
-        chemical_embedding: ScalarChemicalEmbedding = None,
-        downscale_embedding_size: int = 16,
         init: str = "random",
         name="LinearRadialFunction",
         no_weight_decay: bool = True,
+        **kwargs,
     ):
         super().__init__(name=name)
         self.n_rad_max = n_rad_max
-        self.chemical_embedding = chemical_embedding
-        self.downscale_embedding_size = downscale_embedding_size
         self.lmax = lmax
         if isinstance(basis, RadialBasis):
             self.basis_name = basis.name
@@ -454,13 +483,6 @@ class LinearRadialFunction(TPInstruction):
         elif basis is not None:
             raise ValueError(f"Unknown {basis = }")
 
-        if self.chemical_embedding is not None:
-            self.downscale_embedding = DenseLayer(
-                n_in=self.chemical_embedding.embedding_size,
-                n_out=self.downscale_embedding_size,
-                name=f"DownscalingEmbedding_{self.name}",
-            )
-
         self.l_tile = tf.cast(
             tf.concat([tf.ones((2 * l + 1)) * l for l in range(self.lmax + 1)], axis=0),
             tf.int32,
@@ -474,27 +496,7 @@ class LinearRadialFunction(TPInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.chemical_embedding is not None:
-            if not self.downscale_embedding.is_built:
-                self.downscale_embedding.build(float_dtype)
-
-            c_shape = [
-                self.downscale_embedding_size,
-                self.n_rad_max,
-                self.lmax + 1,
-                self.input_shape,
-            ]
-            self.w_mu = tf.Variable(
-                tf.random.normal(c_shape, stddev=1.0, dtype=float_dtype),
-                name=f"mu_{self.name}_{self.no_decay}",
-            )
-            self.norm = tf.sqrt(
-                tf.convert_to_tensor(
-                    1.0 / (self.input_shape * self.downscale_embedding_size),
-                    dtype=float_dtype,
-                )
-            )
-        else:
+        if not self.is_built:
             self.norm = tf.convert_to_tensor(1, dtype=float_dtype)
             if self.init == "random":
                 limit = np.sqrt(2 / float(self.n_rad_max + self.input_shape))
@@ -522,19 +524,10 @@ class LinearRadialFunction(TPInstruction):
 
     def frwrd(self, input_data, training=False):
         basis = input_data[self.basis_name]
-        if self.chemical_embedding is not None:
-            z_d = self.downscale_embedding(input_data[self.chemical_embedding.name])
-            w = tf.einsum("zd,dnlk->znlk", z_d, self.w_mu)
-            w *= self.norm
-            mui = tf.gather(w, input_data[constants.BOND_MU_I], axis=0)
-            muj = tf.gather(w, input_data[constants.BOND_MU_J], axis=0)
-            mu_crad = mui * muj
-            y = tf.einsum("anlk,ak->anl", mu_crad, basis)
-            y_l = tf.gather(y, self.l_tile, axis=-1)
-        else:
-            y = tf.einsum("nlk,ak->anl", self.crad, basis)
-            y *= self.norm
-            y_l = tf.gather(y, self.l_tile, axis=-1)
+
+        y = tf.einsum("nlk,ak->anl", self.crad, basis)
+        y *= self.norm
+        y_l = tf.gather(y, self.l_tile, axis=-1)
 
         return y_l
 
@@ -621,14 +614,15 @@ class MLPRadialFunction(TPInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if not self.mlp.is_built:
-            self.mlp.build(float_dtype)
-        if self.norm:
-            self.gamma = tf.Variable(
-                tf.random.normal(shape=[1, self.n_out], dtype=float_dtype)
-            )
-            self.epsilon = tf.convert_to_tensor(1e-5, dtype=float_dtype)
-        self.is_built = True
+        if not self.is_built:
+            if not self.mlp.is_built:
+                self.mlp.build(float_dtype)
+            if self.norm:
+                self.gamma = tf.Variable(
+                    tf.random.normal(shape=[1, self.n_out], dtype=float_dtype)
+                )
+                self.epsilon = tf.convert_to_tensor(1e-5, dtype=float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
         basis = input_data[self.basis_name]
@@ -692,44 +686,71 @@ class ScalarChemicalEmbedding(TPInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        shape = [self.number_of_elements, self.embedding_size]
-        if self.init == "random":
-            self.w = tf.Variable(
-                tf.random.normal(
-                    shape=shape,
+        if not self.is_built:
+            shape = [self.number_of_elements, self.embedding_size]
+            if self.init == "random":
+                self.w = tf.Variable(
+                    tf.random.normal(
+                        shape=shape,
+                        dtype=float_dtype,
+                    ),
+                    trainable=self.is_trainable,
+                    name="ChemicalEmbedding",
+                )
+            elif self.init == "zero" or self.init == "zeros":
+                self.w = tf.Variable(
+                    tf.zeros(
+                        shape=shape,
+                        dtype=float_dtype,
+                    ),
+                    trainable=self.is_trainable,
+                    name="ChemicalEmbedding",
+                )
+            elif self.init == "delta":
+                w = np.zeros(shape)
+                for c in range(min(shape)):
+                    w[c, c] = 1.0
+                self.w = tf.Variable(
+                    w,
                     dtype=float_dtype,
-                ),
-                trainable=self.is_trainable,
-                name="ChemicalEmbedding",
-            )
-        elif self.init == "zero" or self.init == "zeros":
-            self.w = tf.Variable(
-                tf.zeros(
-                    shape=shape,
-                    dtype=float_dtype,
-                ),
-                trainable=self.is_trainable,
-                name="ChemicalEmbedding",
-            )
-        elif self.init == "delta":
-            w = np.zeros(shape)
-            for c in range(min(shape)):
-                w[c, c] = 1.0
-            self.w = tf.Variable(
-                w,
-                dtype=float_dtype,
-                trainable=self.is_trainable,
-                name="ChemicalEmbedding",
-            )
-        else:
-            raise NotImplementedError(
-                f"Unknown initialization method: ScalarChemicalEmbedding.init={self.init}"
-            )
+                    trainable=self.is_trainable,
+                    name="ChemicalEmbedding",
+                )
+            else:
+                raise NotImplementedError(
+                    f"Unknown initialization method: ScalarChemicalEmbedding.init={self.init}"
+                )
 
-        self.is_built = True
+            self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
         return self.w
+
+    def get_index_to_select(self, elements_to_select):
+        index_to_select = []
+        for ei, es in zip(
+            self.element_map_index.numpy(), self.element_map_symbols.numpy()
+        ):
+            if es.decode() in elements_to_select:
+                index_to_select.append(ei)
+
+        return tf.constant(index_to_select, dtype=tf.int32)
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        return {
+            "element_map_symbols": tf.Variable(
+                tf.gather(self.element_map_symbols, index_to_select, axis=0),
+                trainable=False,
+            ),
+            "element_map_index": tf.Variable(
+                tf.range(0, len(index_to_select), dtype=self.element_map_index.dtype),
+                trainable=False,
+            ),
+            "w": tf.Variable(tf.gather(self.w, index_to_select, axis=0)),
+        }
+
+    def patch_init_args(self, new_element_map):
+        self._init_args["element_map"] = new_element_map
 
 
 @capture_init_args
@@ -797,13 +818,14 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.lin_transform is not None and not self.lin_transform.is_built:
-            self.lin_transform.build(float_dtype)
-        self.inv_avg_n_neigh = tf.constant(
-            self.inv_avg_n_neigh,
-            dtype=float_dtype,
-        )
-        self.is_built = True
+        if not self.is_built:
+            if self.lin_transform is not None and not self.lin_transform.is_built:
+                self.lin_transform.build(float_dtype)
+            self.inv_avg_n_neigh = tf.constant(
+                self.inv_avg_n_neigh,
+                dtype=float_dtype,
+            )
+            self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
         r = input_data[self.radial.name]
@@ -848,10 +870,7 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
 
 @capture_init_args
 class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
-    """
-    Compute ACE single particle basis function with equivariant indicator
-
-    """
+    """ """
 
     input_tensor_spec = {
         constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
@@ -867,9 +886,8 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         lmax: int,
         Lmax: int,
         radial: TPInstruction = None,
-        radia_basis: RadialBasis | TPInstruction = None,
+        radial_basis: RadialBasis | TPInstruction = None,
         hidden_layers: list[int] = None,
-        n_out: int = None,
         keep_parity: list[list] = None,
         history_drop_list: list = None,
         l_max_ind: int = None,
@@ -877,31 +895,29 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         sum_neighbors: bool = True,
         avg_n_neigh: float | dict = 1.0,
         normalize: bool = False,
+        **kwargs,
     ):
         super().__init__(name=name, lmax=Lmax)
+        self.angular = angular
+        self.indicator = indicator
+
         self.radial = radial
         self.internal_radial = False
         if self.radial is None:
             assert (
-                n_out is not None
-            ), f"{self.__class__.__name__}_{self.name}: If :radial: is None, :n_out: should be specified"
-            assert (
-                radia_basis is not None
-            ), f"{self.__class__.__name__}_{self.name}: If :radial: is None, :radia_basis: should be provided"
+                radial_basis is not None
+            ), f"{self.__class__.__name__}_{self.name}: If :radial: is None, :radial_basis: should be provided"
             if hidden_layers is None:
                 self.hidden_layers = [64, 64]
             else:
                 self.hidden_layers = hidden_layers
-            self.radia_basis = radia_basis
+            self.radial_basis = radial_basis
             self.internal_radial = True
-        if n_out is None:
-            self.n_out = self.radial.n_rad_max
-            # self.do_reshape = False
-        else:
-            self.n_out = n_out
 
-        self.angular = angular
-        self.indicator = indicator
+        if self.internal_radial:
+            self.n_out = self.indicator.n_out
+        else:
+            self.n_out = self.radial.n_rad_max
 
         self.sum_neighbors = sum_neighbors
         if isinstance(avg_n_neigh, float):
@@ -939,12 +955,31 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             normalize=normalize,
         )
         self.coupling_origin = [self.angular.name, self.indicator.name]
-        self.left_ind = tf.constant(
-            np.concatenate(self.coupling_meta_data["left_inds"]), dtype=tf.int32
-        )
-        self.right_ind = tf.constant(
-            np.concatenate(self.coupling_meta_data["right_inds"]), dtype=tf.int32
-        )
+        if self.internal_radial:
+            left = np.concatenate(self.coupling_meta_data["left_inds"]).reshape(-1, 1)
+            right = np.concatenate(self.coupling_meta_data["right_inds"]).reshape(-1, 1)
+            il = []
+            for i, row in self.coupling_meta_data.iterrows():
+                il.append([row["l"]] * len(row["left_inds"]))
+            il = np.concatenate(il).reshape(-1, 1)
+            self.lr_inds = tf.constant(
+                np.concatenate([il, left, right], axis=1), dtype=tf.int32
+            )
+        else:
+            self.lr_inds = tf.constant(
+                np.concatenate(
+                    [
+                        np.concatenate(self.coupling_meta_data["left_inds"]).reshape(
+                            -1, 1
+                        ),
+                        np.concatenate(self.coupling_meta_data["right_inds"]).reshape(
+                            -1, 1
+                        ),
+                    ],
+                    axis=1,
+                ),
+                dtype=tf.int32,
+            )
 
         cgs = self.coupling_meta_data["cg_list"]
         sum_ind = []
@@ -952,41 +987,43 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             sum_ind.append([i] * len(cg))
         sum_ind = np.concatenate(sum_ind)
         self.m_sum_ind = tf.constant(sum_ind, dtype=tf.int32)
-
-        self.cg = np.concatenate(cgs).reshape(1, 1, -1)
-
         nfunc = np.max(sum_ind) + 1
         self.nfunc = tf.constant(nfunc, dtype=tf.int32)
 
+        self.cg = np.concatenate(cgs).reshape(-1, 1, 1)
         if self.internal_radial:
-            lll = self.coupling_meta_data.groupby(["l", "parity", "hist"]).indices
-            l_out_map = np.concatenate(
-                [[i] * len(v) for i, (k, v) in enumerate(lll.items())]
+            self.mlp = FullyConnectedMLP(
+                input_size=radial_basis.nfunc,
+                hidden_layers=self.hidden_layers,
+                output_size=self.indicator.n_out
+                * (self.angular.lmax + 1)
+                * (self.lmax + 1),
             )
-            self.n_l_out = np.max(l_out_map) + 1
-            self.l_out_map = tf.constant(l_out_map, dtype=tf.int32)
-            self.radia_basis_name = radia_basis.name
-            self.ind_size = self.indicator.n_out
-            with NoInstructionManager():
-                self.mlp = FullyConnectedMLP(
-                    input_size=radia_basis.basis_function.nfunc,
-                    hidden_layers=self.hidden_layers,
-                    output_size=self.n_out * self.n_l_out * self.ind_size,
-                )
+            self.l_tile = tf.cast(
+                tf.concat(
+                    [tf.ones((2 * l + 1)) * l for l in range(self.angular.lmax + 1)],
+                    axis=0,
+                ),
+                tf.int32,
+            )
+        else:
+            self.mlp = None
 
         init_coupling_symbols(self)
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if hasattr(self, "mlp") and not self.mlp.is_built:
-            self.mlp.build(float_dtype)
+        if not self.is_built:
+            if self.mlp is not None and not self.mlp.is_built:
+                self.mlp.build(float_dtype)
 
-        self.inv_avg_n_neigh = tf.constant(
-            self.inv_avg_n_neigh,
-            dtype=float_dtype,
-        )
-        self.cg = tf.constant(self.cg, dtype=float_dtype)
-        self.is_built = True
+            self.inv_avg_n_neigh = tf.constant(
+                self.inv_avg_n_neigh,
+                dtype=float_dtype,
+            )
+
+            self.cg = tf.constant(self.cg, dtype=float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
         ind_i = input_data[constants.BOND_IND_I]
@@ -995,37 +1032,20 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
 
         I = input_data[self.indicator.name]
         y = input_data[self.angular.name]
-
         bond_I = tf.gather(I, ind_j, axis=0)
-        rght = tf.gather(bond_I, self.right_ind, axis=2)
-
-        if not self.internal_radial:
-            r = input_data[self.radial.name]
-            bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
-            lft = tf.gather(bond_RY_nl, self.left_ind, axis=2)
-            prod = lft * rght
-
-        else:
-            y = tf.gather(y, self.left_ind, axis=-1)
-            prod = tf.einsum("jl,jnl->jnl", y, rght)
-
-        prod = prod * self.cg
-        prod = tf.transpose(prod, [2, 0, 1], name=f"trans_201{self.name}")
-        prod = tf.math.unsorted_segment_sum(
-            prod,
-            self.m_sum_ind,
-            num_segments=self.nfunc,
-            name=f"sum_cg_{self.name}",
-        )
-        prod = tf.transpose(prod, [1, 2, 0], name=f"trans_120{self.name}")
 
         if self.internal_radial:
-            basis = input_data[self.radia_basis.name]
-            r = self.mlp(basis)
-            r = tf.reshape(r, [-1, self.n_out, self.ind_size, self.n_l_out])
-            r = tf.gather(r, self.l_out_map, axis=-1)
-            # prod = r * prod
-            prod = tf.einsum("jnkl,jkl->jnl", r, prod)
+            rbasis = input_data[self.radial_basis.name]
+            r = self.mlp(rbasis)
+            r = tf.reshape(r, [-1, self.n_out, self.lmax + 1, self.angular.lmax + 1])
+            r = tf.gather(r, self.l_tile, axis=-1)
+
+            prod = tf.einsum("jl,jnol->jnol", y, r)
+            prod = tf.einsum("jnol,jnr->jnolr", prod, bond_I)
+        else:
+            r = input_data[self.radial.name]
+            bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
+            prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
 
         if self.sum_neighbors:
             prod = tf.math.unsorted_segment_sum(
@@ -1042,9 +1062,22 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                         axis=0,
                     )
                     prod *= nneigh_norm[:, :, tf.newaxis]
-                    pass
                 else:
                     prod *= self.inv_avg_n_neigh
+        if self.internal_radial:
+            tnsr = tf.transpose(prod, [2, 3, 4, 0, 1])  # tf.roll
+        else:
+            tnsr = tf.transpose(prod, [2, 3, 0, 1])  # tf.roll
+
+        prod_g = tf.gather_nd(params=tnsr, indices=self.lr_inds)
+        prod_g = prod_g * self.cg
+        prod_g = tf.math.unsorted_segment_sum(
+            prod_g,
+            self.m_sum_ind,
+            num_segments=self.nfunc,
+            name=f"sum_cg_{self.name}",
+        )
+        prod = tf.transpose(prod_g, [1, 2, 0], name=f"trans_120{self.name}")
 
         return prod
 
@@ -1062,9 +1095,6 @@ class ProductFunction(TPEquivariantInstruction):
         name: str,
         lmax: int,
         Lmax: int,
-        n_out: int = None,
-        chemical_embedding: ScalarChemicalEmbedding = None,
-        downscale_embedding_size: int = 16,
         is_left_right_equal: bool = None,
         lmax_left: int = None,
         lmax_right: int = None,
@@ -1075,6 +1105,7 @@ class ProductFunction(TPEquivariantInstruction):
         max_sum_l: int = None,
         keep_parity: list[list] = None,
         normalize: bool = False,
+        **kwargs,
     ):
         super().__init__(name=name, lmax=Lmax)
         self.left = left
@@ -1088,32 +1119,11 @@ class ProductFunction(TPEquivariantInstruction):
         else:
             self.is_left_right_equal = is_left_right_equal
 
-        if n_out is None:
-            assert (
-                self.left.n_out == self.right.n_out
-            ), "n_out of the product is None but shapes of left and right do not match"
-            self.n_out = self.left.n_out
-            self.do_reshape = False
-        else:
-            self.n_out = n_out
-            self.do_reshape = True
-            if self.is_left_right_equal:
-                self.left_collection = self.left.collect_functions(max_l=self.left.lmax)
-            else:
-                self.left_collection = self.left.collect_functions(max_l=self.left.lmax)
-                self.right_collection = self.right.collect_functions(
-                    max_l=self.right.lmax
-                )
-
-        self.chemical_embeding = chemical_embedding
-        self.downscale_embedding_size = downscale_embedding_size
-        if self.chemical_embeding is not None:
-            assert self.do_reshape, "chemical_embedding is provided but n_out is None"
-            self.downscale_embedding = DenseLayer(
-                n_in=self.chemical_embeding.embedding_size,
-                n_out=self.downscale_embedding_size,
-                name="DownscalingEmbedding",
-            )
+        assert (
+            self.left.n_out == self.right.n_out
+        ), "n_out of the product is None but shapes of left and right do not match"
+        self.n_out = self.left.n_out
+        self.do_reshape = False
 
         if keep_parity is None:
             plist = []
@@ -1182,95 +1192,19 @@ class ProductFunction(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.chemical_embeding is not None:
-            if not self.downscale_embedding.is_built:
-                self.downscale_embedding.build(float_dtype)
-
-        self.cg = tf.constant(self.cg, dtype=float_dtype)
-        if self.do_reshape:
-            n_in = self.left.n_out
-            w_shape = self.left_collection["w_shape"]
-            c_shape = [self.n_out, n_in, w_shape]
-            left_norm_factor = 1.0 / n_in
-            if self.chemical_embeding is not None:
-                c_shape = [
-                    self.downscale_embedding_size,
-                    self.n_out,
-                    n_in,
-                    w_shape,
-                ]
-                left_norm_factor = 1.0 / (n_in * self.downscale_embedding_size)
-            self.lft_out = tf.Variable(
-                tf.random.normal(c_shape, stddev=1.0, dtype=float_dtype),
-                name=f"reshape_{self.name}_left",
-            )
-            self.norm_left = tf.sqrt(
-                tf.convert_to_tensor(left_norm_factor, dtype=float_dtype)
-            )
-            if not self.is_left_right_equal:
-                w_shape = self.right_collection["w_shape"]
-                n_in = self.right.n_out
-                c_shape = [self.n_out, n_in, w_shape]
-                norm_factor = 1.0 / n_in
-                if self.chemical_embeding is not None:
-                    c_shape = [
-                        self.downscale_embedding_size,
-                        self.n_out,
-                        n_in,
-                        w_shape,
-                    ]
-                    norm_factor = 1.0 / (n_in * self.downscale_embedding_size)
-                self.rght_out = tf.Variable(
-                    tf.random.normal(c_shape, stddev=1.0, dtype=float_dtype),
-                    name=f"reshape_{self.name}_right",
-                )
-                self.norm_right = tf.sqrt(
-                    tf.convert_to_tensor(norm_factor, dtype=float_dtype)
-                )
-
-        self.is_built = True
+        if not self.is_built:
+            self.cg = tf.constant(self.cg, dtype=float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
-        if self.chemical_embeding is not None:
-            z_d = self.downscale_embedding(input_data[self.chemical_embeding.name])
-
         left = input_data[self.left.name]
-        if self.do_reshape:
-            if self.chemical_embeding is not None:
-                w = tf.einsum("zd,dknl->zknl", z_d, self.lft_out)
-                w = tf.gather(w, self.left_collection["w_l_tile"], axis=-1)
-                w_a = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
-                left = tf.einsum(
-                    "aknl,anl->akl", w_a, left, name=f"reshape_left_{self.name}"
-                )
-                left = left * self.norm_left
-            else:
-                w = tf.gather(self.lft_out, self.left_collection["w_l_tile"], axis=-1)
-                left = tf.einsum("knl,anl->akl", w, left) * self.norm_left
-
-        # if self.is_left_right_equal:
-        #     right = left
-        # else:
         right = input_data[self.right.name]
-        if self.do_reshape:
-            if self.chemical_embeding is not None:
-                w = tf.einsum("zd,dknl->zknl", z_d, self.rght_out)
-                w = tf.gather(w, self.right_collection["w_l_tile"], axis=-1)
-                w_a = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
-                right = tf.einsum(
-                    "aknl,anl->akl", w_a, right, name=f"reshape_left_{self.name}"
-                )
-                right = right * self.norm_right
-            else:
-                w = tf.gather(self.rght_out, self.right_collection["w_l_tile"], axis=-1)
-                right = tf.einsum("knl,anl->akl", w, right) * self.norm_right
+
         lft = tf.gather(left, self.left_ind, axis=2)
         rght = tf.gather(right, self.right_ind, axis=2)
 
         prod = lft * rght
-        # prod = tf.einsum("jnl,jnl->jnl", lft, rght, name=f'left_right_{self.name}')
 
-        # prod = tf.einsum("jnk,k->jnk", prod, self.cg, name=f"ein_cg_{self.name}")
         prod = prod * self.cg
         prod = tf.transpose(prod, [2, 0, 1])
         prod = tf.math.unsorted_segment_sum(
@@ -1395,8 +1329,9 @@ class CropProductFunction(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        self.cg = tf.constant(self.cg, dtype=float_dtype)
-        self.is_built = True
+        if not self.is_built:
+            self.cg = tf.constant(self.cg, dtype=float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
         left = input_data[self.left.name]
@@ -1435,14 +1370,12 @@ class FunctionReduce(TPEquivariantInstruction):
         ls_max: list[int] | int,
         n_out: int,
         allowed_l_p: list[list],
-        n_in: int = None,  # For compatibility
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
-        chemical_embedding: ScalarChemicalEmbedding = None,
-        downscale_embedding_size: int = 16,
         init_vars: Literal["random", "zeros"] = "random",
         init_target_value: Literal["zeros", "ones"] = "zeros",
         simplify: bool = False,
+        **kwargs,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
         self.instructions = instructions
@@ -1453,8 +1386,6 @@ class FunctionReduce(TPEquivariantInstruction):
         self.allowed_l_p = [list(lp) for lp in allowed_l_p]
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
-        self.chemical_embedding = chemical_embedding
-        self.downscale_embedding_size = downscale_embedding_size
 
         self.n_instr = len(self.instructions)
         assert init_vars in [
@@ -1467,12 +1398,6 @@ class FunctionReduce(TPEquivariantInstruction):
             "ones",
         ], f'Unknown target initialization "{init_target_value}"'
         self.init_collection = init_target_value
-
-        if self.is_central_atom_type_dependent:
-            assert (
-                self.number_of_atom_types is not None
-                or self.chemical_embedding is not None
-            )
 
         instr_names = [instr.name for instr in self.instructions]
         assert len(instr_names) == len(set(instr_names)), "duplicate instruction names"
@@ -1499,7 +1424,6 @@ class FunctionReduce(TPEquivariantInstruction):
             self.drop_unused()
 
         self.collector = {}
-        self.downscale_embeddings = {}
         for instr, instr_lmax in zip(self.instructions, self.ls_max):
             instruction_collection = instr.collect_functions(
                 max_l=instr_lmax, l_p_list=self.allowed_l_p
@@ -1519,12 +1443,6 @@ class FunctionReduce(TPEquivariantInstruction):
             )
             instruction_collection["n_out"] = instr.n_out
             self.collector[instr.name] = instruction_collection
-            if self.chemical_embedding is not None:
-                self.downscale_embeddings[instr.name] = DenseLayer(
-                    n_in=self.chemical_embedding.embedding_size,
-                    n_out=self.downscale_embedding_size,
-                    name=f"DownscalingEmbedding_{instr.name}",
-                )
 
     def simplify_collected_tensors(self):
         collector_dict = {}
@@ -1574,48 +1492,16 @@ class FunctionReduce(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.chemical_embedding is not None:
-            for v in self.downscale_embeddings.values():
-                if not v.is_built:
-                    v.build(float_dtype)
-
-        for k, v in self.collector.items():
-            w_shape = v["w_shape"]
-            n_in = v["n_out"]
-            if self.is_central_atom_type_dependent:
-                if self.chemical_embedding is not None:
-                    c_shape = [
-                        self.downscale_embedding_size,
-                        self.n_out,
-                        n_in,
-                        w_shape,
-                    ]
-                else:
-                    # TODO: Possibly remove this possibility?
+        if not self.is_built:
+            for k, v in self.collector.items():
+                w_shape = v["w_shape"]
+                n_in = v["n_out"]
+                if self.is_central_atom_type_dependent:
                     c_shape = [self.number_of_atom_types, self.n_out, n_in, w_shape]
-            else:
-                c_shape = [self.n_out, n_in, w_shape]
-
-            if self.init_vars == "random":
-                if self.chemical_embedding is not None:
-                    setattr(
-                        self,
-                        f"reducing_{k}",
-                        tf.Variable(
-                            tf.random.normal(c_shape, stddev=1.0, dtype=float_dtype),
-                            name=f"reducing_{k}",
-                        ),
-                    )
-                    setattr(
-                        self,
-                        f"norm_{k}",
-                        tf.constant(
-                            1.0
-                            / (n_in * w_shape * self.downscale_embedding_size) ** 0.5,
-                            dtype=float_dtype,
-                        ),
-                    )
                 else:
+                    c_shape = [self.n_out, n_in, w_shape]
+
+                if self.init_vars == "random":
                     limit = (2 / (n_in * w_shape)) ** 0.5
                     setattr(
                         self,
@@ -1630,31 +1516,30 @@ class FunctionReduce(TPEquivariantInstruction):
                         f"norm_{k}",
                         tf.constant(1.0, dtype=float_dtype),
                     )
+                elif self.init_vars == "zeros":
+                    coeff = np.zeros(c_shape)
+                    setattr(
+                        self,
+                        f"reducing_{k}",
+                        tf.Variable(
+                            coeff,
+                            dtype=float_dtype,
+                            name=f"reducing_{k}",
+                        ),
+                    )
+                    setattr(
+                        self,
+                        f"norm_{k}",
+                        tf.constant(1.0, dtype=float_dtype),
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"FunctionCollector.init = {self.init_vars} is unknown"
+                    )
 
-            elif self.init_vars == "zeros":
-                coeff = np.zeros(c_shape)
-                setattr(
-                    self,
-                    f"reducing_{k}",
-                    tf.Variable(
-                        coeff,
-                        dtype=float_dtype,
-                        name=f"reducing_{k}",
-                    ),
-                )
-                setattr(
-                    self,
-                    f"norm_{k}",
-                    tf.constant(1.0, dtype=float_dtype),
-                )
-            else:
-                raise NotImplementedError(
-                    f"FunctionCollector.init = {self.init_vars} is unknown"
-                )
-
-        self.float_dtype = float_dtype
-        self.n_instr = tf.constant(1 / self.n_instr, dtype=float_dtype)
-        self.is_built = True
+            self.float_dtype = float_dtype
+            self.n_instr = tf.constant(1 / self.n_instr, dtype=float_dtype)
+            self.is_built = True
 
     def compute_l2_regularization_loss(self):
         total_l2_regularization = 0.0
@@ -1683,15 +1568,7 @@ class FunctionReduce(TPEquivariantInstruction):
                 axis=2,
             )
             if self.is_central_atom_type_dependent:
-                if self.chemical_embedding is not None:
-                    downscale_embedding = self.downscale_embeddings[instr.name]
-                    z_d = downscale_embedding(input_data[self.chemical_embedding.name])
-                    w = tf.einsum(
-                        "zd,dknl->zknl", z_d, getattr(self, f"reducing_{instr.name}")
-                    )
-                else:
-                    w = getattr(self, f"reducing_{instr.name}")
-                # w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
+                w = getattr(self, f"reducing_{instr.name}")
                 eq = "aknw,anw->wak"
             else:
                 w = getattr(self, f"reducing_{instr.name}")
@@ -1712,6 +1589,20 @@ class FunctionReduce(TPEquivariantInstruction):
 
         return collection  # * self.n_instr
 
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        if self.is_central_atom_type_dependent:
+            reducing_tensor_names = [s for s in dir(self) if s.startswith("reducing_")]
+            new_tensors = {}
+            for tn in reducing_tensor_names:
+                var = getattr(self, tn)
+                # print(tn, var.shape)
+                new_tensors[tn] = tf.Variable(tf.gather(var, index_to_select, axis=0))
+
+            return new_tensors
+
+    def patch_init_args(self, new_element_map):
+        self._init_args["number_of_atom_types"] = len(new_element_map)
+
 
 @capture_init_args
 class FunctionReduceN(TPEquivariantInstruction):
@@ -1727,16 +1618,14 @@ class FunctionReduceN(TPEquivariantInstruction):
         ls_max: list[int] | int,
         n_out: int,
         allowed_l_p: list[list],
-        n_in: int = None,  # For compatibility
         out_norm: bool = False,
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
-        chemical_embedding: ScalarChemicalEmbedding = None,
-        downscale_embedding_size: int = 16,
         init_vars: Literal["random", "zeros"] = "random",
         init_target_value: Literal["zeros", "ones"] = "zeros",
         simplify: bool = False,
         scale=1.0,
+        **kwargs,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
         self.instructions = instructions
@@ -1749,8 +1638,6 @@ class FunctionReduceN(TPEquivariantInstruction):
         self.allowed_l_p = [list(lp) for lp in allowed_l_p]
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
-        self.chemical_embedding = chemical_embedding
-        self.downscale_embedding_size = downscale_embedding_size
         self.n_instr = len(self.instructions)
         assert init_vars in [
             "random",
@@ -1764,10 +1651,7 @@ class FunctionReduceN(TPEquivariantInstruction):
         self.init_collection = init_target_value
         self.scale = scale
         if self.is_central_atom_type_dependent:
-            assert (
-                self.number_of_atom_types is not None
-                or self.chemical_embedding is not None
-            )
+            assert self.number_of_atom_types is not None
 
         instr_names = [instr.name for instr in self.instructions]
         assert len(instr_names) == len(set(instr_names)), "duplicate instruction names"
@@ -1796,7 +1680,6 @@ class FunctionReduceN(TPEquivariantInstruction):
 
         # TODO: Special case when only one instruction to collect from
         self.collector = {}
-        self.downscale_embeddings = {}
         for instr, instr_lmax in zip(self.instructions, self.ls_max):
             instruction_collection = instr.collect_functions(
                 max_l=instr_lmax, l_p_list=self.allowed_l_p
@@ -1829,15 +1712,8 @@ class FunctionReduceN(TPEquivariantInstruction):
             )
             instruction_collection["n_out"] = instr.n_out
             self.collector[instr.name] = instruction_collection
-            if self.chemical_embedding is not None:
-                self.downscale_embeddings[instr.name] = DenseLayer(
-                    n_in=self.chemical_embedding.embedding_size,
-                    n_out=self.downscale_embedding_size,
-                    name=f"DownscalingEmbedding_{instr.name}",
-                )
         norms[norms == 0] = 1
         self.norm_map = 1 / norms**0.5
-        # self.norm_map = norms
 
     def simplify_collected_tensors(self):
         collector_dict = {}
@@ -1887,56 +1763,16 @@ class FunctionReduceN(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.chemical_embedding is not None:
-            for v in self.downscale_embeddings.values():
-                if not v.is_built:
-                    v.build(float_dtype)
-
-        for k, v in self.collector.items():
-            w_shape = v["w_shape"]
-            n_in = v["n_out"]
-            # setattr(
-            #     self,
-            #     f"norm_w_{k}",
-            #     tf.constant(
-            #         v["w_norm"],
-            #         dtype=float_dtype,
-            #         name=f"norm_w_{k}",
-            #     ),
-            # )
-            if self.is_central_atom_type_dependent:
-                if self.chemical_embedding is not None:
-                    c_shape = [
-                        self.downscale_embedding_size,
-                        self.n_out,
-                        n_in,
-                        w_shape,
-                    ]
-                else:
+        if not self.is_built:
+            for k, v in self.collector.items():
+                w_shape = v["w_shape"]
+                n_in = v["n_out"]
+                if self.is_central_atom_type_dependent:
                     c_shape = [self.number_of_atom_types, self.n_out, n_in, w_shape]
-            else:
-                c_shape = [self.n_out, n_in, w_shape]
-
-            if self.init_vars == "random":
-                if self.chemical_embedding is not None:
-                    setattr(
-                        self,
-                        f"reducing_{k}",
-                        tf.Variable(
-                            tf.random.normal(c_shape, stddev=1.0, dtype=float_dtype),
-                            name=f"reducing_{k}",
-                        ),
-                    )
-                    setattr(
-                        self,
-                        f"norm_{k}",
-                        tf.constant(
-                            self.scale
-                            / (n_in * w_shape * self.downscale_embedding_size) ** 0.5,
-                            dtype=float_dtype,
-                        ),
-                    )
                 else:
+                    c_shape = [self.n_out, n_in, w_shape]
+
+                if self.init_vars == "random":
                     limit = 1
                     setattr(
                         self,
@@ -1952,35 +1788,35 @@ class FunctionReduceN(TPEquivariantInstruction):
                         tf.constant(self.scale / n_in**0.5, dtype=float_dtype),
                     )
 
-            elif self.init_vars == "zeros":
-                coeff = np.zeros(c_shape)
-                setattr(
-                    self,
-                    f"reducing_{k}",
-                    tf.Variable(
-                        coeff,
-                        dtype=float_dtype,
-                        name=f"reducing_{k}",
-                    ),
-                )
-                setattr(
-                    self,
-                    f"norm_{k}",
-                    tf.constant(1.0 / n_in**0.5, dtype=float_dtype),
+                elif self.init_vars == "zeros":
+                    coeff = np.zeros(c_shape)
+                    setattr(
+                        self,
+                        f"reducing_{k}",
+                        tf.Variable(
+                            coeff,
+                            dtype=float_dtype,
+                            name=f"reducing_{k}",
+                        ),
+                    )
+                    setattr(
+                        self,
+                        f"norm_{k}",
+                        tf.constant(1.0 / n_in**0.5, dtype=float_dtype),
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"FunctionCollector.init = {self.init_vars} is unknown"
+                    )
+
+            self.float_dtype = float_dtype
+            if self.out_norm:
+                self.norm_map = tf.reshape(
+                    tf.constant(self.norm_map, dtype=float_dtype), [-1, 1, 1]
                 )
             else:
-                raise NotImplementedError(
-                    f"FunctionCollector.init = {self.init_vars} is unknown"
-                )
-
-        self.float_dtype = float_dtype
-        if self.out_norm:
-            self.norm_map = tf.reshape(
-                tf.constant(self.norm_map, dtype=float_dtype), [-1, 1, 1]
-            )
-        else:
-            self.norm_map = tf.constant(1, dtype=float_dtype)
-        self.is_built = True
+                self.norm_map = tf.constant(1, dtype=float_dtype)
+            self.is_built = True
 
     def compute_l2_regularization_loss(self):
         total_l2_regularization = 0.0
@@ -2009,20 +1845,11 @@ class FunctionReduceN(TPEquivariantInstruction):
                 axis=2,
             )
             if self.is_central_atom_type_dependent:
-                if self.chemical_embedding is not None:
-                    downscale_embedding = self.downscale_embeddings[instr.name]
-                    z_d = downscale_embedding(input_data[self.chemical_embedding.name])
-                    w = tf.einsum(
-                        "zd,dknl->zknl", z_d, getattr(self, f"reducing_{instr.name}")
-                    )
-                else:
-                    w = getattr(self, f"reducing_{instr.name}")
-                # w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
+                w = getattr(self, f"reducing_{instr.name}")
                 eq = "aknw,anw->wak"
             else:
                 w = getattr(self, f"reducing_{instr.name}")
                 eq = "knw,anw->wak"
-            # w = tf.einsum("...w,w->...w", w, getattr(self, f"norm_w_{instr.name}"))
             w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             # For performance
             if self.is_central_atom_type_dependent:
@@ -2039,9 +1866,23 @@ class FunctionReduceN(TPEquivariantInstruction):
 
         return collection
 
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        if self.is_central_atom_type_dependent:
+            reducing_tensor_names = [s for s in dir(self) if s.startswith("reducing_")]
+            new_tensors = {}
+            for tn in reducing_tensor_names:
+                var = getattr(self, tn)
+                # print(tn, var.shape)
+                new_tensors[tn] = tf.Variable(tf.gather(var, index_to_select, axis=0))
+
+            return new_tensors
+
+    def patch_init_args(self, new_element_map):
+        self._init_args["number_of_atom_types"] = len(new_element_map)
+
 
 @capture_init_args
-class CollectInvatBasis(TPEquivariantInstruction):
+class CollectInvarBasis(TPEquivariantInstruction):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -2201,6 +2042,10 @@ class CollectInvatBasis(TPEquivariantInstruction):
         pr = tf.einsum(eq, w, basis, name=f"ein_basis") * self.norm
 
         return pr[:, :, tf.newaxis]
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        if self.is_central_atom_type_dependent:
+            raise NotImplementedError()
 
 
 @capture_init_args
@@ -2391,6 +2236,10 @@ class FCRight2Left(TPEquivariantInstruction):
 
         return tf.transpose(left, [1, 2, 0])
 
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        if np.any(self.is_central_atom_type_dependent):
+            raise NotImplementedError()
+
 
 @capture_init_args
 class FunctionReduceParticular(TPEquivariantInstruction):
@@ -2408,6 +2257,7 @@ class FunctionReduceParticular(TPEquivariantInstruction):
         n_out: int,
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
+        **kwargs,
     ):
         super(FunctionReduceParticular, self).__init__(name=name, lmax=selected_l)
         self.instructions = instructions
@@ -2458,31 +2308,32 @@ class FunctionReduceParticular(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        for k, v in self.selector.items():
-            w_shape = v["w_shape"]
-            n_in = v["n_out"]
-            if self.is_central_atom_type_dependent:
-                c_shape = [self.number_of_atom_types, self.n_out, n_in, w_shape]
-            else:
-                c_shape = [self.n_out, n_in, w_shape]
+        if not self.is_built:
+            for k, v in self.selector.items():
+                w_shape = v["w_shape"]
+                n_in = v["n_out"]
+                if self.is_central_atom_type_dependent:
+                    c_shape = [self.number_of_atom_types, self.n_out, n_in, w_shape]
+                else:
+                    c_shape = [self.n_out, n_in, w_shape]
 
-            limit = 1.0
-            self.norm = tf.constant(1.0, dtype=float_dtype)
-            setattr(
-                self,
-                f"reducing_{k}",
-                tf.Variable(
-                    tf.random.normal(c_shape, stddev=limit, dtype=float_dtype),
-                    name=f"reducing_{k}",
-                ),
-            )
-            setattr(
-                self,
-                f"norm_{k}",
-                tf.constant(1 / n_in**0.5, dtype=float_dtype),
-            )
-        self.float_dtype = float_dtype
-        self.is_built = True
+                limit = 1.0
+                self.norm = tf.constant(1.0, dtype=float_dtype)
+                setattr(
+                    self,
+                    f"reducing_{k}",
+                    tf.Variable(
+                        tf.random.normal(c_shape, stddev=limit, dtype=float_dtype),
+                        name=f"reducing_{k}",
+                    ),
+                )
+                setattr(
+                    self,
+                    f"norm_{k}",
+                    tf.constant(1 / n_in**0.5, dtype=float_dtype),
+                )
+            self.float_dtype = float_dtype
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
         collection = tf.zeros(
@@ -2522,6 +2373,20 @@ class FunctionReduceParticular(TPEquivariantInstruction):
         collection = tf.transpose(collection, [1, 2, 0])
 
         return collection
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        if self.is_central_atom_type_dependent:
+
+            reducing_tensor_names = [s for s in dir(self) if s.startswith("reducing_")]
+            new_tensors = {}
+            for tn in reducing_tensor_names:
+                var = getattr(self, tn)
+                new_tensors[tn] = tf.Variable(tf.gather(var, index_to_select, axis=0))
+
+            return new_tensors
+
+    def patch_init_args(self, new_element_map):
+        self._init_args["number_of_atom_types"] = len(new_element_map)
 
 
 @capture_init_args
@@ -2723,6 +2588,9 @@ class ZBLPotential(TPInstruction):
         energy = tf.reshape(self.K / 2 * energy, [-1, 1, 1])
 
         return energy
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        raise NotImplementedError()
 
 
 ##### BACKWARD COMPATIBILITY ######

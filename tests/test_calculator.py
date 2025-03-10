@@ -11,7 +11,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import numpy as np
 
 from tensorpotential.calculator import TPCalculator
-from tensorpotential.instructions import load_instructions_list
+from tensorpotential.instructions import load_instructions
 from tensorpotential import TPModel
 from tensorflow import float64
 
@@ -20,7 +20,7 @@ from ase import Atoms
 
 
 def test_calculator_model():
-    ins = load_instructions_list("model_grace.yaml")
+    ins = load_instructions("model_grace.yaml")
     model = TPModel(ins)
     model.build(float64)
     calc = TPCalculator(model=model)
@@ -28,7 +28,7 @@ def test_calculator_model():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc)
+    s.calc = calc
     e0 = s.get_potential_energy()
     print(e0)
     f0 = s.get_forces()
@@ -45,7 +45,7 @@ def test_calculator_model():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc1)
+    s.calc = calc1
     e1 = s.get_potential_energy()
     print(e1)
     f1 = s.get_forces()
@@ -73,7 +73,7 @@ def test_calculator_with_fake_neighbors():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc)
+    s.calc = calc
     e = s.get_potential_energy()
     print(e)
     f = s.get_forces()
@@ -85,7 +85,7 @@ def test_calculator_with_fake_neighbors():
     st_num = calc.calculate_numerical_stress(s)
     assert np.allclose(st, st_num, rtol=1e-5)
 
-    s.set_calculator(calc1)
+    s.calc = calc1
     e1 = s.get_potential_energy()
     f1 = s.get_forces()
     st1 = s.get_stress()
@@ -207,7 +207,7 @@ def test_calculator_with_fake_atoms():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc)
+    s.calc = calc
     e = s.get_potential_energy()
     print(e)
     f = s.get_forces()
@@ -220,7 +220,7 @@ def test_calculator_with_fake_atoms():
     st_num = calc.calculate_numerical_stress(s)
     assert np.allclose(st, st_num, rtol=1e-5)
 
-    s.set_calculator(calc1)
+    s.calc = calc1
     e1 = s.get_potential_energy()
     f1 = s.get_forces()
     assert np.shape(f1) == (len(s), 3)
@@ -233,7 +233,7 @@ def test_calculator_with_fake_atoms():
 
 
 def test_ensemble_calculator_model():
-    ins = load_instructions_list("model_grace.yaml")
+    ins = load_instructions("model_grace.yaml")
     model = TPModel(ins)
     model.build(float64)
     calc = TPCalculator(model=[model, model])
@@ -241,7 +241,7 @@ def test_ensemble_calculator_model():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc)
+    s.calc = calc
     e0 = s.get_potential_energy()
     print(e0)
     f0 = s.get_forces()
@@ -258,7 +258,7 @@ def test_ensemble_calculator_model():
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
     s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
-    s.set_calculator(calc1)
+    s.calc = calc1
     e1 = s.get_potential_energy()
     print(e1)
     f1 = s.get_forces()
@@ -383,7 +383,7 @@ def test_padding_manager():
     # print("data=", data)
     data = {k: v for k, v in data.items()}
 
-    ins = load_instructions_list("model_grace.yaml")
+    ins = load_instructions("model_grace.yaml")
     model = TPModel(ins)
     model.build(float64)
 
@@ -441,7 +441,7 @@ def test_padding_manager_no_padding():
     # print("data=", data)
     data = {k: v for k, v in data.items()}
 
-    ins = load_instructions_list("model_grace.yaml")
+    ins = load_instructions("model_grace.yaml")
     model = TPModel(ins)
     model.build(float64)
 

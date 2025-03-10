@@ -4,21 +4,45 @@ import numpy as np
 import tensorflow as tf
 
 from tensorpotential import constants
-from tensorpotential.functions.nn import FullyConnectedMLP
+from tensorpotential.functions.nn import (
+    FullyConnectedMLP,
+    Linear,
+    scalar_rms_ln,
+)
 from tensorpotential.instructions.base import (
     capture_init_args,
     TPInstruction,
 )
 from tensorpotential.instructions.compute import (
     FunctionReduce,
-    FunctionReduceN,
     FunctionReduceParticular,
     ScalarChemicalEmbedding,
 )
 
 
 @capture_init_args
+class CreateOutputTarget(TPInstruction):
+    def __init__(self, name: str, initial_value: float = 0.0, l: int = 0):
+        super().__init__(name=name)
+        self.l = l
+        if initial_value is None:
+            self.value = 0.0
+        else:
+            self.value = initial_value
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
+            self.is_built = True
+
+    def frwrd(self, input_data, training=False):
+        return self.value
+
+
+@capture_init_args
 class TPOutputInstruction(TPInstruction):
+    _INSTRUCTION_TYPE = "TPOutputInstruction"
+
     def __init__(self, name: str, target: TPInstruction, l: int = 0):
         super(TPOutputInstruction, self).__init__(name=name)
         self.target = target
@@ -42,25 +66,6 @@ class TPOutputInstruction(TPInstruction):
 
 
 @capture_init_args
-class CreateOutputTarget(TPInstruction):
-    def __init__(self, name: str, initial_value: float = 0.0, l: int = 0):
-        super().__init__(name=name)
-        self.l = l
-        if initial_value is None:
-            self.value = 0.0
-        else:
-            self.value = initial_value
-
-    def build(self, float_dtype):
-        if not self.is_built:
-            self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
-            self.is_built = True
-
-    def frwrd(self, input_data, training=False):
-        return self.value
-
-
-@capture_init_args
 class LinearOut2Target(TPOutputInstruction):
     """
     Adds origin to target without transformation
@@ -71,11 +76,15 @@ class LinearOut2Target(TPOutputInstruction):
         origin: list[FunctionReduce],
         target: CreateOutputTarget,
         name="LinearOut2ScalarTarget",
+        trainable: bool = False,
+        init_type: str = "zeros",
+        n_out: int = 1,
         l: int = 0,
     ):
         super(LinearOut2Target, self).__init__(name=name, target=target, l=l)
         self.origin = origin
-
+        self.trainable = trainable
+        self.n_out = n_out
         try:
             lmax = np.max([ins.lmax for ins in self.origin])
         except AttributeError:
@@ -85,16 +94,29 @@ class LinearOut2Target(TPOutputInstruction):
 
         out_shapes = [ins.n_out for ins in self.origin]
         assert len(set(out_shapes)) == 1, "Not all shapes are the same"
+        if self.trainable:
+            self.lins = [
+                Linear(n_in=ins.n_out, n_out=self.n_out, init_type=init_type)
+                for ins in self.origin
+            ]
 
     def build(self, float_dtype):
-        pass
+        if not self.is_built:
+            if self.trainable:
+                for lin in self.lins:
+                    lin.build(float_dtype)
+            self.is_built = True
 
     def frwrd(self, input_data, training=False):
         target = input_data[f"{self.target.name}"]
 
         origin = 0.0
-        for ins in self.origin:
-            origin += input_data[f"{ins.name}"][:, :, 0]
+        for i, ins in enumerate(self.origin):
+            if self.trainable:
+                oi = input_data[f"{ins.name}"][:, :, 0]
+                origin += self.lins[i](oi)
+            else:
+                origin += input_data[f"{ins.name}"][:, :, 0]
 
         return target + origin
 
@@ -198,22 +220,16 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
         n_out: int = 1,
         name="MLPOut2ScalarTarget",
         normalize: str = None,
-        init_norm: str = "zeros",
         activation: str = None,
         l: int = 0,
+        **kwargs,
     ):
         super(MLPOut2ScalarTarget, self).__init__(name=name, target=target)
         self.origin = origin
         self.n_out = n_out
-        # for backward compat
-        if not normalize:
-            normalize = None
         self.normalize = normalize
-        self.init_norm = init_norm
         if self.normalize is not None:
-            assert self.normalize in ["layer"], f"MLPOut2ScalarTarget.normalize should be 'layer' or None, but is `{self.normalize}`"
-            assert self.init_norm in ["zeros", "near_zero", "ones"]
-            self.scale_shape = self.origin[0].n_out
+            assert self.normalize in ["layer"]
 
         if hidden_layers is None:
             self.hidden_layers = [32]
@@ -233,24 +249,19 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
         self.mlp = FullyConnectedMLP(
             input_size=out_shapes[0],
             hidden_layers=self.hidden_layers,
-            activation=activation,
             output_size=self.n_out,
+            activation=activation,
         )
 
     def build(self, float_dtype):
         if not self.mlp.is_built:
             self.mlp.build(float_dtype)
         if self.normalize is not None:
-            shape = [1, self.scale_shape]
-            if self.init_norm == "zeros":
-                self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
-            elif self.init_norm == "near_zero":
-                self.scale = tf.Variable(
-                    tf.random.normal(shape, stddev=1e-8, dtype=float_dtype)
-                )
-            elif self.init_norm == "ones":
-                self.scale = tf.Variable(tf.ones(shape, dtype=float_dtype))
-            self.epsilon = tf.constant(1e-12, dtype=float_dtype)
+            shape = [1, self.origin[0].n_out]
+            # self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
+            self.scale = tf.Variable(
+                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype)
+            )
         self.is_built = True
 
     def rmsln(self, x, input_data):
@@ -272,14 +283,21 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
         for ins in self.origin:
             origin += input_data[f"{ins.name}"][:, :, 0]
         if self.normalize == "layer":
-            origin = self.rmsln(origin, input_data)
+            # origin = self.rmsln(origin, input_data)
+            n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
+            n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
+            r_map = tf.reshape(
+                tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1]
+            )
+            r_map = r_map < n_at_b_real
+            origin = scalar_rms_ln(origin, self.scale, r_map=r_map)
         origin = self.mlp(origin)
 
         return target + origin
 
 
 @capture_init_args
-class LinMLPOut2ScalarTarget(MLPOut2ScalarTarget):
+class LinMLPOut2ScalarTarget(TPOutputInstruction):
     """
     Adds origin to target via MLP transformation and a single element without transformation
     """
@@ -291,27 +309,35 @@ class LinMLPOut2ScalarTarget(MLPOut2ScalarTarget):
 
     def __init__(
         self,
-        origin: list[FunctionReduce | FunctionReduceN],
+        origin: list[FunctionReduce],
         target: CreateOutputTarget,
         hidden_layers: list[int] = None,
         name="LinMLPOut2ScalarTarget",
         n_out: int = 1,
         normalize: str = None,
-        full_origin_norm: bool = False,
-        init_norm: str = "zeros",
         activation: str = None,
         l: int = 0,
+        **kwargs,
     ):
-        super(LinMLPOut2ScalarTarget, self).__init__(
-            origin=origin,
-            target=target,
-            hidden_layers=hidden_layers,
-            name=name,
-            normalize=normalize,
-            init_norm=init_norm,
-            n_out=n_out,
-        )
-        self.full_norm = full_origin_norm
+        super(LinMLPOut2ScalarTarget, self).__init__(name=name, target=target)
+        self.origin = origin
+        self.n_out = n_out
+        self.normalize = normalize
+        if self.normalize is not None:
+            assert self.normalize in ["layer"]
+
+        if hidden_layers is None:
+            self.hidden_layers = [32]
+        else:
+            self.hidden_layers = hidden_layers
+        try:
+            lmax = np.max([ins.lmax for ins in self.origin])
+        except AttributeError:
+            lmax = 0
+        assert lmax == 0, "Trying to output non-scalar origin to a scalar target"
+        self.assert_l_compatibility(target)
+        out_shapes = [ins.n_out for ins in self.origin]
+        assert len(set(out_shapes)) == 1, "Not all shapes are the same"
 
         self.mlp = FullyConnectedMLP(
             input_size=self.origin[0].n_out - 1,
@@ -319,31 +345,41 @@ class LinMLPOut2ScalarTarget(MLPOut2ScalarTarget):
             activation=activation,
             output_size=self.n_out,
         )
+
+    def build(self, float_dtype):
+        if not self.mlp.is_built:
+            self.mlp.build(float_dtype)
         if self.normalize is not None:
-            if self.full_norm:
-                self.scale_shape = self.origin[0].n_out
-            else:
-                self.scale_shape = self.origin[0].n_out - 1
+            shape = [1, self.origin[0].n_out - 1]
+            # self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
+            self.scale = tf.Variable(
+                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype)
+            )
+        self.is_built = True
 
     def frwrd(self, input_data, training=False):
         target = input_data[f"{self.target.name}"]
 
-        full_origin = 0.0
+        transformed_origin = 0.0
+        lin_origin = 0.0
         for ins in self.origin:
-            full_origin += input_data[f"{ins.name}"][:, :, 0]
-            # transformed_origin += full_scalar[:, 1:]
-            # lin_origin += tf.reshape(full_scalar[:, 0], [-1, 1])
+            full_scalar = input_data[f"{ins.name}"][:, :, 0]
+            transformed_origin += full_scalar[:, 1:]
+            lin_origin += tf.reshape(full_scalar[:, 0], [-1, 1])
         if self.normalize == "layer":
-            if self.full_norm:
-                n_origin = self.rmsln(full_origin, input_data)
-                lin_origin = tf.reshape(n_origin[:, 0], [-1, 1])
-                transformed_origin = n_origin[:, 1:]
-            else:
-                lin_origin = tf.reshape(full_origin[:, 0], [-1, 1])
-                transformed_origin = self.rmsln(full_origin[:, 1:], input_data)
-        else:
-            lin_origin = tf.reshape(full_origin[:, 0], [-1, 1])
-            transformed_origin = full_origin[:, 1:]
+            n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
+            n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
+            r_map = tf.reshape(
+                tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1]
+            )
+            r_map = r_map < n_at_b_real
+            transformed_origin = scalar_rms_ln(
+                transformed_origin, self.scale, r_map=r_map
+            )
+            # transformed_origin = scalar_LN(
+            #     transformed_origin, scale=self.scale, r_map=r_map
+            # )
+            # transformed_origin = self.rmsln(transformed_origin, input_data)
         transformed_origin = self.mlp(transformed_origin)
         norm_out = transformed_origin + lin_origin
 

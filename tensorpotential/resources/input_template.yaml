@@ -12,17 +12,7 @@ data:
 
 potential:
   {{ELEMENTS}} # If elements not provided - determined automatically from data
-  preset: {{PRESET_NAME}} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
-
-  ## For custom model from model.py::custom_model
-  #  custom: model.custom_model
-
-  # keywords-arguments that will be passed to preset or custom function
-  kwargs: {{KWARGS}}
-
-  #shift: False # True/False
-  scale: True # False/True or float
-
+  {{POTENTIAL_SETTINGS}}
 fit:
   loss: {
     energy: { weight: 1, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
@@ -37,7 +27,7 @@ fit:
 
   optimizer: Adam
   opt_params: {
-            learning_rate: 0.01,
+            learning_rate: {{learning_rate}},
             amsgrad: True,
             use_ema: True,
             ema_momentum: 0.99,
@@ -57,7 +47,7 @@ fit:
   test_batch_size: {{TEST_BATCH_SIZE}} # test batch size (optional)
 
   jit_compile: True
-#  eval_init_stats: True # to evaluate initial metrics
+  eval_init_stats: {{eval_init_stats}} # to evaluate initial metrics
 
   train_max_n_buckets: 10 # max number of buckets (group of batches of same shape) in train set
   test_max_n_buckets: 5 # same for test

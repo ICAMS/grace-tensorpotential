@@ -275,6 +275,7 @@ class TPCalculator(Calculator):
         truncate_extras_by_natoms: bool = False,
         max_number_reduction_recompilation: int | None = 2,
         debug_padding=False,
+        float_dtype: str = "float64",
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
@@ -377,6 +378,7 @@ class TPCalculator(Calculator):
             elements_map=self.element_map,
             cutoff=self.cutoff,
             cutoff_dict=self.cutoff_dict,
+            float_dtype=float_dtype,
         )
         self.data_builders = [self.geom_data_builder]
         if constants.ATOMIC_MAGMOM in self.data_keys:

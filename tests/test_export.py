@@ -20,7 +20,7 @@ def test_export_to_yaml():
     )
 
     # BUILD
-    for ins in fs_ins:
+    for _, ins in fs_ins.items():
         ins.build(tf.float64)
 
     export_to_yaml(fs_ins, "test_export_to_yaml.yaml")

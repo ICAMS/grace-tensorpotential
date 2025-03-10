@@ -21,7 +21,6 @@ def get_output_dir(seed=42):
     :return:  folder name
     """
     path = os.path.join("seed", f"{seed}")
-    os.makedirs(path, exist_ok=True)
     return path
 
 
@@ -34,7 +33,7 @@ class TensorPotential:
     def __init__(
         self,
         potential,
-        fit_config,
+        fit_config=None,
         global_batch_size=None,
         global_test_batch_size=None,
         loss_function: LossFunction = None,
@@ -53,7 +52,7 @@ class TensorPotential:
         if strategy is None:
             strategy = tf.distribute.get_strategy()
         self.strategy = strategy
-        self.fit_config = fit_config
+        self.fit_config = fit_config or {}
         self.global_batch_size = global_batch_size
         self.global_test_batch_size = global_test_batch_size or self.global_batch_size
         self.loss_function = loss_function
@@ -65,7 +64,6 @@ class TensorPotential:
         self.output_dir = get_output_dir(seed=seed)
 
         self.checkpoint_dir = os.path.join(self.output_dir, "checkpoints")
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.checkpoint_prefix = os.path.join(self.checkpoint_dir, "checkpoint")
         self.optimizer = None
         self.loss_norm_by_batch_size = loss_norm_by_batch_size
@@ -182,14 +180,26 @@ class TensorPotential:
     def __repr__(self):
         return f"{self.__class__.__name__}"
 
-    def save_checkpoint(self, suffix=""):
+    def save_checkpoint(self, suffix="", checkpoint_name=None, verbose=False):
         """save checkpoint to checkpoint_dir, overwrite if exists"""
-        checkpoint_name = self.checkpoint_prefix + suffix
+        checkpoint_name = checkpoint_name or (self.checkpoint_prefix + suffix)
+        if verbose:
+            logging.info(f"Writing checkpoint to {checkpoint_name}.*")
+        if os.path.dirname(checkpoint_name):
+            os.makedirs(os.path.dirname(checkpoint_name), exist_ok=True)
         self.checkpoint.write(checkpoint_name)
 
-    def load_checkpoint(self, suffix="", expect_partial: bool = False, verbose=False):
+    def load_checkpoint(
+        self,
+        suffix="",
+        expect_partial: bool = False,
+        verbose=False,
+        checkpoint_name=None,
+        raise_errors=False,
+    ):
         """load checkpoint from checkpoint_dir if exists"""
-        checkpoint_name = self.checkpoint_prefix + suffix
+        if checkpoint_name is None:
+            checkpoint_name = self.checkpoint_prefix + suffix
         if os.path.exists(f"{os.path.join(checkpoint_name)}.index"):
             with self.strategy.scope():
                 if expect_partial:
@@ -203,18 +213,28 @@ class TensorPotential:
                 logging.info(
                     f"FAILED Loaded checkpoint from {checkpoint_name} (path does not exist)"
                 )
+            if raise_errors:
+                raise ValueError(
+                    f"No checkpoint index found at {checkpoint_name}.index"
+                )
 
-    def save_model(self, path, jit_compile=True):
-        """saves model for serving"""
+    def save_model(self, model_name=None, jit_compile=True, exact_path=None):
+        """Saves model for serving"""
+        exact_path = exact_path or os.path.join(self.output_dir, model_name)
+        if os.path.dirname(exact_path):
+            os.makedirs(os.path.dirname(exact_path), exist_ok=True)
         self.model.save_model(
-            os.path.join(self.output_dir, path),
+            exact_path,
             jit_compile=jit_compile,
             float_dtype=self.float_dtype,
         )
 
-    def export_to_yaml(self, filename):
+    def export_to_yaml(self, model_name=None, exact_filename=None):
         """Export FS-model to YAML file"""
-        self.model.export_to_yaml(os.path.join(self.output_dir, filename))
+        exact_filename = exact_filename or os.path.join(self.output_dir, model_name)
+        if os.path.dirname(exact_filename):
+            os.makedirs(os.path.dirname(exact_filename), exist_ok=True)
+        self.model.export_to_yaml(exact_filename)
 
     @staticmethod
     def load_model(path: str) -> tf.saved_model:

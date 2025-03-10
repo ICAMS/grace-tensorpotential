@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import os
+from typing import Set
 
 import numpy as np
 import tensorflow as tf
 import yaml
 
+from tensorpotential.instructions.base import summary_verbose_type
 from tensorpotential.instructions.compute import TPInstruction
 from tensorpotential import constants
 from tensorpotential.export import export_to_yaml
@@ -18,6 +20,8 @@ def extract_cutoff_and_elements(instructions):
     element_map_symbols = None
     element_map_index = None
 
+    if isinstance(instructions, dict):
+        instructions = list(instructions.values())
     for instruction in instructions:
         if hasattr(instruction, "basis_function"):
             cuts.append(instruction.basis_function.rc.numpy())
@@ -35,6 +39,8 @@ def extract_cutoff_matrix(instructions) -> np.array:
     Reshape it into square matrix
     """
     cutoff_matrix = None
+    if isinstance(instructions, dict):
+        instructions = list(instructions.values())
     for instruction in instructions:
         if hasattr(instruction, "bond_cutoff_map"):
             if cutoff_matrix is None:
@@ -145,6 +151,27 @@ class ComputeFunction(ABC):
         raise NotImplementedError()
 
 
+def execute_instructions(input_data, instructions, training=False):
+    """
+    Function that loop over instructions (either as list or dict) and execute them.
+
+    Parameters:
+        input_data (dict): input data
+        instructions (dict): instructions
+        training (bool): training flag
+
+    Return: none,  modifications happen in input_data inplace
+    """
+    if isinstance(instructions, list):
+        for ins in instructions:
+            ins(input_data, training=training)
+    elif isinstance(instructions, dict):
+        for name, ins in instructions.items():
+            ins(input_data, training=training)
+    else:
+        raise ValueError("Invalid instructions container")
+
+
 # TODO: maybe name better
 class ComputeBatchEnergyAndForces(TrainFunction):
     specs = {
@@ -165,8 +192,7 @@ class ComputeBatchEnergyAndForces(TrainFunction):
     ):
         with tf.GradientTape() as tape:
             tape.watch(input_data[constants.BOND_VECTOR])
-            for ins in instructions:
-                ins(input_data, training=training)
+            execute_instructions(input_data, instructions, training)
             # TODO: make sure it will have the atomic energy
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
@@ -211,8 +237,7 @@ class ComputeBatchEnergyForcesVirials(TrainFunction):
     ):
         with tf.GradientTape() as tape:
             tape.watch(input_data[constants.BOND_VECTOR])
-            for ins in instructions:
-                ins(input_data, training=training)
+            execute_instructions(input_data, instructions, training)
             # TODO: make sure it will have the atomic energy
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
@@ -257,8 +282,7 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
     ):
         with tf.GradientTape() as tape:
             tape.watch(input_data[constants.BOND_VECTOR])
-            for ins in instructions:
-                ins(input_data, training=training)
+            execute_instructions(input_data, instructions, training)
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
 
@@ -291,8 +315,7 @@ class ComputeEquivariantForces(ComputeFunction):
         input_data: dict,
         training: bool = False,
     ):
-        for ins in instructions:
-            ins(input_data, training=training)
+        execute_instructions(input_data, instructions, training)
         atomic_f = tf.reshape(input_data[constants.PREDICT_FORCES], [-1, 3])
 
         return {
@@ -310,13 +333,23 @@ class ComputePlaceholder(ComputeFunction):
         input_data: dict,
         training: bool = False,
     ):
-        for ins in instructions:
-            ins(input_data, training=training)
+        execute_instructions(input_data, instructions, training)
         placeholder = input_data[constants.PLACEHOLDER]
 
         return {
             constants.PLACEHOLDER: placeholder,
         }
+
+
+def to_instructions_list(instructions):
+    if isinstance(instructions, dict):
+        return list(instructions.values())
+    elif isinstance(instructions, list):
+        return instructions
+    else:
+        raise ValueError(
+            f"`instructions` must be list or dict, but {type(instructions)} given"
+        )
 
 
 class TPModel(tf.Module):
@@ -405,7 +438,8 @@ class TPModel(tf.Module):
 
     def compute_regularization_loss(self):
         total_reg_loss = defaultdict(lambda: 0.0)
-        for ins in self.instructions:
+        instructions = to_instructions_list(self.instructions)
+        for ins in instructions:
             if ins.compute_l2_regularization:
                 total_reg_loss[
                     constants.L2_LOSS_COMPONENT
@@ -414,7 +448,8 @@ class TPModel(tf.Module):
 
     def compute_l2_regularization_loss(self):
         l2_loss = 0.0
-        for ins in self.instructions:
+        instructions = to_instructions_list(self.instructions)
+        for ins in instructions:
             if hasattr(ins, "compute_l2_regularization_loss"):
                 l2_loss += ins.compute_l2_regularization_loss()
         return l2_loss
@@ -436,3 +471,30 @@ class TPModel(tf.Module):
 
     def export_to_yaml(self, filename):
         export_to_yaml(self.instructions, filename)
+
+    def summary(
+        self,
+        verbose: summary_verbose_type = 1,
+        separator: str = "=",
+        separator_length: int = 50,
+        **kwargs,
+    ) -> str:
+        """Generate a formatted summary string of all instructions."""
+        shown_vars_counter: Set[str] = set()
+        lines = [
+            f"{i + 1}. {ins.summary(verbose, shown_vars_counter, **kwargs)}"
+            for i, ins in enumerate(self.instructions.values())
+        ]
+
+        # Compute break line based on already extracted lines
+        # all_lines = [line for l in lines for line in l.split("\n")]
+        # max_line_length = len(max(all_lines, key=len)) if all_lines else 0
+        break_line = separator * separator_length
+
+        return f"\n{break_line}\n".join(lines)
+
+    def __repr__(self):
+        # TODO: consider make it more __repr__-related
+        return "\n".join(
+            f"{i + 1}. {repr(ins)}" for i, ins in enumerate(self.instructions)
+        )

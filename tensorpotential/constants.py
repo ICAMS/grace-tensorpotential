@@ -67,10 +67,12 @@ INPUT_FIT_LOSS_ENERGY: Final[str] = "energy"
 INPUT_FIT_LOSS_FORCES: Final[str] = "forces"
 INPUT_FIT_LOSS_STRESS: Final[str] = "stress"
 INPUT_FIT_LOSS_VIRIAL: Final[str] = "virial"
-INPUT_USE_PER_SPECIE_N_NEI: Final[str] = "use_per_specie_n_nei"
-
+INPUT_POTENTIAL_REDUCE_ELEMENTS: Final[str] = "reduce_elements"
+INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL: Final[str] = "finetune_foundation_model"
 
 INPUT_REFERENCE_ENERGY: Final[str] = "reference_energy"
+
+INPUT_POTENTIAL_CHECKPOINT_NAME: Final[str] = "checkpoint_name"
 
 COLUMN_ATOMIC_MAGMOM: Final[str] = "mag_mom"
 COLUMN_ASE_ATOMS: Final[str] = "ase_atoms"

@@ -6,6 +6,7 @@ import tensorflow as tf
 
 from tensorpotential import constants
 from tensorpotential.tpmodel import TPModel
+from tensorpotential.metrics import ForceMetrics, VirialMetrics
 
 
 def energy_offset_error(e_true, e_pred, e_weight=None):
@@ -101,6 +102,7 @@ class LossComponent(tf.Module, ABC):
             trainable=False,
             name=f"{self.name}_component_weight",
         )
+        self.epsilon = tf.constant(1e-10, dtype=float_dtype)
 
     # def get_corresponding_metrics(self):
     #     if hasattr(self, "corresponding_metrics"):
@@ -563,6 +565,57 @@ class WeightedHuberForceLoss(HuberLoss):
         return loss_f
 
 
+class WHuberForceCompNormLoss(HuberLoss):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_FORCES: {"shape": [None, 3], "dtype": "float"},
+        constants.DATA_FORCE_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        delta=1.0,
+        name="HuberForceLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            delta=delta,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        self.corresponding_metrics = ForceMetrics
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        f_true = input_data[constants.DATA_REFERENCE_FORCES]
+        f_pred = predictions[constants.PREDICT_FORCES]
+        f_weight = input_data[constants.DATA_FORCE_WEIGHTS]
+
+        error = tf.math.subtract(f_pred, f_true)
+        h_loss = huber(error, delta=self.delta)
+
+        v_true = tf.sqrt(
+            tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+        )
+        v_pred = tf.sqrt(
+            tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
+        )
+        v_err = v_pred - v_true
+
+        v_h_loss = huber(v_err, delta=self.delta)
+
+        loss_f = tf.reduce_sum(f_weight * h_loss)
+        loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
+        if self.normalize_by_samples:
+            loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
+        return loss_f
+
+
 class WeightedHuberVirialLoss(HuberLoss):
     input_tensor_spec = {
         constants.DATA_REFERENCE_VIRIAL: {"shape": [None, 6], "dtype": "float"},
@@ -618,6 +671,7 @@ class WeightedHuberStressLoss(HuberLoss):
         delta=1.0,
         name="HuberStressLoss",
         normalize_by_samples: bool = True,
+        compute_invariants: bool = False,
     ):
         super().__init__(
             loss_component_weight=loss_component_weight,
@@ -625,6 +679,7 @@ class WeightedHuberStressLoss(HuberLoss):
             name=name,
             normalize_by_samples=normalize_by_samples,
         )
+        self.compute_invariants = compute_invariants
 
     def compute_loss_component(
         self,
@@ -633,14 +688,73 @@ class WeightedHuberStressLoss(HuberLoss):
         **kwargs,
     ) -> tf.Tensor:
         v_true = input_data[constants.DATA_REFERENCE_VIRIAL]
+        # xx,yy,zz, xy,xz,yz
         v_pred = predictions[constants.PREDICT_VIRIAL]
         v_weight = input_data[constants.DATA_VIRIAL_WEIGHTS]
         volume = input_data[constants.DATA_VOLUME]
 
-        error = tf.math.subtract(v_pred, v_true) / volume
-        h_loss = huber(error, delta=self.delta)
+        v_true /= volume
+        v_pred /= volume
 
+        error = tf.math.subtract(v_pred, v_true)
+        h_loss = huber(error, delta=self.delta)
         loss_v = tf.reduce_sum(v_weight * h_loss)
+
+        if self.compute_invariants:
+            I_1_t = tf.reduce_sum(v_true[:, :3], axis=1, keepdims=True)
+            I_1_p = tf.reduce_sum(v_pred[:, :3], axis=1, keepdims=True)
+            I_1_loss = huber(I_1_t - I_1_p, delta=self.delta)
+
+            I_2_t = tf.reshape(
+                (
+                    v_true[:, 0] * v_true[:, 1]
+                    + v_true[:, 1] * v_true[:, 2]
+                    + v_true[:, 0] * v_true[:, 2]
+                    - v_true[:, 3] ** 2
+                    - v_true[:, 4] ** 2
+                    - v_true[:, 5] ** 2
+                ),
+                [-1, 1],
+            )
+            I_2_p = tf.reshape(
+                (
+                    v_pred[:, 0] * v_pred[:, 1]
+                    + v_pred[:, 1] * v_pred[:, 2]
+                    + v_pred[:, 0] * v_pred[:, 2]
+                    - v_pred[:, 3] ** 2
+                    - v_pred[:, 4] ** 2
+                    - v_pred[:, 5] ** 2
+                ),
+                [-1, 1],
+            )
+            I_2_loss = huber(I_2_t - I_2_p, delta=self.delta)
+
+            I_3_t = tf.reshape(
+                (
+                    v_true[:, 0] * v_true[:, 1] * v_true[:, 2]
+                    + 2 * v_true[:, 3] * v_true[:, 4] * v_true[:, 5]
+                    - v_true[:, 1] * v_true[:, 4] ** 2
+                    - v_true[:, 2] * v_true[:, 3] ** 2
+                    - v_true[:, 0] * v_true[:, 5] ** 2
+                ),
+                [-1, 1],
+            )
+            I_3_p = tf.reshape(
+                (
+                    v_pred[:, 0] * v_pred[:, 1] * v_pred[:, 2]
+                    + 2 * v_pred[:, 3] * v_pred[:, 4] * v_pred[:, 5]
+                    - v_pred[:, 1] * v_pred[:, 4] ** 2
+                    - v_pred[:, 2] * v_pred[:, 3] ** 2
+                    - v_pred[:, 0] * v_pred[:, 5] ** 2
+                ),
+                [-1, 1],
+            )
+            I_3_loss = huber(I_3_t - I_3_p, delta=self.delta)
+
+            loss_v += tf.reduce_sum(v_weight * I_1_loss) / 9.0
+            loss_v += tf.reduce_sum(v_weight * I_2_loss) / 18.0
+            loss_v += tf.reduce_sum(v_weight * I_3_loss) / 18.0
+
         if self.normalize_by_samples:
             loss_v /= (
                 tf.reduce_sum(v_weight) * 6

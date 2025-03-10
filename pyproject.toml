@@ -4,29 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.4.5"  #### UPD in setup.py to avoid confusion
+version = "0.5.1"  #### UPD in setup.py to avoid confusion
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
 ]
 description = "Graph Atomic Cluster Expansion (GRACE)"
 readme = "README.md"
-requires-python = "<3.12" # Update if needed
+requires-python = ">=3.9,<3.13" # Update if needed
 license = { text = "Academic Software License (ASL)" }
 classifiers = [
     "License :: OSI Approved :: Academic Free License (AFL)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "scipy",
     "tensorflow<2.17",
+    "tf_keras",
+    "scipy",
     "matscipy",
-    "numpy",
+    "numpy<2.0.0",
     "sympy",
     "pandas<3.0.0",
     "ase",

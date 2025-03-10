@@ -33,7 +33,14 @@ potential:
 #  filename: model.yaml # configuration (WITHOUT weights!) of the model
 #  shift: False # True/False
 #  scale: False # False/True or float 
+# avg_n_neigh: 40 # Average number of neighbours. By default - automatically determined
 #  float_dtype: float64 # float64, float32
+#  checkpoint_name: /path/to/checkpoint  # expecting /path/to/checkpoint.index file  
+
+#  reduce_elements: True #  default - False, reduce elements to those provided in dataset 
+
+# # For finetuning of foundation modeles
+#  finetune_foundation_model: GRACE-1L-OAM_2Feb25
 
 fit:
   #  strategy: mirrored # or -m flag
@@ -85,7 +92,7 @@ fit:
 
   optimizer: Adam
   opt_params: { learning_rate: 0.01, amsgrad: True, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipvalue: 1.0}
-  
+  # reset_optimizer: True  # reset optimizer, after being loaded from checkpoint
   # for learning-rate reduction
   learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, } 
 

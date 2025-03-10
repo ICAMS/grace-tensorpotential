@@ -125,7 +125,7 @@ def LINEAR(
             atomic_shift_map=atomic_shift_map,
         )
 
-    return instructor.instruction_list
+    return instructor.get_instructions()
 
 
 def FS(
@@ -297,7 +297,7 @@ def FS(
             shift=constant_out_shift,
             atomic_shift_map=atomic_shift_map,
         )
-    return instructor.instruction_list
+    return instructor.get_instructions()
 
 
 def GRACE_1LAYER(
@@ -465,7 +465,7 @@ def GRACE_1LAYER(
             zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
             LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")
 
-    return instructor.instruction_list
+    return instructor.get_instructions()
 
 
 GRACE_1LAYER_v2 = GRACE_1LAYER  # for backward compatibility
@@ -754,7 +754,7 @@ def GRACE_2LAYER(
             zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
             LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")
 
-    return instructor.instruction_list
+    return instructor.get_instructions()
 
 
 def GRACE_2LAYER_scaled(
@@ -1050,4 +1050,4 @@ def GRACE_2LAYER_scaled(
             zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
             LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")
 
-    return instructor.instruction_list
+    return instructor.get_instructions()

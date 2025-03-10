@@ -1,5 +1,5 @@
 from tensorpotential.instructions.base import (
-    load_instructions_list,
+    load_instructions,
     capture_init_args,
     InstructionManager,
     NoInstructionManager,
@@ -41,7 +41,7 @@ __all__ = [
     "capture_init_args",
     "TPEquivariantInstruction",
     "TPInstruction",
-    "load_instructions_list",
+    "load_instructions",
     "InstructionManager",
     "NoInstructionManager",
     "BondLength",
@@ -74,8 +74,15 @@ try:
     from tensorpotential.experimental.instructions.aux_compute import (
         InvariantLayerRMSNorm,
         InvariantGate,
+        EquivariantRMSNorm,
     )
 
-    __all__.extend(["InvariantLayerRMSNorm", "InvariantGate"])
+    __all__.extend(
+        [
+            "InvariantLayerRMSNorm",
+            "InvariantGate",
+            "EquivariantRMSNorm",
+        ]
+    )
 except ImportError:
     pass

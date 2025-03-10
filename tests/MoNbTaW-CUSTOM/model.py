@@ -190,4 +190,4 @@ def custom_model(
             atomic_shift_map=atomic_shift_map,
         )
 
-    return instructor.instruction_list
+    return instructor.get_instructions()

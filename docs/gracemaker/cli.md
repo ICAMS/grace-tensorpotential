@@ -1,7 +1,7 @@
 ## Gracemaker
 
 ```
-usage: gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [input]
+gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [-t] [-cn CHECKPOINT_NAME] [input]
 
 Fitting utility for (graph) atomic cluster expansion potentials.
 
@@ -19,12 +19,15 @@ options:
   -rs RESTART_SUFFIX, --restart-suffix RESTART_SUFFIX
                         Suffix of checkpoint to restart from, i.e. .epoch_10 (use separately from -r/-rl)
   -p POTENTIAL, --potential POTENTIAL
-                        Potential configuration to load
+                        Potential configuration to load, model.yaml file
   -s, --save-model      Export model as TF saved model
   -sf, --save--fs       Export FS model as yaml to be loaded in CPP
   -e, --eager           Eager graph execution
   -nj, --no-jit         No JIT
   --seed SEED           Random seed (will overwrite value from input.yaml)
-  -cm, --check-model    Check model consistency, without performing fit and building neighbourlist
+  -cm, --check-model    Check model consistency, without performing fit
+  -t, --template        Generate a template 'input.yaml' file by dialog
+  -cn CHECKPOINT_NAME, --checkpoint-name CHECKPOINT_NAME
+                        Explicit name of the checkpoint (omit .index suffix)
 
 ```

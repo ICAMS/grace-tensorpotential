@@ -307,3 +307,23 @@ def compute_cheb_radial_basis(r, nfunc, rcut, p, kind=1):
     basis *= cutoff_func_p_order_poly(roverrcut, p)
 
     return basis
+
+
+def compute_sin_bessel_radial_basis(r, nfunc, rcut, p, normalized=True):
+    n = tf.range(1, 1 + nfunc, delta=1, dtype=r.dtype, name="range_sinb")
+    pi = tf.constant(np.pi, dtype=r.dtype, name="pi")
+    r_scld = r / rcut
+    if normalized:
+        f = (
+            tf.math.sqrt(tf.constant(2.0, dtype=r.dtype))
+            * tf.math.sin(n * r_scld * pi)
+            / r_scld
+        )
+    else:
+        f = tf.math.sqrt(2 / rcut) * tf.math.sin(n * r_scld * pi) / r
+
+    func = f * cutoff_func_p_order_poly(r_scld, p)
+    return func
+
+
+# def SBessel

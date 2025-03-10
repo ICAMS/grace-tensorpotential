@@ -900,9 +900,17 @@ def try_load_checkpoint(
     restart_latest=False,
     restart_suffix=None,
     expect_partial=False,
+    checkpoint_name=None,
     verbose=True,
 ):
-    if restart_latest:
+    if checkpoint_name is not None:
+        log.info(f"Trying to load explicit checkpoint {checkpoint_name}")
+        tp.load_checkpoint(
+            expect_partial=expect_partial,
+            verbose=verbose,
+            checkpoint_name=checkpoint_name,
+        )
+    elif restart_latest:
         log.info("Trying to load latest regular checkpoint")
         tp.load_checkpoint(expect_partial=expect_partial, verbose=verbose)
     elif restart_best_test:

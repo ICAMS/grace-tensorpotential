@@ -17,7 +17,7 @@ except ImportError:
     no_readline = True
 
 from dataclasses import dataclass
-from typing import Dict, List, Any
+from typing import Dict, Any
 
 from tqdm import tqdm
 from importlib import resources
@@ -34,6 +34,7 @@ from tensorpotential.loss import *
 from tensorpotential.metrics import *
 from tensorpotential.instructions.base import (
     str_to_class,
+    TPInstruction,
 )
 
 from tensorpotential.tpmodel import (
@@ -41,6 +42,11 @@ from tensorpotential.tpmodel import (
     ComputeFunction,
 )
 
+from tensorpotential.calculator.foundation_models import (
+    MODELS_METADATA,
+    CHECKPOINT_URL_KEY,
+    DESCRIPTION_KEY,
+)
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
@@ -131,7 +137,10 @@ def construct_model(
     constant_out_shift: float = 0.0,
     constant_out_scale: float = 1.0,
     atomic_shift_map=None,
-) -> List:
+) -> dict[str, TPInstruction]:
+    """
+    Construct a model as a dict of TPInstructions.
+    """
     preset = potential_config.get("preset")
     kwargs = potential_config.get("kwargs", {})
     if kwargs:
@@ -152,7 +161,7 @@ def construct_model(
             except ModuleNotFoundError:
                 build_fn = None
         if build_fn is not None:
-            instructions_list = build_fn(
+            instructions = build_fn(
                 element_map=element_map,
                 rcut=rcut,
                 cutoff_dict=cutoff_dict,
@@ -169,7 +178,7 @@ def construct_model(
         sys.path.append(os.getcwd())
         log.info(f"Importing model from {model} (added to PYTHON_PATH: {os.getcwd()})")
         build_model_fn = str_to_class(model)
-        instructions_list = build_model_fn(
+        instructions = build_model_fn(
             element_map=element_map,
             rcut=rcut,
             cutoff_dict=cutoff_dict,
@@ -183,7 +192,9 @@ def construct_model(
         raise ValueError(
             f"Neither `preset` nor `custom` specified in input.yaml::potential"
         )
-    return instructions_list
+    # if isinstance(instructions, list):
+    #     instructions = {ins.name: ins for ins in instructions}
+    return instructions
 
 
 def convert_to_tensors_for_model(tp, train_data, test_data, strategy):
@@ -529,33 +540,82 @@ def generate_template_input():
         elements = ""
     input_yaml_text = input_yaml_text.replace("{{ELEMENTS}}", elements)
 
-    preset_name = input_choice(
-        f"Enter model preset",
-        choices=ALLOWED_PRESETS.keys(),
-        default_choice=default_preset,
-    )
-    input_yaml_text = input_yaml_text.replace("{{PRESET_NAME}}", str(preset_name))
+    learning_rate = 0.01
+    eval_init_stats = False
 
-    preset_complexity = input_choice(
-        "Model complexity",
-        choices=allowed_preset_complexities[preset_name].keys(),
-        default_choice="medium",
+    finetune_model = input_choice(
+        f"Do you want to finetune foundation model",
+        choices=["yes", "no"],
+        default_choice="no",
     )
-    kwargs_str = json.dumps(
-        allowed_preset_complexities[preset_name][preset_complexity],
-    ).strip()
-    kwargs_str = kwargs_str.replace('"', "").replace("'", "")
-    input_yaml_text = input_yaml_text.replace("{{KWARGS}}", kwargs_str)
+    if finetune_model == "yes":
 
-    def_cutoff = default_cutoff[preset_name]
-    cutoff = float(
-        input_with_default(
-            f"Enter cutoff (default={def_cutoff})",
-            default_choice=def_cutoff,
+        available_foundation_models = [
+            k for k, v in MODELS_METADATA.items() if CHECKPOINT_URL_KEY in v
+        ]
+        print("Available foundation models:")
+        for model_name in available_foundation_models:
+            print(f" - {model_name}: {MODELS_METADATA[model_name][DESCRIPTION_KEY]}")
+        foundation_model_name = input_choice(
+            f"Enter foundation model name",
+            choices=available_foundation_models,
+            default_choice="GRACE-1L-OMAT",
         )
+        potential_template = f"""finetune_foundation_model: {foundation_model_name} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+  reduce_elements: True #  default - False, reduce elements to those provided in dataset 
+        """
+        input_yaml_text = input_yaml_text.replace("{{CUTOFF}}", "n/a")
+        learning_rate = 0.001
+        eval_init_stats = True
+    else:
+        print("Fitting from scratch")
+        preset_name = input_choice(
+            f"Enter model preset",
+            choices=ALLOWED_PRESETS.keys(),
+            default_choice=default_preset,
+        )
+        potential_template = """preset: {{PRESET_NAME}} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+
+  ## For custom model from model.py::custom_model
+  #  custom: model.custom_model
+
+  # keywords-arguments that will be passed to preset or custom function
+  kwargs: {{KWARGS}}
+
+  #shift: False # True/False
+  scale: True # False/True or float"""
+        potential_template = potential_template.replace(
+            "{{PRESET_NAME}}", str(preset_name)
+        )
+
+        preset_complexity = input_choice(
+            "Model complexity",
+            choices=allowed_preset_complexities[preset_name].keys(),
+            default_choice="medium",
+        )
+        kwargs_str = json.dumps(
+            allowed_preset_complexities[preset_name][preset_complexity],
+        ).strip()
+        kwargs_str = kwargs_str.replace('"', "").replace("'", "")
+        potential_template = potential_template.replace("{{KWARGS}}", kwargs_str)
+
+        def_cutoff = default_cutoff[preset_name]
+        cutoff = float(
+            input_with_default(
+                f"Enter cutoff (default={def_cutoff})",
+                default_choice=def_cutoff,
+            )
+        )
+        print("Cutoff: ", cutoff)
+        input_yaml_text = input_yaml_text.replace("{{CUTOFF}}", str(cutoff))
+
+    input_yaml_text = input_yaml_text.replace(
+        "{{POTENTIAL_SETTINGS}}", potential_template
     )
-    print("Cutoff: ", cutoff)
-    input_yaml_text = input_yaml_text.replace("{{CUTOFF}}", str(cutoff))
+    input_yaml_text = input_yaml_text.replace(
+        "{{eval_init_stats}}", str(eval_init_stats)
+    )
+    input_yaml_text = input_yaml_text.replace("{{learning_rate}}", str(learning_rate))
 
     ####### loss function type ###
     loss_type = input_choice(

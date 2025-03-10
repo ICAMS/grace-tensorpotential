@@ -100,6 +100,7 @@
     _instruction_: true
     name: Y
   history_drop_list: null
+  radia_basis: null
   indicator:
     _instruction_: true
     name: I

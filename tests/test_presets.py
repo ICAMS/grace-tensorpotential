@@ -4,7 +4,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 from pathlib import Path
 
-from tensorpotential.instructions.base import load_instructions_list
+from tensorpotential.instructions.base import load_instructions
 from tensorpotential.potentials.presets import *
 
 prefix = Path(__file__).parent.resolve()
@@ -12,8 +12,14 @@ prefix = Path(__file__).parent.resolve()
 
 def test_load_saved_model_yaml():
     model_name = str(prefix / "model_grace.yaml")
-    instructions = load_instructions_list(model_name)
+    instructions = load_instructions(model_name)
     assert len(instructions) == 18
+
+
+def test_load_saved_model_yaml_2L_omat():
+    model_name = str(prefix / "model_grace_2L_omat.yaml")
+    instructions = load_instructions(model_name)
+    assert len(instructions) == 29
 
 
 def test_preset_FS_HEA25_with_simplification():
@@ -30,7 +36,7 @@ def test_preset_FS_HEA25_with_simplification():
     assert len(pot) == 14
 
     A_names = ["A", "AA", "AAA", "AAAA"]
-    A_ins_dict = {ins.name: ins for ins in pot if ins.name in A_names}
+    A_ins_dict = {ins.name: ins for name, ins in pot.items() if ins.name in A_names}
 
     for n in A_names:
         print(n, A_ins_dict[n].coupling_meta_data.shape[0])
@@ -50,7 +56,7 @@ def test_preset_FS_HEA25_with_simplification():
     print(len(pot2))
     assert len(pot2) == 14
 
-    A_ins_dict = {ins.name: ins for ins in pot2 if ins.name in A_names}
+    A_ins_dict = {ins.name: ins for ins in pot2.values() if ins.name in A_names}
 
     for n in A_names:
         print(n, A_ins_dict[n].coupling_meta_data.shape[0])

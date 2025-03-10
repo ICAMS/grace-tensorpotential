@@ -47,8 +47,7 @@ parameters. When `gracemaker` starts, it creates a working subfolder, (e.g., _se
 * **log.txt** — Redirected log output.
 * **train_metrics.yaml** and **test_metrics.yaml** — Various training and testing metrics in YAML format.
 * **checkpoints/** — Model checkpoints
-
-Additionally, a file named _model.yaml_ will be created in the current working directory. This file contains the architecture of the model.
+* **model.yaml** — Stores model architecture and hyperparameters.
 
 _____
 
@@ -60,6 +59,30 @@ This checkpoint can be found in _seed/\*/checkpoints/checkpoint.best_test_loss.\
 In addition, regular checkpointing is performed and its frequency is controlled  via `checkpoint_freq` flag. 
 Only the last one is kept by default, but every regular checkpoint can be kept specifying `save_all_regular_checkpoints: True`  
 
+_____
+
+### Restart from checkpoint 
+
+To initialized fitting from previously saved state, simply run
+```bash
+gracemaker -r
+```
+This will try restarting fit from the `checkpoint.best_test_loss` and `model.yaml` from the default 
+locations at `./seed/*/checkpoints/checkpoint.best_test_loss` and `./seed/*/` respectively.
+
+You can also explicitly provide path to the checkpoint and model configuration file:
+  
+```bash
+gracemaker -r -p /path/to/model.yaml -cn /path/to/chekpoint.index
+```
+
+or in `input.yaml`:
+
+```yaml
+potential:
+  filename: /path/to/model.yaml
+  checkpoint_name: /path/to/chekpoint.index
+```
 _____
 
 ### Export Model 

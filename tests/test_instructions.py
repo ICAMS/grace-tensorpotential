@@ -635,7 +635,16 @@ def test_function_collector():
         keep_parity=[[0, 1], [1, -1], [1, 1], [2, 1], [2, -1], [3, 1], [3, -1]],
     )
     aa = p.frwrd(inpt_data)
+    print("-----------------------------" * 50)
+    for i, row in p.coupling_meta_data.iterrows():
+        print(
+            f'({row["l"]},{row["m"]}), {row["hist"]}; {row["parity"]}: {aa[0, 0, i].numpy()}'
+        )
+        print("&" * 25)
+    print("-----------------------------" * 50)
     inpt_data["AA"] = aa
+    print(inpt_data["AA"][0])
+    print("***************************" * 50)
     inpt_data[constants.N_ATOMS_BATCH_TOTAL] = size
     inpt_data[constants.ATOMIC_MU_I] = np.zeros((size)).astype(np.int32)
 

@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import yaml
 from ase.data import chemical_symbols
+from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
 
 from tensorpotential import constants as tc
 from tensorpotential.cli.data import load_and_prepare_datasets
@@ -20,12 +21,13 @@ from tensorpotential.cli.prepare import (
 )
 from tensorpotential.cli.train import try_load_checkpoint, train_adam, train_bfgs
 from tensorpotential.instructions.base import (
-    load_instructions_list,
-    save_instructions_list,
+    load_instructions,
+    save_instructions_dict,
 )
 from tensorpotential.loss import *
 from tensorpotential.metrics import *
 from tensorpotential.tensorpot import TensorPotential, get_output_dir
+from tensorpotential.utils import convert_model_reduce_elements
 
 MODEL_CONFIG_YAML = "model.yaml"
 
@@ -94,7 +96,7 @@ def build_parser():
         "-p",
         "--potential",
         type=str,
-        help="Potential configuration  to load",
+        help="Potential configuration to load, model.yaml file",
         default=None,
     )
 
@@ -104,14 +106,6 @@ def build_parser():
         action="store_true",
         default=False,
         help="Export model as TF saved model",
-    )
-
-    parser.add_argument(
-        "-js",
-        "--just-save",
-        action="store_true",
-        default=False,
-        help="Export model as TF saved model from config/preset directly, without instructions .yaml",
     )
 
     parser.add_argument(
@@ -159,6 +153,15 @@ def build_parser():
         default=False,
     )
 
+    parser.add_argument(
+        "-cn",
+        "--checkpoint-name",
+        dest="checkpoint_name",
+        type=str,
+        default=None,
+        help="Explicit name of the checkpoint (omit .index suffix)",
+    )
+
     return parser
 
 
@@ -166,14 +169,36 @@ def add_loaded_model_parameter(potential_file_name, args_yaml):
     log.info(f"Loading model config from `{potential_file_name}`")
     with open(potential_file_name, "rt") as f:
         list_of_dict_instructions = yaml.safe_load(f)
+    if isinstance(list_of_dict_instructions, dict):
+        list_of_dict_instructions = list(list_of_dict_instructions.values())
+
     for ins_dict in list_of_dict_instructions:
         if "ScalarChemicalEmbedding" in ins_dict["__cls__"]:
-            element_map = ins_dict["element_map"]
-            assert isinstance(element_map, dict), "Element map is not a dict"
-            log.info(f"Setting {tc.INPUT_POTENTIAL_SECTION}::elements to {element_map}")
-            args_yaml[tc.INPUT_POTENTIAL_SECTION]["elements"] = element_map
-        if tc.INPUT_CUTOFF in ins_dict:
-            args_yaml[tc.INPUT_CUTOFF] = ins_dict[tc.INPUT_CUTOFF]
+            # if not "reduce_elements" in args_yaml::potential,
+            # then set original elements map
+            if not args_yaml[tc.INPUT_POTENTIAL_SECTION].get(
+                tc.INPUT_POTENTIAL_REDUCE_ELEMENTS, False
+            ):
+                element_map = ins_dict["element_map"]
+                assert isinstance(element_map, dict), "Element map is not a dict"
+
+                log.info(
+                    f"Setting {tc.INPUT_POTENTIAL_SECTION}::elements to {element_map}"
+                )
+
+                if "elements" not in args_yaml[tc.INPUT_POTENTIAL_SECTION]:
+                    args_yaml[tc.INPUT_POTENTIAL_SECTION]["elements"] = element_map
+                else:
+                    old_elements = args_yaml[tc.INPUT_POTENTIAL_SECTION]["elements"]
+                    old_element_map = {e: i for i, e in enumerate(old_elements)}
+                    if element_map != old_element_map:
+                        raise RuntimeError(
+                            f"Provided input.yaml::{tc.INPUT_POTENTIAL_SECTION}::elements  ({old_elements}) "
+                            + f"differs from that read from model ({element_map})"
+                        )
+            # otherwise skip until load_and_prepare_datasets
+        if "rcut" in ins_dict:
+            args_yaml[tc.INPUT_CUTOFF] = ins_dict["rcut"]
             log.info(f"Setting data::{tc.INPUT_CUTOFF} to {args_yaml[tc.INPUT_CUTOFF]}")
         if tc.INPUT_CUTOFF_DICT in ins_dict:
             args_yaml[tc.INPUT_CUTOFF_DICT] = ins_dict[tc.INPUT_CUTOFF_DICT]
@@ -215,6 +240,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
     output_dir = get_output_dir(seed=seed)
     if "log" in args_parse:
         log_file_name = os.path.join(output_dir, args_parse.log)
+        os.makedirs(output_dir, exist_ok=True)
         log.info("Redirecting log into file {}".format(log_file_name))
         fileh = logging.FileHandler(log_file_name, "a")
         formatter = logging.Formatter(LOG_FMT)
@@ -261,16 +287,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
     )  # TODO: get batch_size from stats.json for distributed dataset
     global_batch_size = batch_size * strategy.num_replicas_in_sync
     log.info(
-        f"Global TRAIN batch size - requested: {global_batch_size}, "
-        f"num. replicas: {strategy.num_replicas_in_sync}, minibatch size: {batch_size}"
+        f"Global TRAIN batch size (= minibatch size * num GPUS): {global_batch_size}, "
+        f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {batch_size}"
     )
 
     test_batch_size = fit_config.get("test_batch_size", 1)
     if test_batch_size:
         global_test_batch_size = test_batch_size * strategy.num_replicas_in_sync
         log.info(
-            f"Global TEST batch size - requested: {global_test_batch_size}, "
-            f"num. replicas: {strategy.num_replicas_in_sync}, minibatch size: {test_batch_size}"
+            f"Global TEST batch size (= minibatch size * num GPUS): {global_test_batch_size}, "
+            f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {test_batch_size}"
         )
 
     float_dtype_param = potential_config.get("float_dtype", "float64")
@@ -287,22 +313,27 @@ def main(argv=None, strategy=None, strategy_desc=""):
     test_data = None
     element_map = None
     data_stats = None
+
     if args_parse.check_model:
-        element_map = {s: i for i, s in enumerate(chemical_symbols[1:90])}
-        log.info(f"Checking model with {len(element_map)} elements")
-        cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
-        if cut_dict:
-            log.info(f"User-defined cutoff dict: {cut_dict}")
-        pot = construct_model(
-            potential_config, element_map=element_map, rcut=rcut, cutoff_dict=cut_dict
-        )
-        model = TPModel(pot)
-        model.build(float_dtype=float_dtype)
-        init_flat_vars = model.get_flat_trainable_variables()
-        log.info("Model is constructed")
-        log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
+        check_model(args_yaml, float_dtype)
         log.info(f"Exiting...")
         sys.exit(0)
+
+    # finetuning of foundation models
+    finetune_model = potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+    if finetune_model and not (
+        args_parse.restart_best_test or args_parse.restart_latest
+    ):
+        log.info(f"FINETUNING {finetune_model} foundation model")
+        checkpoint_path = get_or_download_checkpoint(finetune_model)
+        potential_config["filename"] = os.path.join(checkpoint_path, "model.yaml")
+        potential_config[tc.INPUT_POTENTIAL_CHECKPOINT_NAME] = os.path.join(
+            checkpoint_path, "checkpoint"
+        )
+        log.info(
+            f'FINETUNING: set model path to {potential_config["filename"]} and '
+            + f"checkpoint to {potential_config[tc.INPUT_POTENTIAL_CHECKPOINT_NAME]}"
+        )
 
     potential_file_name = args_parse.potential or potential_config.get("filename")
     if potential_file_name:
@@ -313,7 +344,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
     # no need to perform expensive data processing if mode
     if not args_parse.save_model:
-        # TODO: create a class ?
+        # TODO: create a class or named tuple?
         (
             train_data,
             test_data,
@@ -327,22 +358,58 @@ def main(argv=None, strategy=None, strategy_desc=""):
             test_batch_size=test_batch_size,
             seed=seed,
             strategy=strategy,
+            float_dtype=float_dtype_param,
         )
         has_test_set = test_data is not None
 
-    if args_parse.just_save:
-        (
-            train_data,
-            test_data,
-            element_map,
-            data_stats,
-            train_grouping_df,
-            test_grouping_df,
-        ) = load_and_prepare_datasets(
-            args_yaml, batch_size, test_batch_size=test_batch_size, seed=seed
+    if args_parse.save_model:
+        potential_file_name = potential_file_name or os.path.join(
+            output_dir, MODEL_CONFIG_YAML
         )
-        has_test_set = test_data is not None
+
+    checkpoint_name = args_parse.checkpoint_name or potential_config.get(
+        tc.INPUT_POTENTIAL_CHECKPOINT_NAME
+    )
+    # clean checkpoint_name from .index suffix if needed
+    if checkpoint_name and checkpoint_name.endswith(".index"):
+        checkpoint_name = checkpoint_name.replace(".index", "")
+
+    # do model reduction / element selection
+    is_reduce_elements = args_yaml[tc.INPUT_POTENTIAL_SECTION].get(
+        tc.INPUT_POTENTIAL_REDUCE_ELEMENTS, False
+    )
+    if is_reduce_elements and not (
+        args_parse.restart_best_test or args_parse.restart_latest
+    ):
+        new_potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
+        new_checkpoint_name = os.path.join(output_dir, "checkpoints", "checkpoint")
+
+        log.info(
+            f"Selecting elements from model {potential_file_name} with checkpoint at {checkpoint_name}"
+            + f" and saving to {new_potential_file_name} with checkpoint at {new_checkpoint_name}"
+        )
+
+        convert_model_reduce_elements(
+            element_map=element_map,
+            potential_file_name=potential_file_name,
+            checkpoint_name=checkpoint_name,
+            new_potential_file_name=new_potential_file_name,
+            new_checkpoint_name=new_checkpoint_name,
+        )
+        potential_file_name = new_potential_file_name
+        checkpoint_name = new_checkpoint_name
+
+    if potential_file_name:
+        # load from potential_file_name
+        log.info(f"Loading model config from `{potential_file_name}`")
+        pot = load_instructions(potential_file_name)
+        # enforce to save model.yaml into output_dir
+        save_instructions_dict(os.path.join(output_dir, MODEL_CONFIG_YAML), pot)
+    elif not args_parse.save_model:
         cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+        if cut_dict:
+            log.info(f"User-defined cutoff dict: {cut_dict}")
+        log.info(f"Constructing model from config")
         pot = construct_model(
             potential_config,
             element_map=element_map,
@@ -350,34 +417,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
             cutoff_dict=cut_dict,
             **data_stats,
         )
-    else:
-        if args_parse.save_model:
-            potential_file_name = potential_file_name or os.path.join(
-                output_dir, MODEL_CONFIG_YAML
-            )
-
-        if potential_file_name:
-            # load from potential_file_name
-            log.info(f"Loading model config from `{potential_file_name}`")
-            pot = load_instructions_list(potential_file_name)
-        elif not args_parse.save_model:
-            cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
-            if cut_dict:
-                log.info(f"User-defined cutoff dict: {cut_dict}")
-            log.info(f"Constructing model from config")
-            pot = construct_model(
-                potential_config,
-                element_map=element_map,
-                rcut=rcut,
-                cutoff_dict=cut_dict,
-                **data_stats,
-            )
-            potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
-            log.info(f"Saving model config to {potential_file_name}")
-            save_instructions_list(potential_file_name, pot)
-        else:  # save model, but initialized from scratch
-            # TODO: should be possible
-            raise ValueError("Cannot save just-initialized model")
+        potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
+        log.info(f"Saving model config to {potential_file_name}")
+        save_instructions_dict(potential_file_name, pot)
+    else:  # save model, but initialized from scratch
+        # TODO: should be possible
+        raise ValueError("Cannot save just-initialized model")
 
     # loss function spec from fit_config
     model_fns = construct_model_functions(fit_config)
@@ -412,15 +457,17 @@ def main(argv=None, strategy=None, strategy_desc=""):
         loss_norm_by_batch_size=fit_config.get("loss_norm_by_batch_size", False),
     )
 
+    try_load_checkpoint(
+        tp,
+        restart_best_test=args_parse.restart_best_test,
+        restart_latest=args_parse.restart_latest,
+        restart_suffix=args_parse.restart_suffix,
+        checkpoint_name=checkpoint_name,
+        expect_partial=True,  # True for save_model, False otherwise
+        verbose=True,
+    )
+
     if args_parse.save_model:
-        try_load_checkpoint(
-            tp,
-            restart_best_test=args_parse.restart_best_test,
-            restart_latest=args_parse.restart_latest,
-            restart_suffix=args_parse.restart_suffix,
-            expect_partial=True,
-            verbose=True,
-        )
         if args_parse.save_fs:
             log.info("Exporting FS-model, please wait...")
             tp.export_to_yaml("FS_model.yaml")
@@ -430,15 +477,6 @@ def main(argv=None, strategy=None, strategy_desc=""):
         # tp.save_model("saved_model_no_jit", jit_compile=False)  # first - no-jit
         tp.save_model("saved_model", jit_compile=True)
         sys.exit(0)
-
-    try_load_checkpoint(
-        tp,
-        restart_best_test=args_parse.restart_best_test,
-        restart_latest=args_parse.restart_latest,
-        restart_suffix=args_parse.restart_suffix,
-        expect_partial=False,
-        verbose=True,
-    )
 
     def save_tp_model(name):
         if has_test_set:
@@ -503,3 +541,22 @@ def main(argv=None, strategy=None, strategy_desc=""):
             tp.export_to_yaml("FS_model.yaml")
             log.info("Exporting FS-model done")
         sys.exit(0)
+
+
+def check_model(args_yaml, float_dtype):
+    rcut = args_yaml["cutoff"]
+    potential_config = args_yaml["potential"]
+
+    element_map = {s: i for i, s in enumerate(chemical_symbols[1:90])}
+    log.info(f"Checking model with {len(element_map)} elements")
+    cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
+    if cut_dict:
+        log.info(f"User-defined cutoff dict: {cut_dict}")
+    pot = construct_model(
+        potential_config, element_map=element_map, rcut=rcut, cutoff_dict=cut_dict
+    )
+    model = TPModel(pot)
+    model.build(float_dtype=float_dtype)
+    init_flat_vars = model.get_flat_trainable_variables()
+    log.info("Model is constructed")
+    log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
