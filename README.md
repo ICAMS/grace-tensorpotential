@@ -13,9 +13,19 @@ This will generate new files with the "-converted" suffix, which you can replace
 
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the PACEmaker software geared towards support for multi-component materials and graph architectures.
 
+# Documentation
+
 Please see [documentation](https://gracemaker.readthedocs.io/) for installation instructions and examples. 
 
-Also, join ACE support Zulip channel for additional resources:
+# Tutorial
+
+You can find tutorial materials [here](https://gracemaker.readthedocs.io/en/latest/gracemaker/tutorials/#tutorial-materials)
+
+Also in a video [format](https://www.youtube.com/watch?v=rndnkiu9LGE)
+
+# Support
+
+Also, you may join ACE support Zulip channel for additional resources:
 https://acesupport.zulipchat.com/join/xtwxu2grjbtg64m3vnhypi6p/
 
 # Reference
