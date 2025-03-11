@@ -22,7 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "tensorflow<2.17",
+    "tensorflow[and-cuda]<2.17",
     "tf_keras",
     "scipy",
     "matscipy",
