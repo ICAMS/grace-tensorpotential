@@ -19,7 +19,8 @@ or build a `pandas.DataFrame` on you own. It must contain the following columns:
 * `ase_atoms` - Atomic structures represented as ASE Atoms
 * `energy` - Total energy (should be force-consistent), shape: single number 
 * `energy_corrected` (optional) - Cohesive energy, i.e., total energy after subtraction of free atoms energies, shape: single number
-* `forces` - Per-atom forces, shape: (number_of_atoms, 3) 
+* `forces` - Per-atom forces, shape: (number_of_atoms, 3)
+* `stress` - six components of stress
 
 Note, that the `energy_corrected` column is not mandatory and can be constructed automatically by _gracemaker_, 
 if you provide `reference_energy`
