@@ -2,15 +2,7 @@
 
 Several GRACE models are pre-trained on large datasets:  
 
-**MPtraj**
-
-Dataset: [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375)  (1.58M structures for 146k materials)
-
-  - `GRACE-1L-MP-r6`:  (old `MP_GRACE_1L_r6_4Nov2024`) single-layer GRACE with a cutoff radius of 6 Å.  
-  - `GRACE-2L-MP-r5`: (old `MP_GRACE_2L_r5_4Nov2024`): two-layer GRACE with a cutoff radius of 5 Å.  
-  - `GRACE-2L-MP-r6`: (old `MP_GRACE_2L_r6_11Nov2024`) two-layer GRACE with a cutoff radius of 6 Å. This model is currently featured on [Matbench Discovery](https://matbench-discovery.materialsproject.org/) and demonstrates high accuracy in predicting thermal conductivity.
-
-**OMAT models** 
+**OMAT models (RECOMMENDED)** 
 
 Dataset: [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset (101M structures for 3.23M materials)
 
@@ -23,8 +15,16 @@ Dataset(s): OMAT models finetuned on [sAlex](https://huggingface.co/datasets/fai
 
   - `GRACE-1L-OAM`: (old `GRACE-1L-OAM_2Feb25`)	A single-layer local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, with fixed 6 Å cutoff.
   - `GRACE-2L-OAM`: (old `GRACE_2L_OAM_28Jan25`) A two-layer semi-local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, with fixed 6 Å cutoff.
-  
 
+
+**MPtraj**
+
+Dataset: [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375)  (1.58M structures for 146k materials)
+
+  - `GRACE-1L-MP-r6`:  (old `MP_GRACE_1L_r6_4Nov2024`) single-layer GRACE with a cutoff radius of 6 Å.  
+  - `GRACE-2L-MP-r5`: (old `MP_GRACE_2L_r5_4Nov2024`): two-layer GRACE with a cutoff radius of 5 Å.  
+  - `GRACE-2L-MP-r6`: (old `MP_GRACE_2L_r6_11Nov2024`) two-layer GRACE with a cutoff radius of 6 Å. This model is currently featured on [Matbench Discovery](https://matbench-discovery.materialsproject.org/) and demonstrates high accuracy in predicting thermal conductivity.
+ 
 By default, all foundational models are stored into `$HOME/.cache/grace`, 
 but you can overwrite it with `GRACE_CACHE` environment variable. 
 
