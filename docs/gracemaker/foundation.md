@@ -6,8 +6,8 @@ Several GRACE models are pre-trained on large datasets:
 
 Dataset: [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset (101M structures for 3.23M materials)
 
-  - `GRACE-1L-OMAT`: 	A single-layer local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, with fixed 6 Å cutoff.
-  - `GRACE_2L-OMAT`:  A two-layer semi-local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, with fixed 6 Å cutoff.
+  - `GRACE-1L-OMAT`: 	A single-layer local GRACE model, fitted on the OMat24  with fixed 6 Å cutoff.
+  - `GRACE_2L-OMAT`:  A two-layer semi-local GRACE model, fitted on the OMat24  with fixed 6 Å cutoff.
 
 **OAM models**
 
