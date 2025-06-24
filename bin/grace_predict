@@ -85,10 +85,10 @@ def main(args):
     df["prediction"] = df.progress_apply(predict, axis=1, args=(calc,))
     df["energy_predicted"] = df["prediction"].map(lambda x: x["energy"])
     df["forces_predicted"] = df["prediction"].map(lambda x: x["forces"])
-    df = df.drop(columns=["ase_atoms", "prediction"])
+    # df = df.drop(columns=["ase_atoms", "prediction"])
 
     logger.info(f"Saving dataset to {output_file}")
-    df.drop(columns=["ase_atoms"]).to_pickle(output_file, compression="gzip")
+    df.drop(columns=["ase_atoms", "prediction"]).to_pickle(output_file, compression="gzip")
 
 
 if __name__ == "__main__":
