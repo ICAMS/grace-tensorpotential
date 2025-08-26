@@ -50,13 +50,14 @@ ___
 Utility to convert, export and summarize GRACE models
 
 ```
-grace_utils [-h] -p POTENTIAL [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,reduce_elements,cast_model,export,summary} ...
+usage: grace_utils [-h] -p POTENTIAL [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary} ...
 
 CLI tool for model conversions and summarization
 
 positional arguments:
-  {update_model,reduce_elements,cast_model,export,summary}
+  {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary}
     update_model        Update model (model.yaml) and corresponding checkpoint.
+    resave_checkpoint   Resave model's (model.yaml) checkpoint (no optimizer)
     reduce_elements     Reduce elements from the model.
     cast_model          Change model's floating point precision.
     export              Export model to saved_model or FS/C++ format.
@@ -72,7 +73,6 @@ options:
                         Output suffix for converted
 
 
-
 -------------------
 Optional arguments for different commands:
 
@@ -85,7 +85,14 @@ reduce_elements:
 
   -e ELEMENTS [ELEMENTS ...], --elements ELEMENTS [ELEMENTS ...]
                         Elements to select
+--------
+resave_checkpoint:
+ None
+--------
+export:
 
+  -sf                   Save to GRACE-FS/C++ YAML model format
+  -n SAVED_MODEL_NAME, --saved-model-name SAVED_MODEL_NAME
 --------
 cast_model:
 
@@ -143,3 +150,65 @@ To print summary of the GRACE model with different level of verbosity (0 - least
 ```bash
 grace_utils -p /path/to/model.yaml summary -v 1
 ```
+
+## `grace_predict`
+Utility to predict energies, forces and stresses for given ASE Atoms structures in dataset.pkl.gzip
+
+```
+ grace_predict [-h] [-m MODEL_PATH] [-d DATASET_FILE] [-o OUTPUT]
+
+options:
+  -h, --help            show this help message and exit
+  -m MODEL_PATH, --model_path MODEL_PATH
+                        provide path to the saved_model directory
+  -d DATASET_FILE, --dataset DATASET_FILE
+                        path to the dataset.pkl.gzip containing ase_atoms structures
+  -o OUTPUT, --output OUTPUT
+                        path to the OUTPUT dataset (pkl.gzip) containing energy_predicted and forces_predicted
+```
+
+## `grace_preprocess`
+
+Helper utility to precompute neighbour lists and preprocess batches for the large dataset.
+Data is saved into TF.Dataset format.
+Usually used in distributed training and called by `compute_distributed_data.sh` script (location: tests/data_distrib/compute_distributed_data.sh)
+
+```
+grace_preprocess [-h] [-o OUTPUT] [--sharded-input] [-e ELEMENTS] [-b BATCH_SIZE] [-bu MAX_N_BUCKETS] [-c CUTOFF] [-cd CUTOFF_DICT] [--compression COMPRESSION] [--energy-col ENERGY_COL] [--forces-col FORCES_COL] [--stress-col STRESS_COL] [--is-fit-stress] [-s STRATEGY] [--task-id TASK_ID]
+                        [--total-task-num TOTAL_TASK_NUM] [--rerun] [--stage-1] [--stage-2] [--stage-3] [--stage-4] [--remove_stage1]
+                        input [input ...]
+
+Precompute dataset and save into TF.Dataset format
+
+positional arguments:
+  input                 input pkl.gz file
+
+options:
+  -h, --help            show this help message and exit
+  -o OUTPUT, --output OUTPUT
+                        output file name
+  --sharded-input       Flag to show that input files are sharded
+  -e ELEMENTS, --elements ELEMENTS
+                        List of elements. Possible presets: `ALL` (except last 23 elements), `Alexandria` or `MP`
+  -b BATCH_SIZE, --batch_size BATCH_SIZE
+  -bu MAX_N_BUCKETS, --max-n-buckets MAX_N_BUCKETS
+  -c CUTOFF, --cutoff CUTOFF
+  -cd CUTOFF_DICT, --cutoff_dict CUTOFF_DICT
+  --compression COMPRESSION
+  --energy-col ENERGY_COL
+  --forces-col FORCES_COL
+  --stress-col STRESS_COL
+  --is-fit-stress
+  -s STRATEGY, --strategy STRATEGY
+                        Strategy to batch splitting. Possible values: structures (default), atoms, neighbours
+  --task-id TASK_ID     ZERO based ID of task
+  --total-task-num TOTAL_TASK_NUM
+                        Total number of tasks
+  --rerun               Enforce to rerun process
+  --stage-1             Run stage 1, precompute samples (non-batched)
+  --stage-2             Run stage 2, compute padding bounds
+  --stage-3             Run stage 3, padding batches
+  --stage-4             Run stage 4, compute statistics
+  --remove_stage1       If True - during stage 3, remove corresponding shard from stage1 folder
+```
+

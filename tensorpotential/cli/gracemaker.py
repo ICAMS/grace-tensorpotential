@@ -9,9 +9,9 @@ import sys
 import numpy as np
 import yaml
 from ase.data import chemical_symbols
-from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
 
 from tensorpotential import constants as tc
+from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
 from tensorpotential.cli.data import load_and_prepare_datasets
 from tensorpotential.cli.prepare import (
     construct_model,
@@ -160,6 +160,14 @@ def build_parser():
         type=str,
         default=None,
         help="Explicit name of the checkpoint (omit .index suffix)",
+    )
+
+    parser.add_argument(
+        "--reset-epoch-and-step",
+        dest="reset_epoch_and_step",
+        action="store_true",
+        default=False,
+        help="Reset epoch and step counters from prev. runs",
     )
 
     return parser
@@ -399,12 +407,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
         potential_file_name = new_potential_file_name
         checkpoint_name = new_checkpoint_name
 
+    target_potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
     if potential_file_name:
         # load from potential_file_name
         log.info(f"Loading model config from `{potential_file_name}`")
         pot = load_instructions(potential_file_name)
         # enforce to save model.yaml into output_dir
-        save_instructions_dict(os.path.join(output_dir, MODEL_CONFIG_YAML), pot)
     elif not args_parse.save_model:
         cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
         if cut_dict:
@@ -417,12 +425,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
             cutoff_dict=cut_dict,
             **data_stats,
         )
-        potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
-        log.info(f"Saving model config to {potential_file_name}")
-        save_instructions_dict(potential_file_name, pot)
     else:  # save model, but initialized from scratch
         # TODO: should be possible
         raise ValueError("Cannot save just-initialized model")
+
+    log.info(f"Saving model config to {target_potential_file_name}")
+    save_instructions_dict(target_potential_file_name, pot)
 
     # loss function spec from fit_config
     model_fns = construct_model_functions(fit_config)
@@ -463,11 +471,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
         restart_latest=args_parse.restart_latest,
         restart_suffix=args_parse.restart_suffix,
         checkpoint_name=checkpoint_name,
-        expect_partial=True,  # True for save_model, False otherwise
+        expect_partial=False,  # True for save_model, False otherwise
         verbose=True,
+        assert_consumed=False,
     )
 
     if args_parse.save_model:
+        # if tp.is_lora_enabled():
+        #     log.info("LORA enabled, finalizing it.")
+        #     tp.finalize_lora_update()
+
         if args_parse.save_fs:
             log.info("Exporting FS-model, please wait...")
             tp.export_to_yaml("FS_model.yaml")
@@ -478,16 +491,40 @@ def main(argv=None, strategy=None, strategy_desc=""):
         tp.save_model("saved_model", jit_compile=True)
         sys.exit(0)
 
-    def save_tp_model(name):
+    # if potential_config.get("lora"):
+    #     tp.enable_lora_adaptation(potential_config.get("lora"))
+    #     log.info(
+    #         f"Saving model config to {target_potential_file_name} after LoRA activation"
+    #     )
+    #     save_instructions_dict(target_potential_file_name, tp.model.instructions)
+    #
+    # if potential_config.get("reduce_lora"):
+    #     tp.finalize_lora_update()
+    #     log.info(
+    #         f"Saving model config to {target_potential_file_name} after LoRA reduction"
+    #     )
+    #     save_instructions_dict(target_potential_file_name, tp.model.instructions)
+
+    if fit_config.get("trainable_variable_names"):
+        trainable_names = fit_config["trainable_variable_names"]
+        assert isinstance(trainable_names, list), "trainable_names must be a list"
+        log.info(f"Set trainable variable names: {trainable_names}")
+        tp.set_trainable_variables(trainable_names, verbose=True)
+
+    def load_checkpoint_if_test_available(
+        expect_partial=False, verbose=True, assert_consumed=False
+    ):
         if has_test_set:
             log.info("Loading best test loss model")
             tp.load_checkpoint(
-                suffix=".best_test_loss", expect_partial=False, verbose=True
+                suffix=".best_test_loss",
+                expect_partial=expect_partial,
+                verbose=verbose,
+                assert_consumed=assert_consumed,
             )
 
+    def save_tp_model(name):
         log.info(f"Saving model to `{name}`")
-        #  first save with no-jit, otherwise it will convert function to JIT forever!
-        # tp.save_model(name + "_no_jit", jit_compile=False)  # first - no-jit
         tp.save_model(name, jit_compile=True)
 
     log.info("Convert data to tensors")
@@ -497,6 +534,10 @@ def main(argv=None, strategy=None, strategy_desc=""):
     del train_data
     del test_data
     gc.collect()
+
+    if fit_config.get("reset_epoch_and_step") or args_parse.reset_epoch_and_step:
+        log.info(f"Reset epochs ({tp.epoch} -> 0) and steps ({tp.step} -> 0) counters")
+        tp.reset_epoch_and_step()
 
     #  Run training
     try:
@@ -528,18 +569,19 @@ def main(argv=None, strategy=None, strategy_desc=""):
             raise ValueError(
                 f"Unknown optimizer: {opt}. Can be 'Adam' or 'L-BFGS-B', 'BFGS'"
             )
+        load_checkpoint_if_test_available(assert_consumed=True, verbose=True)
+
+        # if tp.is_lora_enabled():
+        #     log.info("LORA enabled, finalizing it.")
+        #     tp.finalize_lora_update()
+
         save_tp_model(name="final_model")
         if args_parse.save_fs:
             log.info("Exporting FS-model, please wait...")
             tp.export_to_yaml("FS_model.yaml")
             log.info("Exporting FS-model done")
     except KeyboardInterrupt as e:
-        log.info("Keyboard interruption is captured, saving `current_model`")
-        save_tp_model(name="current_model")
-        if args_parse.save_fs:
-            log.info("Exporting FS-model, please wait...")
-            tp.export_to_yaml("FS_model.yaml")
-            log.info("Exporting FS-model done")
+        log.info("Keyboard interruption is captured")
         sys.exit(0)
 
 

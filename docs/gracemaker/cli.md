@@ -1,7 +1,7 @@
 ## Gracemaker
 
 ```
-gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [-t] [-cn CHECKPOINT_NAME] [input]
+gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [-t] [-cn CHECKPOINT_NAME] [--reset-epoch-and-step] [input]
 
 Fitting utility for (graph) atomic cluster expansion potentials.
 
@@ -29,5 +29,6 @@ options:
   -t, --template        Generate a template 'input.yaml' file by dialog
   -cn CHECKPOINT_NAME, --checkpoint-name CHECKPOINT_NAME
                         Explicit name of the checkpoint (omit .index suffix)
-
+  --reset-epoch-and-step
+                        Reset epoch and step counters from prev. runs
 ```

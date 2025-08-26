@@ -332,6 +332,7 @@ def build_loss_function(fit_config):
             {
                 "square": WeightedSSEEnergyPerAtomLoss,
                 "huber": WeightedHuberEnergyPerAtomLoss,
+                "mae": WeightedMAEEPALoss,
             },
         )
 
@@ -362,6 +363,7 @@ def build_loss_function(fit_config):
             {
                 "square": WeightedSSEStressLoss,
                 "huber": WeightedHuberStressLoss,
+                "mae": WeightedMAEStressLoss,
             },
         )
 
@@ -424,17 +426,26 @@ def construct_model_functions(fit_config):
     # Try import from default tpmodel.py, otherwise try experimental package
     # Code should work even if experimental package is removed!
     mod = importlib.import_module("tensorpotential.tpmodel")
+    compute_function_config = fit_config.get("compute_function_config", {})
     if hasattr(mod, train_function_name):
-        train_fn = getattr(mod, train_function_name)
+        train_fn = getattr(mod, train_function_name)(
+            compute_function_config=compute_function_config
+        )
     else:
         mod_exp = importlib.import_module("tensorpotential.experimental.model_computes")
-        train_fn: TrainFunction = getattr(mod_exp, train_function_name)
+        train_fn: TrainFunction = getattr(mod_exp, train_function_name)(
+            compute_function_config=compute_function_config
+        )
 
     if hasattr(mod, compute_function_name):
-        compute_fn: ComputeFunction = getattr(mod, compute_function_name)
+        compute_fn: ComputeFunction = getattr(mod, compute_function_name)(
+            compute_function_config=compute_function_config
+        )
     else:
         mod_exp = importlib.import_module("tensorpotential.experimental.model_computes")
-        compute_fn: ComputeFunction = getattr(mod_exp, compute_function_name)
+        compute_fn: ComputeFunction = getattr(mod_exp, compute_function_name)(
+            compute_function_config=compute_function_config
+        )
 
     metrics = build_metrics_function(fit_config, extra_loss_components=extra_components)
     compute_metrics = ComputeMetrics(metrics=metrics)

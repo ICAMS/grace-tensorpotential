@@ -268,8 +268,8 @@ class TPCalculator(Calculator):
         self,
         model: list[Any] | Any,
         cutoff: float = None,
-        pad_neighbors_fraction: float | None = 0.25,
-        pad_atoms_number: int | None = 10,
+        pad_neighbors_fraction: float | None = 0.05,
+        pad_atoms_number: int | None = 1,
         min_dist=None,
         extra_properties: list[str] = None,
         truncate_extras_by_natoms: bool = False,
@@ -483,7 +483,10 @@ class TPCalculator(Calculator):
                 if stress is None or atoms.get_cell().rank == 0:
                     stress = np.zeros((6,))
                 else:
-                    stress = -stress.numpy()[[0, 1, 2, 5, 4, 3]] / atoms.get_volume()
+                    stress = (
+                        -stress.numpy().reshape((6,))[[0, 1, 2, 5, 4, 3]]
+                        / atoms.get_volume()
+                    )
                 stress_list.append(stress)
             for prop in extras:
                 res = output.get(prop)
@@ -513,7 +516,7 @@ class TPCalculator(Calculator):
 
         if n_model > 1:
             results["energy_std"] = np.std(energy_list, axis=0).flatten()[0]
-            results["forces_std"] = np.std(forces_list, axis=0)
+            results["forces_std"] = np.std(forces_list, axis=0)[: len(atoms)]
             results["stress_std"] = np.std(stress_list, axis=0)
 
         self.results = results

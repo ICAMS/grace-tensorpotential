@@ -19,17 +19,6 @@ micromamba create -n grace python=3.11
 micromamba activate grace
 ```
 
-#### Anaconda
-
-**WARNING!** Anaconda is subject to special licensing conditions. Check the details [here](https://www.datacamp.com/blog/navigating-anaconda-licensing).
-
-To create a new conda or micromamba environment using conda:
-
-```bash
-conda create -n grace python=3.11
-conda activate grace
-```
-
 ---
 
 ### Installing TensorFlow and Tensorpotential
@@ -51,7 +40,21 @@ pip install .
 TensorFlow should be installed automatically. However, to manually install TensorFlow with GPU support:
 
 ```bash
-pip install tensorflow[and-cuda]==2.16.2
+pip install tensorflow[and-cuda]<2.20
+```
+#### TensorFlow & Keras Notes
+
+* **GPU Memory Leaks**: If you experience a GPU memory leak with TensorFlow, first try updating your NVIDIA drivers. 
+If the issue persists, you may need to downgrade your TensorFlow version:
+```bash
+pip install "tensorflow[and-cuda]==2.16.2" 
+```
+
+* **Keras Compatibility**: This project requires the legacy Keras API that is bundled with TensorFlow. 
+If you have a separate keras>=3.0.0 package installed, you must set the following environment variable to force TensorFlow 
+to use its built-in version: 
+```bash
+export TF_USE_LEGACY_KERAS=1
 ```
 
 * (Optional) Download foundation models (these will be stored in `$HOME/.cache/grace`):

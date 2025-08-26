@@ -9,6 +9,8 @@ import time
 
 import pandas as pd
 import logging
+
+from tensorpotential.instructions.base import ElementsReduceInstructionMixin
 from yaml import safe_load
 
 
@@ -51,7 +53,15 @@ def load_fit(folder):
     return res
 
 
-def plot_fit(fit, k="rmse/f_comp", name=None, plot_test=True, plot_train=True, ax=None):
+def plot_fit(
+    fit,
+    k="rmse/f_comp",
+    name=None,
+    plot_test=True,
+    plot_train=True,
+    ax=None,
+    x_name=None,
+):
     """
     Plot training and test metrics over epochs.
 
@@ -72,6 +82,7 @@ def plot_fit(fit, k="rmse/f_comp", name=None, plot_test=True, plot_train=True, a
 
     ax (matplotlib.axes.Axes, optional): The axes on which to plot. If not provided, the current axes will be used.
 
+    x_name: (default - None): name of x-axis, if None - index+1 will be used
     Returns:
     None
 
@@ -93,10 +104,12 @@ def plot_fit(fit, k="rmse/f_comp", name=None, plot_test=True, plot_train=True, a
         y = fit["test"][k]
         y_min = y.min()
         short_name = name
-        p = ax.plot(fit["test"].index + 1, y, label=f"{short_name}({y_min * 1e3:.1f})")
+        x = fit["test"].index + 1 if x_name is None else fit["test"][x_name]
+        p = ax.plot(x, y, label=f"{short_name}({y_min * 1e3:.1f})")
         c = p[0].get_color()
     if plot_train:
-        ax.plot(fit["train"].index + 1, fit["train"][k], c=c, ls="--")
+        x = fit["train"].index + 1 if x_name is None else fit["train"][x_name]
+        ax.plot(x, fit["train"][k], c=c, ls="--")
 
     ax.set_ylabel(k)
     ax.set_xlabel("Epoch")
@@ -142,7 +155,7 @@ def plot_many_fits(fits, k="rmse/f_comp", plot_test=True, plot_train=False):
         plot_fit(f, k=k, plot_test=plot_test, plot_train=plot_train)
 
 
-def update_fit_metrics(fit_dict, folders, wait_time_seconds=3600):
+def update_fit_metrics(fit_dict, folders, wait_time_seconds=3600, rerun=False):
     """
     Update INPLACE fit metrics for multiple folders.
 
@@ -168,7 +181,7 @@ def update_fit_metrics(fit_dict, folders, wait_time_seconds=3600):
     for f in folders:
         if f in fit_dict:
             res = fit_dict[f]
-            if res.get("finished", False):
+            if res.get("finished", False) and not rerun:
                 continue
 
             test_fname = os.path.join(f, "test_metrics.yaml")
@@ -259,6 +272,7 @@ def plot_dashboard(
     include_list=None,
     exclude_list=None,
     label="shortname",
+    x_name=None,
 ):
     """Plot dashboard metrics
 
@@ -310,13 +324,21 @@ def plot_dashboard(
         if include_list is not None and name not in include_list:
             continue
 
-        plot_fit(fd, k=metric + "/depa", ax=ax_e, plot_train=plot_train, name=fd[label])
+        plot_fit(
+            fd,
+            k=metric + "/depa",
+            ax=ax_e,
+            plot_train=plot_train,
+            name=fd[label],
+            x_name=x_name,
+        )
         plot_fit(
             fd,
             k=metric + "/f_comp",
             ax=ax_f,
             plot_train=plot_train,
             name=fd[label],
+            x_name=x_name,
         )
 
     return fig, ax_e, ax_f
@@ -681,6 +703,184 @@ CUTOFF_PRESETS = {
         "Cs": 7.5,
         "Rn": 7.5,
     },
+    "BIG_CUTOFF_2L": {
+        "H": 5.0,
+        "N": 5.0,
+        "O": 5.0,
+        "C": 5.0,
+        "F": 5.0,
+        "B": 5.0,
+        "Cl": 5.0,
+        "S": 5.0,
+        "Mn": 6.0,
+        "P": 5.0,
+        "Be": 5.0,
+        "Se": 5.0,
+        "Si": 5.0,
+        "Br": 5.0,
+        "Fe": 6.0,
+        "Co": 6.0,
+        "Cr": 6.0,
+        "Ni": 6.0,
+        "Ge": 5.0,
+        "Ga": 6.0,
+        "As": 5.0,
+        "Cu": 6.0,
+        "V": 6.0,
+        "Ti": 6.0,
+        "Zn": 6.0,
+        "Ru": 6.0,
+        "Os": 6.0,
+        "Tc": 5.0,
+        "Rh": 6.0,
+        "Mo": 6.0,
+        "Ir": 6.0,
+        "Re": 6.0,
+        "W": 6.0,
+        "Pd": 6.0,
+        "Pt": 6.0,
+        "I": 5.1,
+        "Al": 6.0,
+        "Nb": 6.0,
+        "Ta": 6.0,
+        "Sn": 6.0,
+        "Te": 5.1,
+        "He": 6.0,
+        "Au": 6.0,
+        "Ag": 6.0,
+        "Sb": 5.2,
+        "Cd": 6.0,
+        "Li": 6.0,
+        "Ne": 6.0,
+        "Bi": 6.0,
+        "Hf": 6.0,
+        "Mg": 6.0,
+        "Zr": 6.0,
+        "Sc": 6.0,
+        "Po": 6.0,
+        "Ce": 6.0,
+        "In": 6.0,
+        "Lu": 6.0,
+        "Tm": 6.0,
+        "Er": 6.0,
+        "Ho": 6.0,
+        "Y": 6.0,
+        "Dy": 6.0,
+        "Tl": 6.0,
+        "Hg": 6.0,
+        "Tb": 6.0,
+        "Pb": 6.0,
+        "Gd": 6.0,
+        "Sm": 6.0,
+        "Pm": 6.0,
+        "Nd": 6.0,
+        "Pr": 6.0,
+        "La": 6.0,
+        "Na": 6.0,
+        "Yb": 6.1,
+        "Ca": 6.1,
+        "Eu": 6.2,
+        "Ar": 6.2,
+        "Sr": 6.5,
+        "Ba": 6.6,
+        "Ra": 6.8,
+        "Kr": 6.8,
+        "K": 7.0,
+        "Xe": 7.1,
+        "Rb": 7.3,
+        "Fr": 7.5,
+        "Cs": 7.5,
+        "Rn": 7.5,
+    },
+    "CUTOFF_2L": {
+        "H": 6.0,
+        "N": 6.0,
+        "O": 6.0,
+        "C": 5.0,
+        "F": 6.0,
+        "B": 5.5,
+        "Cl": 6.0,
+        "S": 5.5,
+        "Mn": 6.0,
+        "P": 5.5,
+        "Be": 5.0,
+        "Se": 5.5,
+        "Si": 5.5,
+        "Br": 6.0,
+        "Fe": 6.0,
+        "Co": 6.0,
+        "Cr": 6.0,
+        "Ni": 6.0,
+        "Ge": 6.0,
+        "Ga": 6.0,
+        "As": 6.0,
+        "Cu": 6.0,
+        "V": 6.0,
+        "Ti": 6.0,
+        "Zn": 6.0,
+        "Ru": 6.0,
+        "Os": 6.0,
+        "Tc": 6.0,
+        "Rh": 6.0,
+        "Mo": 6.0,
+        "Ir": 6.0,
+        "Re": 6.0,
+        "W": 6.0,
+        "Pd": 6.0,
+        "Pt": 6.0,
+        "I": 6.0,
+        "Al": 6.0,
+        "Nb": 6.0,
+        "Ta": 6.0,
+        "Sn": 6.0,
+        "Te": 6.0,
+        "He": 6.0,
+        "Au": 6.0,
+        "Ag": 6.0,
+        "Sb": 5.5,
+        "Cd": 6.0,
+        "Li": 6.0,
+        "Ne": 6.0,
+        "Bi": 6.0,
+        "Hf": 6.0,
+        "Mg": 6.0,
+        "Zr": 6.0,
+        "Sc": 6.0,
+        "Po": 6.0,
+        "Ce": 6.0,
+        "In": 6.0,
+        "Lu": 6.0,
+        "Tm": 6.0,
+        "Er": 6.0,
+        "Ho": 6.0,
+        "Y": 6.0,
+        "Dy": 6.0,
+        "Tl": 6.0,
+        "Hg": 6.0,
+        "Tb": 6.0,
+        "Pb": 6.0,
+        "Gd": 6.0,
+        "Sm": 6.0,
+        "Pm": 6.0,
+        "Nd": 6.0,
+        "Pr": 6.0,
+        "La": 6.0,
+        "Na": 6.0,
+        "Yb": 6.1,
+        "Ca": 6.1,
+        "Eu": 6.2,
+        "Ar": 6.2,
+        "Sr": 6.5,
+        "Ba": 6.6,
+        "Ra": 6.8,
+        "Kr": 6.8,
+        "K": 7.0,
+        "Xe": 7.1,
+        "Rb": 7.3,
+        "Fr": 7.5,
+        "Cs": 7.5,
+        "Rn": 7.5,
+    },
 }
 
 
@@ -815,7 +1015,7 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
     logging.info(f"Loading checkpoint from {checkpoint_path}")
     tp.load_checkpoint(
         checkpoint_name=checkpoint_path,
-        expect_partial=True,
+        expect_partial=False,
         verbose=True,
         raise_errors=True,
     )
@@ -863,9 +1063,9 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
 
     logging.info(f"Patching model variables:")
     for name, ins in instructions_dict.items():
-        if hasattr(ins, "patch_init_args"):
+        if isinstance(ins, ElementsReduceInstructionMixin):
             logging.info(f" - {ins.name}")
-            ins.patch_init_args(new_element_map)
+            ins.upd_init_args_new_elements(new_element_map)
 
     return tp
 
@@ -895,7 +1095,7 @@ def convert_model_reduce_elements(
     logging.info(f"Loading checkpoint from {checkpoint_name}")
     tp.load_checkpoint(
         checkpoint_name=checkpoint_name,
-        expect_partial=True,
+        expect_partial=False,
         verbose=True,
         raise_errors=True,
     )

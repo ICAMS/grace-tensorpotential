@@ -170,11 +170,11 @@ def split_batches_into_buckets(batches_df, max_n_buckets):
     batches_df = batches_df.sort_values(
         ["n_neighbours", "n_atoms", "n_structures"], ascending=False
     ).reset_index(drop=True)
-    batches_df["d_neigh"] = batches_df["n_neighbours"].diff()
-    boundaries_df = batches_df.sort_values("d_neigh").dropna()
-    split_inds = boundaries_df.iloc[: max_n_buckets - 1].index.sort_values()
-    batches_df = batches_df.drop(columns=["d_neigh"])
-    buckets_list = np.array_split(batches_df, split_inds)
+    # batches_df["d_neigh"] = batches_df["n_neighbours"].diff()
+    # boundaries_df = batches_df.sort_values("d_neigh").dropna()
+    # split_inds = boundaries_df.iloc[: max_n_buckets - 1].index.sort_values()
+    # batches_df = batches_df.drop(columns=["d_neigh"])
+    # buckets_list = np.array_split(batches_df, split_inds)
 
     buckets_list = np.array_split(batches_df, max_n_buckets)  # naive static splitting
     return buckets_list
@@ -414,16 +414,14 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             map_atoms_to_structure
         ).astype(np.int32)
 
-        if self.is_fit_stress:
-            # map bonds to structure
-            map_bonds_to_structure = []
-            for struct_ind, data_dict in enumerate(pre_batch_list):
-                map_bonds_to_structure += [struct_ind] * get_number_of_real_neigh(
-                    data_dict
-                )
-            res_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.array(
-                map_bonds_to_structure
-            ).astype(np.int32)
+        # if self.is_fit_stress:
+        # map bonds to structure
+        map_bonds_to_structure = []
+        for struct_ind, data_dict in enumerate(pre_batch_list):
+            map_bonds_to_structure += [struct_ind] * get_number_of_real_neigh(data_dict)
+        res_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.array(
+            map_bonds_to_structure
+        ).astype(np.int32)
 
         # nat_per_specie = defaultdict(int)
         # total_nei_per_specie = defaultdict(int)
@@ -459,8 +457,8 @@ class GeometricalDataBuilder(AbstractDataBuilder):
         batch_dtypes_dict[constants.N_STRUCTURES_BATCH_TOTAL] = np.int32
         batch_dtypes_dict[constants.ATOMS_TO_STRUCTURE_MAP] = np.int32
 
-        if self.is_fit_stress:
-            batch_dtypes_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.int32
+        # if self.is_fit_stress:
+        batch_dtypes_dict[constants.BONDS_TO_STRUCTURE_MAP] = np.int32
 
         return batch_dtypes_dict
 
@@ -526,15 +524,15 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                 a, ((0, pad_nneigh), (0, 0)), mode="constant", constant_values=52.0
             )
 
-            if self.is_fit_stress:
-                key = constants.BONDS_TO_STRUCTURE_MAP
-                a = batch[key]
-                batch[key] = np.pad(
-                    a,
-                    (0, pad_nneigh),
-                    mode="constant",
-                    constant_values=max_structs - 1,  # fake structure
-                )
+            # if self.is_fit_stress:
+            key = constants.BONDS_TO_STRUCTURE_MAP
+            a = batch[key]
+            batch[key] = np.pad(
+                a,
+                (0, pad_nneigh),
+                mode="constant",
+                constant_values=max_structs - 1,  # fake structure
+            )
 
 
 class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
@@ -645,7 +643,7 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
 
             if np.all(ase_atoms.pbc):
                 if self.stress_col in row.index:
-                    stress = row[self.stress_col]
+                    stress = np.array(row[self.stress_col])
                 else:
                     raise ValueError(
                         "Fit stress is requested, but no stress was found."
@@ -1023,13 +1021,14 @@ def parallel_process_dataframe(
 
     data_dict_list = []
     # Use ProcessPoolExecutor to parallelize row processing
-    with ProcessPoolExecutor(
-        max_workers=max_workers,
-        initializer=start_thread_to_terminate_when_parent_process_dies,
-        initargs=(os.getpid(),),
-    ) as executor, tqdm(
-        total=len(df_or_ase_atoms_list), mininterval=MININTERVAL
-    ) as pbar:
+    with (
+        ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=start_thread_to_terminate_when_parent_process_dies,
+            initargs=(os.getpid(),),
+        ) as executor,
+        tqdm(total=len(df_or_ase_atoms_list), mininterval=MININTERVAL) as pbar,
+    ):
         for chunk in chunks:
             # Submit tasks for each row in df_or_ase_atoms_list
             futures = [

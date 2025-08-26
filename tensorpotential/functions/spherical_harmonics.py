@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import tensorflow as tf
-
-from numpy import pi as np_pi
+import numpy as np
 
 
 class SphericalHarmonics(tf.Module):
@@ -41,7 +40,7 @@ class SphericalHarmonics(tf.Module):
     def build(self, float_dtype):
         self.float_dtype = float_dtype
         self.int_dtype = tf.int32
-        self.PI = tf.constant(np_pi, dtype=self.float_dtype, name="pi")
+        self.PI = tf.constant(np.pi, dtype=self.float_dtype, name="pi")
         self.alm, self.blm = self.pre_compute()
         self.factor4pi = tf.sqrt(4 * self.PI)
         self.l_tile = tf.cast(
@@ -90,14 +89,14 @@ class SphericalHarmonics(tf.Module):
     def legendre(self, x):
         x = tf.convert_to_tensor(x, dtype=self.float_dtype)
 
-        y00 = 1.0 * tf.sqrt(1.0 / (4.0 * self.PI))
-        plm = [x * 0 + y00]
+        y00 = tf.math.rsqrt(4.0 * self.PI)
+        plm = [tf.zeros_like(x) + y00]
         if self.lmax > 0:
             sq3o4pi = tf.sqrt(3.0 / (4.0 * self.PI))
-            sq3o8pi = tf.sqrt(3.0 / (8.0 * self.PI))
+            sq3o8pi = -tf.sqrt(3.0 / (8.0 * self.PI))
 
             plm += [sq3o4pi * x]  # (1,0)
-            plm += [x * 0 - sq3o8pi]  # (1,1)
+            plm += [tf.zeros_like(x) + sq3o8pi]
 
             for l in range(2, self.lmax + 1):
                 for m in range(0, l + 1):
@@ -249,26 +248,31 @@ class SphericalHarmonics(tf.Module):
         ylm_r, ylm_i = self._compute_sph_harm(rhat)
 
         zlm = []
+        sqrt2 = tf.math.sqrt(tf.constant(2.0, dtype=self.float_dtype))
         for l in range(0, self.lmax + 1):
-            for m in range(-l, l + 1):
-                ph = tf.where(
-                    tf.equal(tf.abs(m) % 2, 0),
-                    tf.constant(1, dtype=self.float_dtype),
-                    tf.constant(-1, dtype=self.float_dtype),
-                )
-
-                sqrt2 = tf.math.sqrt(tf.constant(2.0, dtype=self.float_dtype))
-                if m < 0:
-                    ind = self.lmsh(l, m)
-                    zlm += [sqrt2 * ylm_i[ind] * ph]
-                elif m > 0:
-                    ind = self.lmsh(l, m)
-                    zlm += [sqrt2 * ylm_r[ind] * ph]
-                elif m == 0:
-                    ind = self.lmsh(l, m)
-                    zlm += [ylm_r[ind]]
-                else:
-                    pass
+            for m in range(-l, 0):
+                ph = 1.0 - 2.0 * tf.cast(m % 2, rhat.dtype)
+                ind = self.lmsh(l, m)
+                zlm += [sqrt2 * ylm_i[ind] * ph]
+            ind = self.lmsh(l, 0)
+            zlm += [ylm_r[ind]]
+            for m in range(1, l + 1):
+                ph = 1.0 - 2.0 * tf.cast(m % 2, rhat.dtype)
+                ind = self.lmsh(l, m)
+                zlm += [sqrt2 * ylm_r[ind] * ph]
+            # for m in range(-l, l + 1):
+            #     ph = 1.0 - 2.0 * tf.cast(m % 2, rhat.dtype)
+            #     if m < 0:
+            #         ind = self.lmsh(l, m)
+            #         zlm += [sqrt2 * ylm_i[ind] * ph]
+            #     elif m > 0:
+            #         ind = self.lmsh(l, m)
+            #         zlm += [sqrt2 * ylm_r[ind] * ph]
+            #     elif m == 0:
+            #         ind = self.lmsh(l, m)
+            #         zlm += [ylm_r[ind]]
+            #     else:
+            #         pass
         zlm = tf.transpose(tf.stack(zlm), [1, 0])
 
         if not self.norm:

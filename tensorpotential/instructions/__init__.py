@@ -25,6 +25,8 @@ from tensorpotential.instructions.compute import (
     ZBLPotential,
     CropProductFunction,
     BondSpecificRadialBasisFunction,
+    MLPRadialFunction_v2,
+    InvariantLayerRMSNorm,
 )
 
 from tensorpotential.instructions.output import (
@@ -35,6 +37,7 @@ from tensorpotential.instructions.output import (
     ConstantScaleShiftTarget,
     LinMLPOut2ScalarTarget,
     LinearOut2EquivarTarget,
+    TrainableShiftTarget,
 )
 
 __all__ = [
@@ -68,20 +71,21 @@ __all__ = [
     "ZBLPotential",
     "LinearOut2EquivarTarget",
     "BondSpecificRadialBasisFunction",
+    "MLPRadialFunction_v2",
+    "TrainableShiftTarget",
+    "InvariantLayerRMSNorm",
 ]
 
 try:
     from tensorpotential.experimental.instructions.aux_compute import (
-        InvariantLayerRMSNorm,
-        InvariantGate,
+        InvariantLayerDTNorm,
         EquivariantRMSNorm,
     )
 
     __all__.extend(
         [
-            "InvariantLayerRMSNorm",
-            "InvariantGate",
             "EquivariantRMSNorm",
+            "InvariantLayerDTNorm",
         ]
     )
 except ImportError:

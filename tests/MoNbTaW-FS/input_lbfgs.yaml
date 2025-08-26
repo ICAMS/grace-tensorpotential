@@ -35,6 +35,7 @@ fit:
   #  learning_rate_reduction: { patience: 5, factor: 0.8, min: 1.0e-3, stop_at_min: True, resume_lr: True }
   optimizer: L-BFGS-B
   maxiter: 2
+  reset_epoch_and_step: True
 
   batch_size: 10
   test_batch_size: 20

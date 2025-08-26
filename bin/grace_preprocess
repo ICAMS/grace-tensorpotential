@@ -12,6 +12,7 @@ from ase.data import chemical_symbols
 
 EQUI_STRUCTURE_STRATEGY = "structures"
 EQUI_ATOMS_STRATEGY = "atoms"
+EQUI_NEIGH_STRATEGY = "neighbours"
 
 ALEXANDRIA_ELEMENTS = [
     "Ac",
@@ -104,6 +105,124 @@ ALEXANDRIA_ELEMENTS = [
     "Zn",
     "Zr",
 ]
+
+FULL_ELEMENTS = [
+    "Ac",
+    "Ag",
+    "Al",
+    "Ar",
+    "As",
+    "At",
+    "Au",
+    "B",
+    "Ba",
+    "Be",
+    "Bi",
+    "Br",
+    "C",
+    "Ca",
+    "Cd",
+    "Ce",
+    "Cl",
+    "Co",
+    "Cr",
+    "Cs",
+    "Cu",
+    "Dy",
+    "Er",
+    "Eu",
+    "F",
+    "Fe",
+    "Fr",
+    "Ga",
+    "Gd",
+    "Ge",
+    "H",
+    "He",
+    "Hf",
+    "Hg",
+    "Ho",
+    "I",
+    "In",
+    "Ir",
+    "K",
+    "Kr",
+    "La",
+    "Li",
+    "Lu",
+    "Mg",
+    "Mn",
+    "Mo",
+    "N",
+    "Na",
+    "Nb",
+    "Nd",
+    "Ne",
+    "Ni",
+    "Np",
+    "O",
+    "Os",
+    "P",
+    "Pa",
+    "Pb",
+    "Pd",
+    "Pm",
+    "Po",
+    "Pr",
+    "Pt",
+    "Pu",
+    "Ra",
+    "Rb",
+    "Re",
+    "Rh",
+    "Rn",
+    "Ru",
+    "S",
+    "Sb",
+    "Sc",
+    "Se",
+    "Si",
+    "Sm",
+    "Sn",
+    "Sr",
+    "Ta",
+    "Tb",
+    "Tc",
+    "Te",
+    "Th",
+    "Ti",
+    "Tl",
+    "Tm",
+    "U",
+    "V",
+    "W",
+    "Xe",
+    "Y",
+    "Yb",
+    "Zn",
+    "Zr",
+]  #  OMAT + UEA elements.
+
+OMOL_N_ELEMENTS = [
+    "H",
+    "Li",
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "Na",
+    "Mg",
+    "Si",
+    "P",
+    "S",
+    "Cl",
+    "K",
+    "Ca",
+    "Br",
+    "I",
+]
+
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -245,7 +364,11 @@ def get_batch_list(iterator, batch_size, strategy=EQUI_STRUCTURE_STRATEGY, **kwa
     if strategy == EQUI_STRUCTURE_STRATEGY:
         return get_equi_structures_batch_list(iterator, batch_size, **kwargs)
     elif strategy == EQUI_ATOMS_STRATEGY:
-        return get_equi_batch_list(iterator, batch_size, key="n_atoms", **kwargs)
+        return get_equi_batch_list(
+            iterator, batch_size, key="batch_tot_nat_real", **kwargs
+        )
+    elif strategy == EQUI_NEIGH_STRATEGY:
+        return get_equi_batch_list(iterator, batch_size, key="n_neigh_real", **kwargs)
     else:
         # TODO: balance batch size by number of atoms/neighbours
         raise NotImplementedError(f"Strategy {strategy} not implemented")
@@ -266,17 +389,17 @@ def get_equi_structures_batch_list(iterator, batch_size, **kwargs):
     return batch_list
 
 
-def get_equi_batch_list(iterator, batch_size, key="n_atoms", **kwargs):
+def get_equi_batch_list(iterator, batch_size, key="batch_tot_nat_real", **kwargs):
     """return batch_list from the iterator stream,
     trying to have AT LEAST "batch_size" number of 'key' in a batch
     """
     batch_list = []
     try:
-        num_atoms = 0
-        while num_atoms < batch_size:
+        n_entities = 0
+        while n_entities < batch_size:
             b = next(iterator)
             batch_list.append(b)
-            num_atoms += b["batch_tot_nat_real"]
+            n_entities += b[key]
     except StopIteration as e:
         if not batch_list:
             raise e
@@ -334,7 +457,9 @@ def build_parser():
 
     parser.add_argument("-bu", "--max-n-buckets", type=int, default=5)
 
-    parser.add_argument("-c", "--cutoff", type=float, default=5)
+    parser.add_argument("-c", "--cutoff", type=float, default=6)
+
+    parser.add_argument("-cd", "--cutoff_dict", type=str, default=None)
 
     parser.add_argument("--compression", type=str, default="GZIP")
 
@@ -347,7 +472,7 @@ def build_parser():
         "--strategy",
         type=str,
         default=EQUI_STRUCTURE_STRATEGY,
-        help=f"Strategy to batch splitting. Possible values: {EQUI_STRUCTURE_STRATEGY} (default), {EQUI_ATOMS_STRATEGY}",
+        help=f"Strategy to batch splitting. Possible values: {EQUI_STRUCTURE_STRATEGY} (default), {EQUI_ATOMS_STRATEGY}, {EQUI_NEIGH_STRATEGY}",
     )
 
     parser.add_argument("--task-id", type=int, default=0, help="ZERO based ID of task")
@@ -386,6 +511,14 @@ def build_parser():
         action="store_true",
         default=False,
         help="Run stage 4, compute statistics",
+    )
+
+    parser.add_argument(
+        "--remove_stage1",
+        action="store_true",
+        default=False,
+        dest="remove_stage1",
+        help="If True - during stage 3, remove corresponding shard from stage1 folder",
     )
 
     return parser
@@ -533,15 +666,23 @@ def load_params(output_path):
                 params = json.load(f)
                 elements_map = params["elements_map"]
                 cutoff = params["cutoff"]
-            return elements_map, cutoff
+                cutoff_dict = params.get("cutoff_dict")
+            return elements_map, cutoff, cutoff_dict
         except Exception as e:
             logging.error(f"Can't parse {fname}: {e}")
 
 
-def save_params(output_path, elements_map, cutoff):
+def save_params(output_path, elements_map, cutoff, cutoff_dict=None):
     os.makedirs(output_path, exist_ok=True)
     with open(os.path.join(output_path, "params.json"), "w") as f:
-        json.dump({"elements_map": elements_map, "cutoff": cutoff}, f)
+        json.dump(
+            {
+                "elements_map": elements_map,
+                "cutoff": cutoff,
+                "cutoff_dict": cutoff_dict,
+            },
+            f,
+        )
 
 
 def get_databuilders(
@@ -581,6 +722,7 @@ def main(args):
     sharded_input = args_parse.sharded_input
     elements = args_parse.elements
     cutoff = args_parse.cutoff
+    cutoff_dict = args_parse.cutoff_dict
     batch_size = args_parse.batch_size
     strategy = args_parse.strategy
     max_n_buckets = args_parse.max_n_buckets
@@ -616,6 +758,7 @@ def main(args):
 
     logging.info(f"Output path: {output_path}")
     logging.info(f"Cutoff: {cutoff}")
+    logging.info(f"Cutoff dict: {cutoff_dict}")
     logging.info(f"Batch size: {batch_size}")
     logging.info(f"Buckets: {max_n_buckets}")
     logging.info(f"Compression: {compression}")
@@ -638,10 +781,12 @@ def main(args):
     elements_map = None
     if params is not None:
         logging.info(f"Params loaded: {params}")
-        elements_map, cutoff = params
+        elements_map, cutoff, cutoff_dict = params
 
         # TODO: provide parameters
-        databuilders_list = get_databuilders(elements_map, cutoff, args_parse)
+        databuilders_list = get_databuilders(
+            elements_map, cutoff, args_parse, cutoff_dict=cutoff_dict
+        )
         batch_dtypes = get_batch_dtypes(databuilders_list)
         batch_dtypes["n_neigh"] = tf.int32
 
@@ -681,7 +826,9 @@ def main(args):
                     logging.info(f"Loaded elements: {elements}")
             else:
                 if elements == "ALL":
-                    elements = chemical_symbols[1:-23]
+                    elements = FULL_ELEMENTS
+                elif elements == "OMOL_N":
+                    elements = OMOL_N_ELEMENTS
                 elif elements in ["MP", "Alexandria"]:
                     elements = ALEXANDRIA_ELEMENTS
                 else:
@@ -690,9 +837,11 @@ def main(args):
 
             elements_map = {e: i for i, e in enumerate(elements)}
             logging.info(f"Elements map: {elements_map}")
-            save_params(output_path, elements_map, cutoff)
+            save_params(output_path, elements_map, cutoff, cutoff_dict)
 
-            databuilders_list = get_databuilders(elements_map, cutoff, args_parse)
+            databuilders_list = get_databuilders(
+                elements_map, cutoff, args_parse, cutoff_dict=cutoff_dict
+            )
 
             logging.info(f"Stage 1: Computing neigh-list dataset")
 
@@ -799,11 +948,17 @@ def main(args):
             shutil.move(stage3_path_temp, stage3_path)
             logging.info(f"Saved to {stage3_path}")
 
+            if args_parse.remove_stage1:
+                logging.info(
+                    f"Shard {stage3_path} complete, removing corresponding {stage1_path}"
+                )
+                shutil.rmtree(stage1_path)
+
         logging.info("Done")
     elif stage_4:
         if task_index == 0:
             stats_fname = os.path.join(output_path, "stage3", "stats.json")
-            elements_map, cutoff = load_params(output_path)
+            elements_map, cutoff, cutoff_dict = load_params(output_path)
 
             datasets_fnames = glob.glob(
                 os.path.join(output_path, "stage3", "shard_*-of-*")
@@ -851,6 +1006,7 @@ def main(args):
                 "total_num_structures": tot_nstruct,
                 "total_num_of_batches": b_count,
                 "cutoff": cutoff,
+                "cutoff_dict": cutoff_dict,
                 "batch_size": batch_size,
             }
             logging.info(f"Aggregated stats: {stats}")

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from typing import List
-
 from tensorpotential.instructions.base import *
 from tensorpotential.instructions.compute import *
 from tensorpotential.instructions.output import (
     CreateOutputTarget,
     LinearOut2Target,
-    LinearOut2EquivarTarget,
     FSOut2ScalarTarget,
-    MLPOut2ScalarTarget,
     ConstantScaleShiftTarget,
     LinMLPOut2ScalarTarget,
 )
@@ -257,40 +253,6 @@ def FS(
         )
         FSOut2ScalarTarget(origin=[I], target=out_instr, fs_parameters=fs_parameters)
 
-        # if not isinstance(mlp_embedding, dict):
-        #     mlp_embedding = {}
-        # n_out = mlp_embedding.get("ndens", 8)
-        # hidden_layers = mlp_embedding.get("hidden_layers", [32])
-        #
-        # I_l = FunctionReduce(
-        #     instructions=instructions,
-        #     name="E",
-        #     ls_max=0,
-        #     n_in=n_rad_max,
-        #     n_out=1,
-        #     is_central_atom_type_dependent=True,
-        #     number_of_atom_types=num_elements,
-        #     allowed_l_p=Parity.SCALAR,
-        #     init_vars=func_init,
-        # )
-        # I_nl = FunctionReduce(
-        #     instructions=instructions,
-        #     name="rho",
-        #     ls_max=0,
-        #     n_in=n_rad_max,
-        #     n_out=n_out,
-        #     is_central_atom_type_dependent=True,
-        #     number_of_atom_types=num_elements,
-        #     allowed_l_p=Parity.SCALAR,
-        #     init_vars=func_init,
-        # )
-        # LinearOut2Target(origin=[I_l], target=out_instr)
-        # MLPOut2ScalarTarget(
-        #     origin=[I_nl],
-        #     target=out_instr,
-        #     hidden_layers=hidden_layers,
-        #     normalize=True,
-        # )
         ConstantScaleShiftTarget(
             target=out_instr,
             scale=constant_out_scale,

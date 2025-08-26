@@ -20,6 +20,11 @@ from tensorpotential.data.databuilder import (
     construct_batches,
     DEFAULT_STRESS_UNITS,
 )
+from tensorpotential.data.dataset_plotter import (
+    DatasetHistPlotter,
+    DEFAULT_PLOT_TARGETS,
+    DEFAULT_UNIT_TRANSFORM,
+)
 from tensorpotential.data.process_df import (
     compute_corrected_energy,
     compute_compositions,
@@ -251,13 +256,16 @@ class FutureDistributedDataset:
             )
             if signatures:
                 dataset = dataset.map(filter_batch_by_signature)
-            dataset = dataset.prefetch(16)
             if n_take:
                 dataset = dataset.take(n_take)
             if n_skip:
                 dataset = dataset.skip(n_skip)
             if n_take2:
                 dataset = dataset.take(n_take2)
+            # Add repeat BEFORE prefetch for training datasets
+            # For training, you almost always want to repeat indefinitely, then limit with steps_per_epoch
+            dataset = dataset.repeat()  # Repeat indefinitely for training
+            dataset = dataset.prefetch(16)
             return dataset
 
         test_ds = None
@@ -823,6 +831,21 @@ def load_and_prepare_datasets(
         if test_df is not None:
             test_df["group__low"] = test_df[E_CHULL_DIST_PER_ATOM] <= 1.0
             test_grouping_df = get_group_mapping_df(test_df)
+
+    # plotting histograms in ./seed/{current_seed}/plots
+    try:
+        plot_out_dir = f"{get_output_dir(seed)}/plots"
+        DatasetHistPlotter.plot(
+            {"train": train_df, "test": test_df},
+            plot_out_dir,
+            plot_targets=DEFAULT_PLOT_TARGETS,
+            units_transform=DEFAULT_UNIT_TRANSFORM,
+        )
+        log.info(
+            f"Train/test data distributions are plotted and saved to {plot_out_dir}"
+        )
+    except Exception as e:
+        log.warning(f"Failed to make histograms plot for datasets ({e}), skipping")
 
     return (
         train_batches,

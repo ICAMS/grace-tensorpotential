@@ -1,4 +1,3 @@
-
 # Input file `input.yaml`
 
 Example of `input.yaml` can be found in `examples/grace` folder
@@ -48,22 +47,30 @@ potential:
   ## Option 4. Fine-tune foundation model
   # finetune_foundation_model: GRACE-1L-OAM
   # reduce_elements: True #  default - False, reduce elements to those provided in dataset
-
+  
+  ## Option 4a. LORA (experimental, not supported)
+  # lora: {all: {rank: 16, alpha: 1}, Z: {rank: 8, alpha: 1}, I: {rank: 4, alpha: 1, keep_dims: 1} }
+  ## reduce_lora: True # reduce LORA model
+  
   ## Other parameters: 
   # shift: False # True/False - automatic shift by energy
   # scale: False # False/True or float  - automatic scale data by force RMSE
   # avg_n_neigh: 40 # Average number of neighbours. By default - automatically determined
-  #  float_dtype: float64 # float64, float32
-  #  custom ZBL core repulsion for model:  kwargs: {zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }}
+  # float_dtype: float64 # float64, float32
+  # custom ZBL core repulsion for model:  kwargs: {zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }}
 
 ######################
 ##       FIT        ##
 ######################
 fit:
+  # Explicit specification of the train and compute functions for the model with optional parameters
+  #compute_function: ComputeStructureEnergyAndForcesAndVirial
+  #train_function: ComputeBatchEnergyAndForces
+  #compute_function_config: {}
   loss: {
-    energy: { type: huber, weight: 1,  delta: 0.1  }, # or { type: square, weight: 1} 
-    forces: { type: huber, weight: 5., delta: 0.01 }, 
-  # stress: { type: huber, weight: 0.1},   #
+    energy: { type: huber, weight: 16,  delta: 0.01}, # or { type: square, weight: 1} 
+    forces: { type: huber, weight: 32., delta: 0.01}, 
+  # stress: { type: huber, weight: 32., delta: 0.01},   #
 
   ## Change weights for energy/forces/stress loss components
   ## and learning_rate after "after_iter" epochs
@@ -71,20 +78,26 @@ fit:
   #              energy: { weight: 5.0 }, 
   #              forces: { weight: 2.0 }, 
   #              stress: {weight: 0.001},
-  #               learning_rate: 0.001}
-    
-   # l2_reg: 1.0e-10  ## L2-regularization not used
+  #               learning_rate: 0.001}    
   }
 
-  maxiter: 500 # Max number of iterations
-
-  ## Optimization with Adam: good for large number of parameters, first-order method
+  
+  maxiter: 500 # Max number of optimization epochs
   optimizer: Adam
-  opt_params: { learning_rate: 0.01, amsgrad: True, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipvalue: 1.0}
-  # reset_optimizer: True  # reset optimizer, after being loaded from checkpoint
-  # for learning-rate reduction
-  learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, } 
-
+    # Optimization with Adam: good for large number of parameters, first-order method
+  opt_params: { learning_rate: 0.01, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipnorm: 1.0}
+  # reset_optimizer: True  # reset optimizer state, after being loaded from checkpoint
+  # reset_epoch_and_step: False # reset epoch and step internal counters (stored in checkpoint)
+  scheduler: cosine_decay # scheduler for learning-rate reduction during training 
+    # available options are: reduce_on_plateau, cosine_decay, linear_decay, exponential_decay
+  scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimal_learning_rate": 0.05}
+    # If :warmup_epochs: > 0, begin optimization with :cold_learning_rate: and reach :opt_params::learning_rate:
+    # within :warmup_epochs: (can be < 1). Else, begin optimization with :opt_params::learning_rate: and decay down to
+    # minimum_learning_rate within :maxiter: epochs
+  # legacy format for reduce_on_plateau lr scheduler 
+  # learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, }
+  
+  
   ## Optimization with BFGS: good for SMALL number of parameters (up to 10k), "second"-order method.
   ## scipy optimizer on CPU will be used
   #  optimizer: L-BFGS-B # 'L-BFGS-B' for memory limited or 'BFGS' for full method
@@ -114,6 +127,8 @@ fit:
   # train_shuffle: True # shuffle train batches on every epoch
   # strategy: mirrored # or -m flag # for parallel multi-GPU parameterization
 
+  # trainable_variable_names: ["rho/reducing_", "Z/ChemicalEmbedding"] ### specify trainable variables name pattern
+  
   ## technical parameters for normalization
   #  loss_norm_by_batch_size: False # normalization of total loss by global batch size (for backward compat)
   #  normalize_weights: True ## norm per-sample weights to sum-up to one
@@ -121,7 +136,7 @@ fit:
 ```
 
 This is complete list of parameters. For the most of practical purposes
-it is sufficient to generate input file with `gracemaker -t` utility.   
+it is sufficient to generate input file with `gracemaker -t` utility.
 
 Detailed weighting option:
 

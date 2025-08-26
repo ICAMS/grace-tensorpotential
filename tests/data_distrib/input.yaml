@@ -3,7 +3,7 @@ cutoff: 6
 
 data:
   distributed: True
-  distribute_values: True
+#  distribute_values: True
   path: "tf_dataset/stage3"
   train_size: 4 #  num of batches (int)
   #  test_path: "test_dataset/stage3"
@@ -31,7 +31,10 @@ fit:
   opt_params: { "learning_rate": 0.01, "amsgrad": True }
   learning_rate_reduction: { patience: 5, factor: 0.8, min: 1.0e-3, stop_at_min: True, resume_lr: True }
   #  optimizer: L-BFGS-B
-  maxiter: 20
+  maxiter: 2
+
+  eval_init_stats: True
+#  trainable_variable_names: ["Z/ChemicalEmbedding"] ### specify trainable variables name pattern
 
   #  batch_size: 10
   #  test_batch_size: 20

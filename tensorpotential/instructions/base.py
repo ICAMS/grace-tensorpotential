@@ -3,19 +3,15 @@ from __future__ import annotations
 import inspect
 import logging
 import warnings
+from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Iterable, Literal, Set, Callable, List, Optional, Tuple
+from typing import Iterable, Literal, Set, Callable, List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import yaml
-
-from abc import ABC, abstractmethod
-
-from collections import Counter
 from tensorflow.python.trackable.data_structures import ListWrapper
-
 
 # arg-type for TPInstruction.summary()
 summary_verbose_type = Literal[0, 1, 2]
@@ -66,11 +62,19 @@ def str_to_class(class_name):
         return None
     module = ".".join(class_name.split(".")[:-1])
     name = class_name.split(".")[-1]
+    context = {}
     if module:
-        exec("from {module} import {name} as c;c".format(module=module, name=name))
+        exec(
+            "from {module} import {name} as EXTRACTED_C; EXTRACTED_C".format(
+                module=module, name=name
+            ),
+            context,  # Pass the context dictionary explicitly
+        )
     else:
         raise ValueError("Couldn't deserialize class `{}`".format(class_name))
-    return locals()["c"]
+    if "EXTRACTED_C" not in context:
+        raise ValueError("Couldn't deserialize class `{}`".format(class_name))
+    return context["EXTRACTED_C"]
 
 
 def recursive_walk_and_modify(obj, callback):
@@ -322,6 +326,42 @@ class TPInstruction(tf.Module, ABC):
         return InstructionPrinter.repr_instruction(self, verbose=1)
 
 
+class LORAInstructionMixin(ABC):
+
+    def __init__(self, lora_config):
+        self.lora = False
+        self.lora_config = None
+
+        if lora_config:
+            self.lora = True
+            self.lora_config = lora_config
+
+    @abstractmethod
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        self.lora_config = lora_config
+        self.lora = True
+        self._init_args["lora_config"] = lora_config
+
+    @abstractmethod
+    def finalize_lora_update(self):
+        # common part
+        self.lora = False
+        self.lora_config = None
+        if "lora_config" in self._init_args:
+            del self._init_args["lora_config"]
+
+
+class ElementsReduceInstructionMixin(ABC):
+
+    @abstractmethod
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def upd_init_args_new_elements(self, new_element_map):
+        raise NotImplementedError()
+
+
 class TPEquivariantInstruction(TPInstruction):
     _INSTRUCTION_TYPE = "TPEquivariantInstruction"
 
@@ -336,7 +376,6 @@ class TPEquivariantInstruction(TPInstruction):
         self.lmax = lmax
         self.coupling_meta_data = coupling_meta_data
         self.coupling_origin = coupling_origin
-        self._instruction_type = "TPEquivariantInstruction"
 
     @abstractmethod
     def build(self, float_dtype):
@@ -567,7 +606,9 @@ class InstructionPrinter:
         return str(list(obj))
 
     @staticmethod
-    def repr_var_info(instruction: TPInstruction, shown_vars: Set[str] = None) -> str:
+    def repr_var_info(
+        instruction: TPInstruction, vars_counter: Dict[str, int] = None
+    ) -> str:
         hash_var_item: Callable[[str, List[int]], str] = lambda k, v: f"{k}={v}"
         substr = ""
 
@@ -585,7 +626,7 @@ class InstructionPrinter:
         for i, (k, v) in enumerate(instruction.get_variables_info().items()):
             if k == "instruction" or v is None:
                 continue
-            if shown_vars is not None and hash_var_item(k, v) in shown_vars:
+            if vars_counter is not None and hash_var_item(k, v) in vars_counter:
                 continue
             n_new_vars += 1
             substr += f"\n\t{i:2d} {k.ljust(col_width, '.')}"
@@ -594,8 +635,8 @@ class InstructionPrinter:
             substr += f"{str(n_params)}"
             n_params_total += n_params
 
-            if shown_vars is not None:
-                shown_vars.add(hash_var_item(k, v))
+            if vars_counter is not None:
+                vars_counter[hash_var_item(k, v)] = n_params
 
         substr += separation_line
         substr += f"\n\tTrainable Params: {n_params_total}"

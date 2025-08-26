@@ -108,6 +108,7 @@ def test_construct_batches_df_parallel() -> None:
     assert b0["n_struct_total"] == 11
     assert b1["n_struct_total"] == 11
     #
+    # assert b0["batch_tot_nat"] == 185
     assert b0["batch_tot_nat"] == 199
     assert b1["batch_tot_nat"] == 199
 

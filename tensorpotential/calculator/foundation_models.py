@@ -110,6 +110,7 @@ MODELS_METADATA = {
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/XeJQgikYkympwGo",
     },
+    #######################
     "GRACE-2L-OMAT": {
         MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/vbTYV9Pt4ppKSZ8",
         # "dirname": "GRACE-2L-OMAT-3Feb25",
@@ -117,15 +118,101 @@ MODELS_METADATA = {
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/rLgF08mdhZJj3OH",
     },
+    ########### 1L-medium  ############
+    "GRACE-1L-OMAT-medium-base": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/SoWS9KoQZ5DQ7pD",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-base.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/MfEiW7GgKiazFem",
+    },
+    "GRACE-1L-OMAT-medium-ft-E": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/g7pqjLAM3X5gQ35",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-ft-E.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/2ZxJNgxQmkre3J5",
+    },
+    "GRACE-1L-OMAT-medium-ft-AM": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/EMNHjqNR75c9xmH",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-ft-AM.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/LtANLYLmyP88it7",
+    },
+    ########### 1L-large  ############
+    "GRACE-1L-OMAT-large-base": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/4K3ASNkn3nii4a2",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-base.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/eyBpGWR5me9WxGb",
+    },
+    "GRACE-1L-OMAT-large-ft-E": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/pbMELPznrgdRRxk",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-ft-E.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/Jw7B3pjs39JZDd6",
+    },
+    "GRACE-1L-OMAT-large-ft-AM": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/Se2MCSxtDjkD7wC",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-ft-AM.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/MCMaGmo6bNSLq79",
+    },
+    ########### 2L-medium  ############
+    "GRACE-2L-OMAT-medium-base": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/NRFH35F66rwsryW",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-base.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/GQLWNQb4weje5RD",
+    },
+    "GRACE-2L-OMAT-medium-ft-E": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/n9HB7SFxRbNFtSc",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-ft-E.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/wKppKBBRmQccByj",
+    },
+    "GRACE-2L-OMAT-medium-ft-AM": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/3Y4Jgg67XinajNe",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-ft-AM.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/nfaCfrWcRMdqPfs",
+    },
+    ########### 2L-large  ############
+    "GRACE-2L-OMAT-large-base": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/pKqkYsYWLsB4EGc",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-base.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/W7KtsjrtKJT6iPS",
+    },
+    "GRACE-2L-OMAT-large-ft-E": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/bp9znKKGb7LxyEs",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-ft-E.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/gFzndA8RnpF83ca",
+    },
+    "GRACE-2L-OMAT-large-ft-AM": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/s6YrAAk9aTjQBd8",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-ft-AM.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/22ZqbGLrg25iWQn",
+    },
 }
 
+
 # BACKWARD COMPATIBILITY:
-remap_old_model_name = {
+MODELS_ALIASES_DICT = {
     "MP_GRACE_1L_r6_4Nov2024": "GRACE-1L-MP-r6",
     "MP_GRACE_2L_r5_4Nov2024": "GRACE-2L-MP-r5",
     "MP_GRACE_2L_r6_11Nov2024": "GRACE-2L-MP-r6",
     "GRACE-1L-OAM_2Feb25": "GRACE-1L-OAM",
     "GRACE_2L_OAM_28Jan25": "GRACE-2L-OAM",
+    # shortname alisases: short name to full name
+    "GRACE-2L-OMAT-L": "GRACE-2L-OMAT-large-ft-E",
+    "GRACE-2L-OAM-L": "GRACE-2L-OMAT-large-ft-AM",
+    "GRACE-2L-OMAT-M": "GRACE-2L-OMAT-medium-ft-E",
+    "GRACE-2L-OAM-M": "GRACE-2L-OMAT-medium-ft-AM",
+    "GRACE-1L-OMAT-L": "GRACE-1L-OMAT-large-ft-E",
+    "GRACE-1L-OAM-L": "GRACE-1L-OMAT-large-ft-AM",
+    "GRACE-1L-OMAT-M": "GRACE-1L-OMAT-medium-ft-E",
+    "GRACE-1L-OAM-M": "GRACE-1L-OMAT-medium-ft-AM",
 }
 
 # loading user-defined models
@@ -225,7 +312,7 @@ def download_extract_rename(url, model_path):
 
 def get_or_download_model(model):
     # remap old names into new for backward compat
-    model = remap_old_model_name.get(model) or model
+    model = MODELS_ALIASES_DICT.get(model) or model
 
     model_metadata = MODELS_METADATA[model]
     model_path = model_metadata.get(MODEL_PATH_KEY) or os.path.join(
@@ -270,7 +357,7 @@ def grace_fm(
     pad_atoms_number: int | None = 10,
     max_number_reduction_recompilation: int | None = 2,
     min_dist=None,
-    **kwargs
+    **kwargs,
 ):
     from tensorpotential.calculator.asecalculator import TPCalculator
 
@@ -284,7 +371,7 @@ def grace_fm(
         pad_atoms_number=pad_atoms_number,
         max_number_reduction_recompilation=max_number_reduction_recompilation,
         min_dist=min_dist,
-        **kwargs
+        **kwargs,
     )
     return calc
 

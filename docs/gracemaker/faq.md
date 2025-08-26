@@ -77,7 +77,7 @@ mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RAN
 ## How to Perform Multi-GPU Fit?
 
 If you have a node with multiple GPUs, use the `gracemaker ... -m` option to enable data-parallel fitting. In this case, increase the batch size (global batch size).  
-
+Sometimes you need to use following env variable: `export TF_USE_LEGACY_KERAS=1`
 ---
 
 ## How to Reduce TensorFlow Verbosity Level?
