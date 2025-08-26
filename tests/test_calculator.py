@@ -1,4 +1,5 @@
 import os
+import shutil
 
 import pytest
 
@@ -38,9 +39,10 @@ def test_calculator_model():
     st0_num = calc.calculate_numerical_stress(s)
     assert np.allclose(st0, st0_num, rtol=1e-5)
 
-    # model.save_model("./test_calculator_model")
+    shutil.rmtree("./test_calculator_model_tmp", ignore_errors=True)
+    model.save_model("./test_calculator_model_tmp")
 
-    calc1 = TPCalculator(model="./test_calculator_model")
+    calc1 = TPCalculator(model="./test_calculator_model_tmp")
 
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
@@ -58,6 +60,7 @@ def test_calculator_model():
     assert np.allclose(e0, e1)
     assert np.allclose(f0, f1)
     assert np.allclose(st0, st1)
+    shutil.rmtree("./test_calculator_model_tmp", ignore_errors=True)
 
 
 def test_calculator_with_fake_neighbors():
