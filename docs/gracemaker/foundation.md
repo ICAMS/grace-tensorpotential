@@ -15,20 +15,20 @@ The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/d
 | Model Name             | Full Name | Size | $\kappa_\mathrm{SRME}$ | Description                    |
 |:-----------------------| :--- | :--- |:-----------------------|:-------------------------------|
 | **GRACE-1L-OMAT**        | GRACE-1L-OMAT | small | 0.398                  | Single-layer local             |
-| GRACE-1L-OMAT-M-base | GRACE-1L-OMAT-medium-base | medium | 0.380                  | Single-layer local (base fit)  |
-| **GRACE-1L-OMAT-M**      | GRACE-1L-OMAT-medium-ft-E | medium | 0.417                  | Single-layer local (finetuned  |
-| GRACE-1L-OMAT-L-base | GRACE-1L-OMAT-large-base | large | **0.354**                 | Single-layer local             |
-| **GRACE-1L-OMAT-L**      | GRACE-1L-OMAT-large-ft-E | large | 0.383                  | Single-layer local             |
+| GRACE-1L-OMAT-M-base | GRACE-1L-OMAT-medium-base | medium | 0.380                  | Single-layer local (base)  |
+| **GRACE-1L-OMAT-M**      | GRACE-1L-OMAT-medium-ft-E | medium | 0.417                  | Single-layer local (finetuned on energy)  |
+| GRACE-1L-OMAT-L-base | GRACE-1L-OMAT-large-base | large | **0.354**                 | Single-layer local (base)             |
+| **GRACE-1L-OMAT-L**      | GRACE-1L-OMAT-large-ft-E | large | 0.383                  | Single-layer local (finetuned on energy)            |
 
 #### Two-layer, semilocal models
 
 | Model Name              | Full Name | Size | $\kappa_\mathrm{SRME}$ | Description |
 |:------------------------| :--- | :--- |:-----------------------| :--- |
 | **GRACE-2L-OMAT**         | GRACE-2L-OMAT | small | 0.288                  | Two-layer semi-local |
-| GRACE-2L-OMAT-M-base   | GRACE-2L-OMAT-medium-base | medium | 0.212                  | Two-layer semi-local |
-| **GRACE-2L-OMAT-M**     | GRACE-2L-OMAT-medium-ft-E | medium | 0.217                  | Two-layer semi-local |
-| GRACE-2L-OMAT-L-base    | GRACE-2L-OMAT-large-base | large | **0.165**                  | Two-layer semi-local |
-| **GRACE-2L-OMAT-L**     | GRACE-2L-OMAT-large-ft-E | large | 0.186                 | Two-layer semi-local |
+| GRACE-2L-OMAT-M-base   | GRACE-2L-OMAT-medium-base | medium | 0.212                  | Two-layer semi-local (base) |
+| **GRACE-2L-OMAT-M**     | GRACE-2L-OMAT-medium-ft-E | medium | 0.217                  | Two-layer semi-local (finetuned on energy) |
+| GRACE-2L-OMAT-L-base    | GRACE-2L-OMAT-large-base | large | **0.165**                  | Two-layer semi-local (base)|
+| **GRACE-2L-OMAT-L**     | GRACE-2L-OMAT-large-ft-E | large | 0.186                 | Two-layer semi-local (finetuned on energy) |
 
 ***
 
