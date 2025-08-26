@@ -464,8 +464,8 @@ def real_coupling_metainformation(
 
     # this will find all unique combinations of "l","m" and "hist" in each dataframe
     # and corresponding UNIQUE single index
-    A_lmh_g = A.groupby(["l", "m", "hist"]).indices
-    B_lmh_g = B.groupby(["l", "m", "hist"]).indices
+    A_lmh_g = A.groupby(["l", "m", "hist", "parity"]).indices
+    B_lmh_g = B.groupby(["l", "m", "hist", "parity"]).indices
 
     # check that it is unique mapping
     for k, v in A_lmh_g.items():
@@ -580,8 +580,8 @@ def real_coupling_metainformation(
                     AB_to_CG_dict = defaultdict(float)
                     # loop over ms,cg combinations
                     for (m1, m2), gen_cg in zip(ms_list, cg_list):
-                        A_ind = A_lmh_g[l1, m1, l1hist]
-                        B_ind = B_lmh_g[l2, m2, l2hist]
+                        A_ind = A_lmh_g[l1, m1, l1hist, p1]
+                        B_ind = B_lmh_g[l2, m2, l2hist, p2]
                         # if CG is non-zero - accumulate into lists
                         # of indices from A and B and CG-list
                         if abs(gen_cg) > 1e-15:
@@ -621,7 +621,7 @@ def real_coupling_metainformation(
                         )
     dl = EXCLUSION_HIST_LIST.copy()
     if history_drop_list is not None:
-        dl.append(history_drop_list)
+        dl.extend(history_drop_list)
 
     # if history_drop_list is not None:
     coupled_dat = [dat for dat in coupled_dat if (dat[2], dat[0]) not in dl]

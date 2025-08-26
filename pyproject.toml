@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.1"  #### UPD in setup.py to avoid confusion
+version = "0.5.2"  #### UPD in setup.py to avoid confusion
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
@@ -22,11 +22,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "tensorflow[and-cuda]<2.17",
-    "tf_keras",
+    "tensorflow[and-cuda]<2.20",
+    "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",
-    "numpy<2.0.0",
+    "numpy<3.0.0",
     "sympy",
     "pandas<3.0.0",
     "ase",

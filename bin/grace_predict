@@ -8,6 +8,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import sys
 import os
 import pandas as pd
+import numpy as np
 import argparse
 
 from tensorpotential.calculator import TPCalculator
@@ -23,14 +24,29 @@ from tqdm import tqdm
 tqdm.pandas()
 
 
+def set_magmom(at, magmoms):
+    magmoms = np.array(magmoms)
+    assert len(at) == magmoms.shape[0]
+    if magmoms.shape == (len(at), 3):
+        at.arrays["initial_magmoms"] = magmoms
+    elif (magmoms.shape == (len(at), 1)) or (magmoms.shape == (len(at),)):
+        new_magmoms = np.zeros((len(at), 3))
+        new_magmoms[:, 2] = magmoms
+        at.arrays["initial_magmoms"] = new_magmoms
+    else:
+        raise ValueError("mag_mom shape is not recognized")
+    return at
+
+
 def predict(row, calc):
     at = row["ase_atoms"].copy()
     if "mag_mom" in row:
-        at.set_initial_magnetic_moments(row["mag_mom"])
+        at = set_magmom(at, row["mag_mom"])
     at.calc = calc
     e = at.get_potential_energy()
     f = at.get_forces()
-    return {"energy": e, "forces": f}
+    s = at.get_stress()
+    return {"energy": e, "forces": f, "stress": s}
 
 
 def main(args):
@@ -85,10 +101,13 @@ def main(args):
     df["prediction"] = df.progress_apply(predict, axis=1, args=(calc,))
     df["energy_predicted"] = df["prediction"].map(lambda x: x["energy"])
     df["forces_predicted"] = df["prediction"].map(lambda x: x["forces"])
+    df["stress_predicted"] = df["prediction"].map(lambda x: x["stress"])
     # df = df.drop(columns=["ase_atoms", "prediction"])
 
     logger.info(f"Saving dataset to {output_file}")
-    df.drop(columns=["ase_atoms", "prediction"]).to_pickle(output_file, compression="gzip")
+    df.drop(columns=["ase_atoms", "prediction"]).to_pickle(
+        output_file, compression="gzip"
+    )
 
 
 if __name__ == "__main__":

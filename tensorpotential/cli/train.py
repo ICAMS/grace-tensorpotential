@@ -9,18 +9,25 @@ from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+
+from tensorflow.keras.callbacks import CallbackList
 from scipy.optimize import minimize
 from tqdm import tqdm
 
-from tensorpotential import constants
+from tensorpotential import constants, TensorPotential
 from tensorpotential.cli.data import (
     regroup_similar_batches,
     is_tf_distr_dataset,
     regroup_dataset_to_iterator,
 )
 
-LEARNING_RATE_REDUCTION = "learning_rate_reduction"
+from tensorpotential.cli.train_callbacks import (
+    LRSchedulerFactory,
+    CustomReduceLROnPlateau,
+)
+
+LEGACY_SCHEDULER_PARAMS = "learning_rate_reduction"
+SCHEDULER_PARAMS = "scheduler_params"
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
@@ -125,6 +132,7 @@ def train_one_epoch(
     compute_concat_per_structure_metrics=False,
     chunk_batches=False,
     regroup_window_factor=None,
+    callback_list=None,
 ):
     is_tf_dataset = is_tf_distr_dataset(train_dataset)
     n_batch = get_dataset_num_batches(train_dataset)
@@ -170,7 +178,7 @@ def train_one_epoch(
     num_processed_batches = 0
     total_time = 0
     agg_concat_per_structure_metrics = defaultdict(list)
-    for i in pbar:
+    for _ in pbar:
         if is_tf_dataset:
             b_data = next(data_iter)
         else:
@@ -180,6 +188,8 @@ def train_one_epoch(
             ]
         num_processed_batches += distr_strategy.num_replicas_in_sync
         # TODO: filter out unnecessary data, not to submit to GPU
+        if callback_list is not None:
+            callback_list.on_batch_begin(tp.step)
         t_start = time.perf_counter()
         out = tp.distributed_train_step(b_data)
         # agg metrics from out[".../per_struct"]
@@ -191,6 +201,10 @@ def train_one_epoch(
             concatenate_per_structure_metrics(
                 out, b_data, agg_concat_per_structure_metrics
             )
+        tp.increment_step()
+        # todo: make sure that metrics are passed in the right format
+        if callback_list is not None:
+            callback_list.on_batch_end(tp.step, metrics)
         del b_data
     del data_iter
     # log.info(f"[TRAIN]: processed batches/total batches: {num_processed_batches}/{n_batch}")
@@ -287,8 +301,8 @@ def get_dataset_num_batches(dataset):
 
 
 def train_adam(
-    tp,
-    fit_config,
+    tp: TensorPotential,
+    fit_config: dict,
     train_ds,
     test_ds=None,
     strategy=None,
@@ -296,6 +310,8 @@ def train_adam(
     train_grouping_df=None,
     test_grouping_df=None,
 ):
+    callbacks = []
+
     compute_init_stats = fit_config.get("eval_init_stats", False)
     epochs = fit_config.get("maxiter", 500)
     checkpoint_freq = fit_config.get("checkpoint_freq", 10)
@@ -305,14 +321,13 @@ def train_adam(
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e99
-    test_loss_history = []
 
-    lr_stop_at_min = False
-    patience = None
-    lr_reduction_factor = 1.0
-    lr_min = None
-    resume_lr = True
-    loss_explosion_threshold = None
+    try:
+        shed_params = fit_config[LEGACY_SCHEDULER_PARAMS]
+    except KeyError:
+        shed_params = fit_config[SCHEDULER_PARAMS]
+
+    resume_lr = shed_params.get("resume_lr", True)
 
     n_batches = get_dataset_num_batches(train_ds)
 
@@ -322,17 +337,14 @@ def train_adam(
         log.info("Resetting optimizers by reinitialization")
         tp.reset_optimizer()
 
-    if LEARNING_RATE_REDUCTION in fit_config:
-        lr_red_params = fit_config[LEARNING_RATE_REDUCTION]
-        patience = lr_red_params.get("patience", None)
-        lr_reduction_factor = lr_red_params.get("factor", 0.8)
-        lr_min = lr_red_params.get("min", 1.0e-4)
-        lr_stop_at_min = lr_red_params.get("stop_at_min", False)
-        log.info(
-            f"Learning rate reduction will be used with parameters: {lr_red_params}"
+    with strategy.scope():
+        lr_scheduler = LRSchedulerFactory.create_lr_scheduler(
+            tp, n_batches, fit_config, strategy
         )
-        resume_lr = lr_red_params.get("resume_lr")
-        loss_explosion_threshold = lr_red_params.get("loss_explosion_threshold")
+        if lr_scheduler is not None:
+            callbacks.append(lr_scheduler)
+        callback_list = CallbackList(callbacks)
+    # callback_list.on_train_begin()
 
     if group_similar_batches and strategy.num_replicas_in_sync > 1:
         n_group = strategy.num_replicas_in_sync
@@ -353,22 +365,20 @@ def train_adam(
     loss_weights_switch = None
 
     new_loss_params = {}
-    if "loss_weights_switch" in fit_config:
-        log.warning("DEPRECATION WARNING!!! Use new loss switch params")
-        loss_weights_switch = fit_config.get("loss_weights_switch")
-        new_loss_params = {
-            "energy": {"weight": fit_config["energy_loss_weight_2"]},
-            "forces": {"weight": fit_config["forces_loss_weight_2"]},
-        }
-    elif "loss" in fit_config and "switch" in fit_config["loss"]:
+    if "loss" in fit_config and "switch" in fit_config["loss"]:
         # TODO: implement multiple switches
-        switch_params = fit_config["loss"]["switch"]
-        loss_weights_switch = switch_params.pop("after_iter")
-        new_loss_params = switch_params
+        if not isinstance(lr_scheduler, CustomReduceLROnPlateau):
+            error_msg = f"ERROR: Switching loss weights is implemented for CustomReduceLROnPlateau only. It will be ignored for your scheduler {lr_scheduler.__class__.__name__}"
+            log.error(error_msg)
+            raise RuntimeError(error_msg)
+        else:
+            switch_params = fit_config["loss"]["switch"]
+            loss_weights_switch = switch_params.pop("after_iter")
+            new_loss_params = switch_params
 
     #### INIT STATS ####
     if compute_init_stats:
-        tp.epoch = 0
+        epoch = tp.epoch
 
         train_acc_metrics, train_agg_concat_per_structure_metrics = test_one_epoch(
             tp,
@@ -382,7 +392,7 @@ def train_adam(
         initial_train_metrics = process_acc_metrics(
             train_acc_metrics, n_batches=n_batches
         )
-        initial_train_metrics["epoch"] = tp.epoch
+        initial_train_metrics["epoch"] = epoch
         if train_grouping_df is not None:
             compute_per_group_metrics(
                 train_grouping_df,
@@ -413,7 +423,7 @@ def train_adam(
                 test_acc_metrics,
                 n_batches=test_n_batches,
             )
-            initial_test_metrics["epoch"] = tp.epoch
+            initial_test_metrics["epoch"] = epoch
 
             if test_grouping_df is not None:
                 compute_per_group_metrics(
@@ -424,7 +434,7 @@ def train_adam(
                 )
 
             msg = generate_train_test_message(
-                initial_train_metrics, initial_test_metrics, tp.epoch, epochs
+                initial_train_metrics, initial_test_metrics, epoch, epochs
             )
             log.info(msg)
             # save test metrics to JSON-like file
@@ -434,14 +444,36 @@ def train_adam(
             )
         else:  # test_ds is None
             log.info(
-                f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
+                f"Iteration #{epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
             )
     #### END INIT STATS ####
 
-    tp.epoch = 1
-    last_lr_reduction_epoch = 0
-    min_lr_achieved = False
-    while tp.epoch <= epochs:
+    if loss_weights_switch is not None and tp.epoch >= loss_weights_switch:
+        log.info(
+            f"Switching loss weights to {new_loss_params}, because current loaded epoch ({tp.epoch}) >= {loss_weights_switch} (switch epoch)"
+        )
+        tp.loss_function.set_loss_component_params(new_loss_params)
+        best_test_loss = 1e99
+        if isinstance(lr_scheduler, CustomReduceLROnPlateau):
+            log.info("Reset best metric for CustomReduceLROnPlateau")
+            lr_scheduler.reset_best()
+
+    callback_list.on_train_begin()
+    while tp.epoch < epochs:
+
+        # E-F WEIGHTS SWITCHING: loss component switch
+        if loss_weights_switch is not None and tp.epoch == loss_weights_switch:
+            # TODO: need better names
+            do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds)
+            best_test_loss = 1e99  # reset best test loss after switch
+            # reset callback self.best
+            if isinstance(lr_scheduler, CustomReduceLROnPlateau):
+                log.info("Reset best metric for CustomReduceLROnPlateau")
+                lr_scheduler.reset_best()
+
+        tp.increment_epoch()  # old tp.epoch = 1
+
+        epoch_begin_lr = tp.optimizer.learning_rate.numpy()
         # tp.on_epoch_begin()
         # -----------------TRAIN---------------------
         train_acc_metrics, train_agg_concat_per_structure_metrics = train_one_epoch(
@@ -455,15 +487,18 @@ def train_adam(
             compute_concat_per_structure_metrics=True,
             chunk_batches=group_similar_batches,
             regroup_window_factor=regroup_window_factor,
+            callback_list=callback_list,
         )
-
         # manually rewrite values with EMA after each epoch before applying (use_ema is checking inside)
-        tp.optimizer.finalize_variable_values(tp.model.trainable_variables)
+        tp.optimizer.finalize_variable_values(tp.model.variables_to_train)
         # post_process agg_metrics
         final_train_metrics = process_acc_metrics(
             train_acc_metrics, n_batches=n_batches
         )
         final_train_metrics["epoch"] = tp.epoch
+        final_train_metrics["step"] = tp.step
+        final_train_metrics["lr_epoch_begin"] = float(epoch_begin_lr)
+        final_train_metrics["lr_epoch_end"] = float(tp.optimizer.learning_rate.numpy())
         # TODO: compute per-group metrics from train_agg_concat_per_structure_metrics and train_grouping_df
         if train_grouping_df is not None:
             compute_per_group_metrics(
@@ -496,6 +531,7 @@ def train_adam(
                 n_batches=test_n_batches,
             )
             final_test_metrics["epoch"] = tp.epoch
+            final_test_metrics["step"] = tp.step
 
             if test_grouping_df is not None:
                 compute_per_group_metrics(
@@ -504,6 +540,11 @@ def train_adam(
                     final_test_metrics,
                     n_batches=test_n_batches,
                 )
+
+            final_test_metrics["lr_epoch_begin"] = float(epoch_begin_lr)
+            final_test_metrics["lr_epoch_end"] = float(
+                tp.optimizer.learning_rate.numpy()
+            )
 
             msg = generate_train_test_message(
                 final_train_metrics, final_test_metrics, tp.epoch, epochs
@@ -517,7 +558,6 @@ def train_adam(
 
             # best test loss  checkpoint
             current_test_loss = final_test_metrics["total_loss/test"]
-            test_loss_history.append(current_test_loss)
             if current_test_loss < best_test_loss:
                 log.info(
                     f"New best test loss found ({current_test_loss:.5e}), checkpointing"
@@ -525,88 +565,33 @@ def train_adam(
                 best_test_loss = current_test_loss
                 tp.save_checkpoint(suffix=".best_test_loss")
 
-            # LOSS EXPLOSION: rollback to last best test loss, reduce LR and reset optimizer
-            if (
-                loss_explosion_threshold is not None
-                and current_test_loss >= best_test_loss * loss_explosion_threshold
-            ):
-                #  rollback  and restart optimizer
-                log.info(
-                    f"Current test loss increased by factor {(current_test_loss)/best_test_loss:.2f} "
-                    f"(threshold={loss_explosion_threshold}). "
-                    f"Rollback to latest best test loss checkpoint, reset optimizer and reduce learning rate"
-                )
-                try_load_checkpoint(tp, restart_best_test=True)
-                restart_optimizer(tp.optimizer)
-                current_lr = tp.optimizer.learning_rate.numpy()
-                new_lr = current_lr * lr_reduction_factor
-                tp.optimizer.learning_rate.assign(new_lr)
-                log.info(f"Reducing learning rate: {current_lr:.5e} -> {new_lr:.5e}")
-
-            # POOR-MAN's LRReduceOnPlateau
-            elif patience is not None and not min_lr_achieved:
-                last_min_test_loss = np.argmin(test_loss_history)
-                if (
-                    len(test_loss_history) - (last_min_test_loss + 1) > patience
-                    and tp.epoch - last_lr_reduction_epoch > patience
-                ):
-                    current_lr = tp.optimizer.learning_rate.numpy()
-                    new_lr = current_lr * lr_reduction_factor
-                    if lr_min is not None:
-                        if new_lr < lr_min and lr_stop_at_min:
-                            log.info(
-                                f"Minimal value of learning rate is achieved  ({new_lr:.3e} < {lr_min:.3e}), stopping"
-                            )
-                            if (
-                                loss_weights_switch is not None
-                                and tp.epoch < loss_weights_switch
-                            ):  # to avoid multiple switches
-                                tp.epoch = loss_weights_switch  # jump to new epoch
-                                log.info(f"Jump to epoch #{tp.epoch}")
-                            else:
-                                break  # stop training loop
-                        else:  # not lr_stop_at_min or new_lr > lr_min
-                            if new_lr < lr_min:
-                                new_lr = lr_min
-                                min_lr_achieved = True
-                                log.info(
-                                    "Minimal value of learning rate is achieved, no further reduction"
-                                )
-
-                            last_lr_reduction_epoch = tp.epoch
-                            tp.optimizer.learning_rate.assign(new_lr)
-                            log.info(
-                                f"Reducing learning rate: {current_lr:.5e} -> {new_lr:.5e}"
-                            )
-                    else:  # lr_min is None
-                        last_lr_reduction_epoch = tp.epoch
-                        tp.optimizer.learning_rate.assign(new_lr)
-                        log.info(
-                            f"Reducing learning rate: {current_lr:.5e} -> {new_lr:.5e}"
-                        )
         else:  # test_ds is None
             log.info(
                 f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(final_train_metrics)}"
             )
 
+        epoch_end_metrics = {
+            "train_loss": final_train_metrics["total_loss/train"],
+        }
+        if test_ds is not None:
+            epoch_end_metrics["test_loss"] = final_test_metrics["total_loss/test"]
+
+        callback_list.on_epoch_end(tp.epoch, epoch_end_metrics)
+
         # regular checkpoint
-        if (tp.epoch) % checkpoint_freq == 0:
+        if tp.epoch % checkpoint_freq == 0:
             log.info("Regular checkpointing")
             if fit_config.get("save_all_regular_checkpoints", False):
                 tp.save_checkpoint(suffix=f".epoch_{tp.epoch}")
             else:
                 tp.save_checkpoint()
 
-        # TODO: restore non-EMA weights?
-
-        # E-F WEIGHTS SWITCHING: loss component switch
-        if loss_weights_switch is not None and tp.epoch == loss_weights_switch:
-            # TODO: need better names
-            do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds)
-            best_test_loss = 1e99  # reset best test loss after switch
-            test_loss_history = [best_test_loss]  # reset test loss history
-
-        tp.epoch += 1
+        if tp.stop_training:
+            if loss_weights_switch is not None and tp.epoch < loss_weights_switch:
+                tp.epoch = loss_weights_switch
+                tp.stop_training = False
+            else:
+                break
 
 
 def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
@@ -615,6 +600,8 @@ def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
     )
     new_lr = new_loss_params.pop("learning_rate", None)
     tp.loss_function.set_loss_component_params(new_loss_params)
+    cur_epoch = tp.epoch
+    cur_step = tp.step
     if test_ds is not None:  # has test set
         try_load_checkpoint(tp, restart_best_test=True)
         # save best test loss for stage1
@@ -623,11 +610,13 @@ def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
     if new_lr:
         log.info(f"Set new learning rate to {new_lr:.3e}")
         tp.optimizer.learning_rate.assign(new_lr)
+    tp.epoch = cur_epoch
+    tp.step = cur_step
 
 
 def train_bfgs(
-    tp,
-    fit_config,
+    tp: TensorPotential,
+    fit_config: dict,
     train_ds,
     test_ds=None,
     strategy=None,
@@ -644,7 +633,7 @@ def train_bfgs(
     init_flat_vars = tp.model.get_flat_trainable_variables()
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")
     best_test_loss = 1e16
-    tp.epoch = 0
+    epoch = tp.epoch
 
     if group_similar_batches and strategy.num_replicas_in_sync > 1:
         n_group = strategy.num_replicas_in_sync
@@ -663,7 +652,7 @@ def train_bfgs(
             train_acc_metrics,
             n_batches=len(train_ds),
         )
-        initial_train_metrics["epoch"] = tp.epoch
+        initial_train_metrics["epoch"] = epoch
         initial_train_metrics = {
             k.replace("test", "train"): v for k, v in initial_train_metrics.items()
         }
@@ -679,7 +668,7 @@ def train_bfgs(
                 test_acc_metrics,
                 n_batches=len(test_ds),
             )
-            initial_test_metrics["epoch"] = tp.epoch
+            initial_test_metrics["epoch"] = epoch
             if test_grouping_df is not None:
                 compute_per_group_metrics(
                     test_grouping_df,
@@ -692,18 +681,17 @@ def train_bfgs(
                 metrics=initial_test_metrics,
             )
             msg = generate_train_test_message(
-                initial_train_metrics, initial_test_metrics, tp.epoch, epochs
+                initial_train_metrics, initial_test_metrics, epoch, epochs
             )
             log.info(msg)
             current_test_loss = initial_test_metrics["total_loss/test"]
             best_test_loss = current_test_loss
         else:
             log.info(
-                f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
+                f"Iteration #{epoch}/{epochs}: TRAIN stats: {metrics_to_string(initial_train_metrics)}"
             )
     #### END INIT STATS ####
 
-    tp.epoch = 1
     opt = fit_config["optimizer"]
     final_train_metrics = {}
 
@@ -729,8 +717,10 @@ def train_bfgs(
         return tot_loss, tot_jac
 
     def callback(x):
+        tp.increment_epoch()
+        epoch = tp.epoch
         nonlocal final_train_metrics, best_test_loss
-        final_train_metrics["epoch"] = tp.epoch
+        final_train_metrics["epoch"] = epoch
         # TODO: compute per-group metrics from train_agg_concat_per_structure_metrics and train_grouping_df
         # if train_grouping_df is not None:
         #     compute_per_group_metrics(
@@ -751,7 +741,7 @@ def train_bfgs(
                 test_acc_metrics,
                 n_batches=len(test_ds),
             )
-            final_test_metrics["epoch"] = tp.epoch
+            final_test_metrics["epoch"] = epoch
             if test_grouping_df is not None:
                 compute_per_group_metrics(
                     test_grouping_df,
@@ -764,7 +754,7 @@ def train_bfgs(
                 metrics=final_test_metrics,
             )
             msg = generate_train_test_message(
-                final_train_metrics, final_test_metrics, tp.epoch, epochs
+                final_train_metrics, final_test_metrics, epoch, epochs
             )
             log.info(msg)
 
@@ -779,17 +769,16 @@ def train_bfgs(
 
         else:
             log.info(
-                f"Iteration #{tp.epoch}/{epochs}: TRAIN stats: {metrics_to_string(final_train_metrics)}"
+                f"Iteration #{epoch}/{epochs}: TRAIN stats: {metrics_to_string(final_train_metrics)}"
             )
 
-        if tp.epoch % checkpoint_freq == 0:
+        if epoch % checkpoint_freq == 0:
             log.info("Regular checkpointing")
             tp.model.set_flat_trainable_variables(x)
             if fit_config.get("save_all_regular_checkpoints", False):
-                tp.save_checkpoint(suffix=f".epoch_{tp.epoch}")
+                tp.save_checkpoint(suffix=f".epoch_{epoch}")
             else:
                 tp.save_checkpoint()
-        tp.epoch += 1
 
     optimizer_options = fit_config.get(
         "opt_params", {"gtol": 1e-8, "disp": False, "maxcor": 200, "iprint": -1}
@@ -902,6 +891,7 @@ def try_load_checkpoint(
     expect_partial=False,
     checkpoint_name=None,
     verbose=True,
+    assert_consumed=False,
 ):
     if checkpoint_name is not None:
         log.info(f"Trying to load explicit checkpoint {checkpoint_name}")
@@ -909,19 +899,30 @@ def try_load_checkpoint(
             expect_partial=expect_partial,
             verbose=verbose,
             checkpoint_name=checkpoint_name,
+            assert_consumed=assert_consumed,
         )
     elif restart_latest:
         log.info("Trying to load latest regular checkpoint")
-        tp.load_checkpoint(expect_partial=expect_partial, verbose=verbose)
+        tp.load_checkpoint(
+            expect_partial=expect_partial,
+            verbose=verbose,
+            assert_consumed=assert_consumed,
+        )
     elif restart_best_test:
         log.info("Trying to load best test checkpoint")
         tp.load_checkpoint(
-            suffix=".best_test_loss", expect_partial=expect_partial, verbose=verbose
+            suffix=".best_test_loss",
+            expect_partial=expect_partial,
+            verbose=verbose,
+            assert_consumed=assert_consumed,
         )
     elif restart_suffix is not None:
         log.info(f"Trying to load checkpoint with suffix {restart_suffix}")
         tp.load_checkpoint(
-            suffix=restart_suffix, expect_partial=expect_partial, verbose=verbose
+            suffix=restart_suffix,
+            expect_partial=expect_partial,
+            verbose=verbose,
+            assert_consumed=assert_consumed,
         )
 
 
@@ -932,7 +933,10 @@ def generate_train_test_message(final_train_metrics, final_test_metrics, epoch, 
         "rmse/virial",
         "mae/virial",
         "epoch",
+        "step",
         "per_group_metrics",
+        "lr_epoch_begin",
+        "lr_epoch_end",
     ]
     if epoch == 0:
         msg = f"INITIAL    TRAIN(TEST): "
@@ -1003,21 +1007,3 @@ def compute_per_group_metrics(
         per_group_metrics[group_name] = norm_cur_metrics
 
     final_metrics["per_group_metrics"] = per_group_metrics
-
-
-def restart_optimizer(optimizer: tf.keras.optimizers.Adam):
-    """
-    Reset the state of Keras optimizer
-    """
-    if isinstance(optimizer, tf.keras.optimizers.Adam):
-
-        var_lists_name = ["_momentums", "_velocities", "_velocity_hats"]
-        var_lists = []
-        for name in var_lists_name:
-            if hasattr(optimizer, name):
-                var_lists.append(getattr(optimizer, name))
-        for var_list in var_lists:
-            for var in var_list:
-                var.assign(tf.zeros(var.shape, dtype=var.dtype))
-    else:
-        raise NotImplementedError(f"Restarting {optimizer} is not implemented")

@@ -328,13 +328,16 @@ potential:
 #  reduce_elements: True # select from original models only elements presented in the dataset  
 fit:
 
-  # set small learning rate
+  ### set small learning rate
   opt_params: {learning_rate: 0.001,  ... }
   
-  # evaluate initial metrics
+  ### evaluate initial metrics
   eval_init_stats: True
   
   # reset_optimizer: True
+  
+  ### specify trainable variables name pattern (depends on the model config)
+  # trainable_variable_names: ["rho/reducing_", "Z/ChemicalEmbedding"] 
 ```
 
 If you want manually specify model and checkpoint, then 

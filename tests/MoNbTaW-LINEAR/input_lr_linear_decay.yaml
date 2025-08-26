@@ -1,0 +1,33 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "../data/MoNbTaW_train50.pkl.gz"
+  train_size: 1
+  test_filename: "../data/MoNbTaW_test50.pkl.gz"
+#  test_size: 20
+
+potential:
+  #  elements: ["C", "H", "O"]
+  preset: "LINEAR"
+
+
+fit:
+  loss: {
+    energy: {weight: 1.},
+    forces: {weight: 5.},
+  }
+
+  optimizer: Adam
+  opt_params: { "learning_rate": 2., "amsgrad": True }
+  scheduler: "linear_decay"
+  scheduler_params: {"cold_learning_rate": 0.2, "minimum_learning_rate": 0.1, "warmup_epochs": 2 }
+  maxiter: 5
+  batch_size: 5
+  test_batch_size: 20
+  train_max_n_buckets: 1
+  test_max_n_buckets: 1
+
+  progressbar: False
+  train_shuffle: True
+  jit_compile: False

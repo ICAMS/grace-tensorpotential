@@ -91,6 +91,61 @@ def update_model(args):
     logger.info(f"Finished")
 
 
+def resave_checkpoint(args):
+    preprocess_args(args)
+
+    """Convert model.yaml and corresponding checkpoint to model as dict-of-instructions and corresponding checkpoint"""
+    from tensorpotential import TensorPotential
+    from tensorpotential.instructions.base import (
+        load_instructions,
+    )
+
+    model_path, checkpoint_path, output_suffix = (
+        args.potential,
+        args.checkpoint_path,
+        args.output_suffix,
+    )
+    new_checkpoint_path = checkpoint_path + output_suffix
+
+    # clean checkpoint_name from .index suffix if needed
+    if checkpoint_path.endswith(".index"):
+        checkpoint_path = checkpoint_path.replace(".index", "")
+
+    logger.info(
+        f"Resaving model {model_path} with checkpoint at {checkpoint_path} to new checkpoint {new_checkpoint_path}"
+    )
+
+    logger.info(f"Loading model from {model_path}")
+    instructions = load_instructions(model_path)
+
+    tp = TensorPotential(potential=instructions)
+    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    tp.load_checkpoint(
+        checkpoint_name=checkpoint_path,
+        expect_partial=True,
+        verbose=True,
+        raise_errors=True,
+    )
+
+    logger.info(f"Saving converted checkpoint to {new_checkpoint_path}")
+    tp.setup_checkpoint(with_optimizer=False)  # will reset al lexcept model's weights
+    tp.save_checkpoint(checkpoint_name=new_checkpoint_path, verbose=True)
+
+    # try to load again
+    logger.info(f"Trying to load again model from {model_path}")
+    new_instructions = load_instructions(model_path)
+    tp_new = TensorPotential(potential=new_instructions)
+    logger.info(f"Trying to load checkpoint from {new_checkpoint_path}")
+    tp_new.load_checkpoint(
+        checkpoint_name=new_checkpoint_path,
+        expect_partial=True,
+        verbose=True,
+        raise_errors=True,
+    )
+
+    logger.info(f"Finished")
+
+
 def reduce_elements(args):
 
     preprocess_args(args)
@@ -328,6 +383,13 @@ def main():
         "update_model", help="Update model (model.yaml) and corresponding checkpoint."
     )
     parser_update.set_defaults(func=lambda args: update_model(args))
+
+    # resave checkpoint
+    parser_resave_checkpoint = subparsers.add_parser(
+        "resave_checkpoint",
+        help="Resave model's (model.yaml) checkpoint (no optimizer)",
+    )
+    parser_resave_checkpoint.set_defaults(func=lambda args: resave_checkpoint(args))
 
     # select_elements
     parser_reduce = subparsers.add_parser(

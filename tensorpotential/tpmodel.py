@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+import logging
 import os
-from typing import Set
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from typing import Dict
 
 import numpy as np
 import tensorflow as tf
 import yaml
 
-from tensorpotential.instructions.base import summary_verbose_type
-from tensorpotential.instructions.compute import TPInstruction
 from tensorpotential import constants
 from tensorpotential.export import export_to_yaml
-from collections import defaultdict
+from tensorpotential.instructions.base import summary_verbose_type, LORAInstructionMixin
+from tensorpotential.instructions.compute import TPInstruction
 
 
 def extract_cutoff_and_elements(instructions):
@@ -136,7 +137,10 @@ def compute_structure_virials_from_pair_forces(pair_f, input_data):
 
 
 class TrainFunction(ABC):
-    specs: dict[str, dict]
+    specs: dict[str, dict] = {}
+
+    def __init__(self, **kwargs):
+        pass
 
     @abstractmethod
     def __call__(self, *args, **kwargs):
@@ -145,6 +149,9 @@ class TrainFunction(ABC):
 
 class ComputeFunction(ABC):
     specs: dict[str, dict] = {}
+
+    def __init__(self, **kwargs):
+        pass
 
     @abstractmethod
     def __call__(self, *args, **kwargs):
@@ -356,17 +363,27 @@ class TPModel(tf.Module):
     def __init__(
         self,
         instructions,
-        compute_function: ComputeFunction = ComputeStructureEnergyAndForcesAndVirial,
-        train_function: TrainFunction = ComputeBatchEnergyAndForces,
+        compute_function: ComputeFunction = ComputeStructureEnergyAndForcesAndVirial(),
+        train_function: TrainFunction = ComputeBatchEnergyAndForces(),
         name="TPModel",
     ):
         super(TPModel, self).__init__(name=name)
         self.instructions = instructions
-        self.compute_function = compute_function()  # instantiate functor
-        self.train_function = train_function()  # instantiate functor
+        self.compute_function = compute_function  # instantiate functor
+        self.train_function = train_function  # instantiate functor
 
-        self.compute_specs = compute_function.specs or {}
-        self.train_specs = train_function.specs or {}
+        self.compute_specs = compute_function.specs.copy() or {}
+        self.train_specs = train_function.specs.copy() or {}
+
+        self._variables_to_train = None
+
+    @property
+    def variables_to_train(self):
+        self._variables_to_train = []
+        for var in self.trainable_variables:
+            if not hasattr(var, "_trainable") or (var._trainable):
+                self._variables_to_train.append(var)
+        return self._variables_to_train
 
     def build(self, float_dtype):
         self.float_dtype = float_dtype
@@ -386,7 +403,7 @@ class TPModel(tf.Module):
         self.count_coefs = 0
         self.slices = [0]
         flat_val = []
-        for i, var in enumerate(self.trainable_variables):
+        for i, var in enumerate(self.variables_to_train):
             v = tf.reshape(var, [-1])
             self.count_coefs += tf.shape(v)[0]
             self.slices.append(self.count_coefs)
@@ -396,7 +413,7 @@ class TPModel(tf.Module):
         return flat_vars
 
     def set_flat_trainable_variables(self, flat_vars):
-        for i, var in enumerate(self.trainable_variables):
+        for i, var in enumerate(self.variables_to_train):
             new_values = flat_vars[self.slices[i] : self.slices[i + 1]]
             new_values = tf.reshape(new_values, tf.shape(var))
             if new_values.dtype != self.float_dtype:
@@ -480,21 +497,81 @@ class TPModel(tf.Module):
         **kwargs,
     ) -> str:
         """Generate a formatted summary string of all instructions."""
-        shown_vars_counter: Set[str] = set()
+        break_line = "\n" + separator * separator_length + "\n"
+
+        vars_counter: Dict[str, int] = dict()
         lines = [
-            f"{i + 1}. {ins.summary(verbose, shown_vars_counter, **kwargs)}"
+            f"{i + 1}. {ins.summary(verbose, vars_counter, **kwargs)}"
             for i, ins in enumerate(self.instructions.values())
         ]
 
-        # Compute break line based on already extracted lines
-        # all_lines = [line for l in lines for line in l.split("\n")]
-        # max_line_length = len(max(all_lines, key=len)) if all_lines else 0
-        break_line = separator * separator_length
+        res = break_line.join(lines)
 
-        return f"\n{break_line}\n".join(lines)
+        total_vars = sum(vars_counter.values())
+        res += break_line + f"\tTotal Trainable Params: {total_vars}\n" + break_line
+
+        return res
 
     def __repr__(self):
         # TODO: consider make it more __repr__-related
         return "\n".join(
             f"{i + 1}. {repr(ins)}" for i, ins in enumerate(self.instructions)
         )
+
+    def set_trainable_variables(self, only_trainable_names: list[str], verbose=False):
+        for var in self.variables:
+            # check if any of only_trainable_names in var.name
+            if any(
+                train_var_name in var.name for train_var_name in only_trainable_names
+            ):
+                var._trainable = True
+                if verbose:
+                    logging.info(f"Setting {var.name} as trainable")
+            else:
+                var._trainable = False
+                # if verbose:
+                #     logging.info(f"Setting {var.name} as non-trainable")
+
+    def enable_lora_adaptation(self, lora_config=None):
+        if lora_config is None:
+            return
+
+        logging.info(f"Activating LoRA (config = {lora_config})")
+        if "all" in lora_config:
+            all_config = lora_config.pop("all")
+            new_lora_config = {
+                ins_name: all_config
+                for ins_name, ins in self.instructions.items()
+                if isinstance(ins, LORAInstructionMixin)
+            }
+            logging.info(
+                f"LORA all available instructions: {', '.join(new_lora_config.keys())}"
+            )
+            new_lora_config.update(lora_config)
+            lora_config = new_lora_config
+
+        # # TODO: make all non-trainable ??
+        # for var in self.trainable_variables:
+        #     var._trainable = False
+
+        for ins_name, ins in self.instructions.items():
+            if ins_name in lora_config and isinstance(ins, LORAInstructionMixin):
+                ins_lora_config = lora_config[ins_name]
+                if ins_lora_config:
+                    logging.info(
+                        f" - activating LoRA for {ins_name}: {ins_lora_config}"
+                    )
+                    ins.enable_lora_adaptation(ins_lora_config)
+
+    def finalize_lora_update(self):
+        logging.info(f"Reducing LoRA")
+        for ins_name, ins in self.instructions.items():
+            if isinstance(ins, LORAInstructionMixin) and ins.lora:
+                logging.info(f" - reducing LoRA for {ins_name}")
+                ins.finalize_lora_update()
+
+    def is_lora_enabled(self):
+        for ins_name, ins in self.instructions.items():
+            if isinstance(ins, LORAInstructionMixin) and ins.lora:
+                return True
+        return False

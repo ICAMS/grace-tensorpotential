@@ -80,6 +80,17 @@ def compute_nat_per_structure(input_data):
     return nat_per_struc
 
 
+def compute_energy_per_atom_error(input_data, predictions):
+    e_true = input_data[constants.DATA_REFERENCE_ENERGY]
+    e_pred = predictions[constants.PREDICT_TOTAL_ENERGY]
+
+    nat_per_struc = tf.cast(compute_nat_per_structure(input_data), dtype=e_true.dtype)
+    e_true /= nat_per_struc
+    e_pred /= nat_per_struc
+
+    return e_pred - e_true
+
+
 class LossComponent(tf.Module, ABC):
     """
     Base class for computing loss components
@@ -317,6 +328,41 @@ class WeightedSSEEnergyLoss(LossComponent):
         return loss_e
 
 
+class WeightedMAEEPALoss(LossComponent):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_ENERGY_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.N_STRUCTURES_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+        constants.ATOMS_TO_STRUCTURE_MAP: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        name="WeightedMAEEPALoss",
+        normalize_by_samples: bool = True,
+    ):
+        super(WeightedMAEEPALoss, self).__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        e_weight = input_data[constants.DATA_ENERGY_WEIGHTS]
+
+        delta_epa = compute_energy_per_atom_error(input_data, predictions)
+        loss_e = tf.reduce_sum(e_weight * tf.abs(delta_epa + self.epsilon))
+        if self.normalize_by_samples:
+            loss_e /= tf.reduce_sum(e_weight)
+        return loss_e
+
+
 class WeightedSSEEnergyPerAtomLoss(LossComponent):
     input_tensor_spec = {
         constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
@@ -377,12 +423,14 @@ class WeightedSSEForceLoss(LossComponent):
         loss_component_weight,
         name="WeightedSSEForceLoss",
         normalize_by_samples: bool = True,
+        compute_norm: bool = False,
     ):
         super(WeightedSSEForceLoss, self).__init__(
             loss_component_weight=loss_component_weight,
             name=name,
             normalize_by_samples=normalize_by_samples,
         )
+        self.compute_norm = compute_norm
 
     def compute_loss_component(
         self,
@@ -395,6 +443,65 @@ class WeightedSSEForceLoss(LossComponent):
         f_pred = predictions[constants.PREDICT_FORCES]
         delta_f2 = tf.square(f_pred - f_true)
         loss_f = tf.reduce_sum(f_weight * delta_f2)
+        if self.compute_norm:
+            v_true = tf.sqrt(
+                tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_pred = tf.sqrt(
+                tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_err = v_pred - v_true
+            v_h_loss = tf.square(v_err)
+            loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
+
+        if self.normalize_by_samples:
+            loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
+        return loss_f
+
+
+class WSMAEForceLoss(LossComponent):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_FORCES: {"shape": [None, 3], "dtype": "float"},
+        constants.DATA_FORCE_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        name="WSMAEForceLoss",
+        normalize_by_samples: bool = True,
+        compute_norm: bool = False,
+    ):
+        super(WSMAEForceLoss, self).__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        self.compute_norm = compute_norm
+        self.corresponding_metrics = ForceMetrics
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        f_true = input_data[constants.DATA_REFERENCE_FORCES]
+        f_weight = input_data[constants.DATA_FORCE_WEIGHTS]
+        f_pred = predictions[constants.PREDICT_FORCES]
+        err = f_pred - f_true
+        loss_f = tf.reduce_sum(f_weight * (err * tf.nn.tanh(err / 2)))
+        if self.compute_norm:
+            v_true = tf.sqrt(
+                tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_pred = tf.sqrt(
+                tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_err = v_pred - v_true
+            v_h_loss = v_err * tf.nn.tanh(v_err / 2)
+            loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
+
         if self.normalize_by_samples:
             loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
         return loss_f
@@ -475,6 +582,44 @@ class WeightedSSEStressLoss(LossComponent):
         return loss_v
 
 
+class WeightedMAEStressLoss(LossComponent):
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_VIRIAL: {"shape": [None, 6], "dtype": "float"},
+        constants.DATA_VIRIAL_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_VOLUME: {"shape": [None, 1], "dtype": "float"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        name="WeightedMAEStressLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super(WeightedMAEStressLoss, self).__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        volume = input_data[constants.DATA_VOLUME]
+        v_true = input_data[constants.DATA_REFERENCE_VIRIAL]
+        v_weight = input_data[constants.DATA_VIRIAL_WEIGHTS]
+        v_pred = predictions[constants.PREDICT_VIRIAL]
+        delta_stress = tf.abs((v_pred - v_true) / volume + self.epsilon)
+        loss_v = tf.reduce_sum(v_weight * delta_stress)
+        if self.normalize_by_samples:
+            loss_v /= (
+                tf.reduce_sum(v_weight) * 6
+            )  # divide by sum of weights * 6 (Voigt comps)
+        return loss_v
+
+
 class WeightedHuberEnergyPerAtomLoss(HuberLoss):
     input_tensor_spec = {
         constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
@@ -538,6 +683,9 @@ class WeightedHuberForceLoss(HuberLoss):
         delta=1.0,
         name="HuberForceLoss",
         normalize_by_samples: bool = True,
+        compute_norm: bool = False,
+        scale_w_by_norm: bool = False,
+        norm_threshold: float = 25.0,
     ):
         super().__init__(
             loss_component_weight=loss_component_weight,
@@ -545,6 +693,19 @@ class WeightedHuberForceLoss(HuberLoss):
             name=name,
             normalize_by_samples=normalize_by_samples,
         )
+        self.compute_norm = compute_norm
+        self.scale_w_by_norm = scale_w_by_norm
+        self.norm_threshold = norm_threshold
+
+    def build(self, float_dtype):
+        super().build(float_dtype)
+        if self.scale_w_by_norm:
+            self.norm_threshold = tf.Variable(
+                self.norm_threshold,
+                dtype=float_dtype,
+                trainable=False,
+                name=self.name + "_norm_threshold",
+            )
 
     def compute_loss_component(
         self,
@@ -556,10 +717,30 @@ class WeightedHuberForceLoss(HuberLoss):
         f_pred = predictions[constants.PREDICT_FORCES]
         f_weight = input_data[constants.DATA_FORCE_WEIGHTS]
 
+        if self.scale_w_by_norm:
+            v_true = tf.sqrt(
+                tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            f_weight = tf.where(
+                v_true < self.norm_threshold, f_weight, f_weight / v_true
+            )
+
         error = tf.math.subtract(f_pred, f_true)
         h_loss = huber(error, delta=self.delta)
-
         loss_f = tf.reduce_sum(f_weight * h_loss)
+
+        if self.compute_norm:
+            if not self.scale_w_by_norm:
+                v_true = tf.sqrt(
+                    tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+                )
+            v_pred = tf.sqrt(
+                tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_err = v_pred - v_true
+            v_h_loss = huber(v_err, delta=self.delta)
+            loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
+
         if self.normalize_by_samples:
             loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
         return loss_f
@@ -577,6 +758,7 @@ class WHuberForceCompNormLoss(HuberLoss):
         delta=1.0,
         name="HuberForceLoss",
         normalize_by_samples: bool = True,
+        compute_norm: bool = False,
     ):
         super().__init__(
             loss_component_weight=loss_component_weight,
@@ -584,6 +766,7 @@ class WHuberForceCompNormLoss(HuberLoss):
             name=name,
             normalize_by_samples=normalize_by_samples,
         )
+        self.compute_norm = compute_norm
         self.corresponding_metrics = ForceMetrics
 
     def compute_loss_component(
@@ -598,19 +781,18 @@ class WHuberForceCompNormLoss(HuberLoss):
 
         error = tf.math.subtract(f_pred, f_true)
         h_loss = huber(error, delta=self.delta)
-
-        v_true = tf.sqrt(
-            tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
-        )
-        v_pred = tf.sqrt(
-            tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
-        )
-        v_err = v_pred - v_true
-
-        v_h_loss = huber(v_err, delta=self.delta)
-
         loss_f = tf.reduce_sum(f_weight * h_loss)
-        loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
+        if self.compute_norm:
+            v_true = tf.sqrt(
+                tf.reduce_sum(f_true**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_pred = tf.sqrt(
+                tf.reduce_sum(f_pred**2, axis=-1, keepdims=True) + self.epsilon
+            )
+            v_err = v_pred - v_true
+
+            v_h_loss = huber(v_err, delta=self.delta)
+            loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
         if self.normalize_by_samples:
             loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
         return loss_f

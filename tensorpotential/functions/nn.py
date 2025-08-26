@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from typing import Callable, Optional, Any
+
 import tensorflow as tf
 
-from typing import Callable, Optional
-
+from tensorpotential.functions.lora import (
+    initialize_lora_tensors,
+    lora_reconstruction,
+    apply_lora_update,
+)
 
 ACTIVATION_DICT = {"tanh": tf.nn.tanh, "silu": tf.nn.silu, "sigmoid": tf.nn.sigmoid}
 
@@ -18,18 +23,17 @@ class Linear(tf.Module):
         use_bias: bool = False,
         init_type: str = "normal",
         normalize: bool = True,
+        lora_config=None,
     ):
         super().__init__(name=name)
         self.n_in = n_in
         self.n_out = n_out
 
         self.init_type = init_type
-        assert init_type in ["normal", "zeros"]
+        assert init_type in ["normal", "uniform", "zeros"]
 
-        if normalize:
-            self.norm = 1.0 / n_in**0.5
-        else:
-            self.norm = 1.0
+        self.normalize = normalize
+        self.norm = 1.0
 
         if no_weight_decay:
             self.weight_decay = "no_decay"
@@ -38,20 +42,50 @@ class Linear(tf.Module):
         self.is_built = False
         self.use_bias = use_bias
 
+        self.lora_config = lora_config
+        self.lora = lora_config is not None
+
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
             var_name = f"Linear_{self.name}_{self.weight_decay}"
             shape = [self.n_in, self.n_out]
             b_shape = [1, self.n_out]
+            if self.normalize:
+                init_value = 1.0
+                self.norm = 1.0 / self.n_in**0.5
+            else:
+                init_value = 1.0 / self.n_in**0.5
             if self.init_type == "normal":
                 self.w = tf.Variable(
-                    tf.random.normal(shape=shape, dtype=float_dtype),
+                    tf.random.normal(shape=shape, stddev=init_value, dtype=float_dtype),
                     name=var_name,
                 )
                 if self.use_bias:
                     self.b = tf.Variable(
-                        tf.random.normal(shape=b_shape, dtype=float_dtype),
+                        tf.random.normal(
+                            shape=b_shape, stddev=init_value, dtype=float_dtype
+                        ),
+                        name=var_name + "_bias",
+                    )
+            if self.init_type == "uniform":
+                self.w = tf.Variable(
+                    tf.random.uniform(
+                        minval=-init_value,
+                        maxval=init_value,
+                        shape=shape,
+                        dtype=float_dtype,
+                    ),
+                    name=var_name,
+                )
+                if self.use_bias:
+                    self.b = tf.Variable(
+                        tf.random.uniform(
+                            minval=-init_value,
+                            maxval=init_value,
+                            shape=b_shape,
+                            dtype=float_dtype,
+                        ),
                         name=var_name + "_bias",
                     )
             elif self.init_type == "zeros":
@@ -64,14 +98,38 @@ class Linear(tf.Module):
                         tf.zeros(shape=b_shape, dtype=float_dtype),
                     )
             self.norm = tf.convert_to_tensor(self.norm, dtype=float_dtype)
+
+            if self.lora:
+                self.enable_lora_adaptation(self.lora_config)
+
             self.is_built = True
 
     @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config):
+        # x. upd _init_args,
+        # 2. add new trainable LORA weights,
+        # 3. set main weights as non-trainable
+        self.lora = True
+        self.lora_config = lora_config
+        self.lora_tensors = initialize_lora_tensors(self.w, lora_config)
+
+    def finalize_lora_update(self):
+        apply_lora_update(self.w, *self.lora_tensors, lora_config=self.lora_config)
+        del self.lora_tensors
+        self.lora = False
+        self.lora_config = None
+
+    @tf.Module.with_name_scope
     def __call__(self, x: tf.Tensor) -> tf.Tensor:
-        w = self.w * self.norm
+        w = self.w
+        if self.lora:
+            w = w + lora_reconstruction(
+                *self.lora_tensors, lora_config=self.lora_config
+            )
+        w = w * self.norm
         x = tf.einsum("...k,...kn->...n", x, w)
         if self.use_bias:
-            x += self.b
+            x += self.b * self.norm
 
         return x
 
@@ -85,6 +143,7 @@ class DenseLayer(tf.Module):
         name: str = "DenseLayer",
         no_weight_decay: bool = False,
         use_bias: bool = False,
+        lora_config=None,
     ):
         super().__init__(name=name)
         self.activation = activation
@@ -97,6 +156,9 @@ class DenseLayer(tf.Module):
             self.weight_decay = "_"
         self.is_built = False
         self.use_bias = use_bias
+
+        self.lora_config = lora_config
+        self.lora = lora_config is not None
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
@@ -112,22 +174,42 @@ class DenseLayer(tf.Module):
                     name=var_name + "_bias",
                 )
             self.norm = tf.convert_to_tensor(1 / self.n_in**0.5, dtype=float_dtype)
+
+            if self.lora:
+                self.enable_lora_adaptation(self.lora_config)
+
             self.is_built = True
 
     @tf.Module.with_name_scope
     def __call__(self, x: tf.Tensor) -> tf.Tensor:
+        w = self.w
+        if self.lora:
+            w = w + lora_reconstruction(
+                *self.lora_tensors, lora_config=self.lora_config
+            )
+        w = w * self.norm
+        x = tf.einsum("...k,...kn->...n", x, w)
+        if self.use_bias:
+            x += self.b
         if self.activation is not None:
-            w = self.w * self.norm
-            x = tf.einsum("...k,...kn->...n", x, w)
-            if self.use_bias:
-                x += self.b
-            x = self.activation(
-                x
-            )  # TODO: apply only if self.activation. Code above is always executed
-        else:
-            w = self.w * self.norm
-            x = tf.einsum("...k,...kn->...n", x, w)
+            # TODO: apply only if self.activation. Code above is always executed
+            x = self.activation(x)
         return x
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config):
+        # x. upd _init_args,
+        # 2. add new trainable LORA weights,
+        # 3. set main weights as non-trainable
+        self.lora = True
+        self.lora_config = lora_config
+        self.lora_tensors = initialize_lora_tensors(self.w, lora_config)
+
+    def finalize_lora_update(self):
+        apply_lora_update(self.w, *self.lora_tensors, lora_config=self.lora_config)
+        del self.lora_tensors
+        self.lora = False
+        self.lora_config = None
 
 
 def silu_n2norm(x):
@@ -163,13 +245,14 @@ class FullyConnectedMLP(tf.Module):
         name: str = "FullyConnectedMLP",
         no_weight_decay: bool = False,
         use_bias: bool = False,
+        lora_config=None,
     ):
         super().__init__(name=name)
         self.layers_config = [input_size] + hidden_layers + [output_size]
         self.nlayers = 0
         self.is_built = False
         self.use_bias = use_bias
-
+        self.lora_config = lora_config
         if activation is None:
             activation = silu_n2norm
         elif activation in ACTIVATION_DICT:
@@ -188,7 +271,13 @@ class FullyConnectedMLP(tf.Module):
                 a = activation
 
             layer = DenseLayer(
-                n_in, n_out, a, no_weight_decay=no_weight_decay, use_bias=use_bias
+                n_in,
+                n_out,
+                activation=a,
+                no_weight_decay=no_weight_decay,
+                use_bias=use_bias,
+                lora_config=self.lora_config,
+                name=f"{self.name}_layer{i}",
             )
             # layer.build()
             setattr(self, f"layer{i}", layer)
@@ -211,6 +300,20 @@ class FullyConnectedMLP(tf.Module):
 
     def __repr__(self):
         return f"{self.name}{self.layers_config}"
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        # 1. upd _init_args,
+        # 2. add new trainable LORA weights,
+        # 3. set main weights as non-trainable
+        for i in range(self.nlayers):
+            layer = getattr(self, f"layer{i}")
+            layer.enable_lora_adaptation(lora_config)
+
+    def finalize_lora_update(self):
+        for i in range(self.nlayers):
+            layer = getattr(self, f"layer{i}")
+            layer.finalize_lora_update()
 
 
 def scalar_LN(x, scale: tf.Variable, shift: tf.Variable = None, r_map=None):

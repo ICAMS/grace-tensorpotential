@@ -40,8 +40,8 @@ class TensorPotential:
         regularization_loss: LossFunction = None,
         compute_metrics: ComputeMetrics = None,
         strategy: tf.distribute.Strategy = None,
-        model_compute_function=ComputeStructureEnergyAndForcesAndVirial,
-        model_train_function=ComputeBatchEnergyAndForces,
+        model_compute_function=ComputeStructureEnergyAndForcesAndVirial(),
+        model_train_function=ComputeBatchEnergyAndForces(),
         float_dtype: tf.DType = tf.float64,
         eager_mode: bool = False,
         jit_compile: bool = True,
@@ -68,6 +68,8 @@ class TensorPotential:
         self.optimizer = None
         self.loss_norm_by_batch_size = loss_norm_by_batch_size
 
+        self.stop_training = False
+
         with self.strategy.scope():
             self.model = TPModel(
                 potential,
@@ -89,14 +91,14 @@ class TensorPotential:
             if not eager_mode:
                 self.decorate_tf_function(jit_compile=jit_compile)
 
-            opt = self.fit_config.get("optimizer", None)
+            opt = self.fit_config.get("optimizer")
             if opt == "Adam":
                 self.optimizer = tf.keras.optimizers.Adam(
                     **self.fit_config.get(
                         "opt_params", {"learning_rate": 0.01, "amsgrad": True}
                     ),
                 )
-                # self.optimizer.exclude_from_weight_decay(var_names=['no_decay'])
+                self.optimizer.exclude_from_weight_decay(var_names=["no_decay", "FC"])
                 # self.optimizer.exclude_from_weight_decay(var_names=["reducing", "FC"])
                 try:
                     self.use_ema = self.fit_config["opt_params"]["use_ema"]
@@ -107,20 +109,59 @@ class TensorPotential:
                 if self.use_ema:
                     self.swap_on_epoch = True
                     self._ema_weights_in_model = False
+                # self.setup_checkpoint_with_optimizer()
+            # else:
+            #     self.checkpoint = tf.train.Checkpoint(
+            #         model=self.model,
+            #         step=tf.Variable(0, dtype=tf.int32, trainable=False),
+            #         epoch=tf.Variable(0, dtype=tf.int32, trainable=False),
+            #     )
+            self.setup_checkpoint()
 
-                self.setup_checkpoint_with_optimizer()
-            else:
-                self.checkpoint = tf.train.Checkpoint(model=self.model)
-
-    def setup_checkpoint_with_optimizer(self):
-        self.checkpoint = tf.train.Checkpoint(
-            model=self.model, optimizer=self.optimizer
+    def setup_checkpoint(self, with_optimizer=True):
+        trackable_objs = {
+            "model": self.model,
+            "step": tf.Variable(0, dtype=tf.int32, trainable=False),
+            "epoch": tf.Variable(0, dtype=tf.int32, trainable=False),
+        }
+        if self.optimizer and with_optimizer:
+            trackable_objs["optimizer"] = self.optimizer
+        logging.info(
+            f"Setting checkpoint with trackable objects: {trackable_objs.keys()}"
         )
+        self.checkpoint = tf.train.Checkpoint(**trackable_objs)
+
+    @property
+    def step(self):
+        return int(self.checkpoint.step.numpy())
+
+    @step.setter
+    def step(self, value):
+        self.checkpoint.step.assign(value)
+
+    def increment_step(self):
+        self.checkpoint.step.assign_add(1)
+
+    @property
+    def epoch(self):
+        return int(self.checkpoint.epoch.numpy())
+
+    @epoch.setter
+    def epoch(self, value):
+        self.checkpoint.epoch.assign(value)
+
+    def increment_epoch(self):
+        self.checkpoint.epoch.assign_add(1)
+
+    def reset_epoch_and_step(self):
+        self.checkpoint.epoch.assign(0)
+        self.checkpoint.step.assign(0)
 
     def reset_optimizer(self):
         with self.strategy.scope():
-            self.optimizer = self.optimizer.__class__(**self.optimizer.get_config())
-            self.setup_checkpoint_with_optimizer()
+            if self.optimizer:
+                self.optimizer = self.optimizer.__class__(**self.optimizer.get_config())
+                self.setup_checkpoint()
 
     def get_model_grad_signatures(self):
         dtypes = {"int": tf.int32, "float": self.float_dtype}
@@ -196,16 +237,18 @@ class TensorPotential:
         verbose=False,
         checkpoint_name=None,
         raise_errors=False,
+        assert_consumed=False,
     ):
         """load checkpoint from checkpoint_dir if exists"""
         if checkpoint_name is None:
             checkpoint_name = self.checkpoint_prefix + suffix
         if os.path.exists(f"{os.path.join(checkpoint_name)}.index"):
             with self.strategy.scope():
+                status = self.checkpoint.read(checkpoint_name)
                 if expect_partial:
-                    self.checkpoint.read(checkpoint_name).expect_partial()
-                else:
-                    self.checkpoint.read(checkpoint_name)
+                    status.expect_partial()
+            if assert_consumed:
+                status.assert_consumed()
             if verbose:
                 logging.info(f"Loaded checkpoint from {checkpoint_name}")
         else:
@@ -274,7 +317,9 @@ class TensorPotential:
                     self.regularization_loss.name
                 ]
                 total_loss += reg_los / self.strategy.num_replicas_in_sync
-        gradients = tape.gradient(total_loss, self.model.trainable_variables)
+
+        # custom filtered variables to train
+        gradients = tape.gradient(total_loss, self.model.variables_to_train)
 
         return total_loss, model_prediction, gradients, losses_dict
 
@@ -291,7 +336,7 @@ class TensorPotential:
             }
         )
         result.update(metrics)
-        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+        self.optimizer.apply_gradients(zip(gradients, self.model.variables_to_train))
         for k, v in losses_dict.items():
             result[f"loss_component/{k}/train"] = v
         return result
@@ -416,7 +461,7 @@ class TensorPotential:
 
     def _swap_variables(self, optimizer):
         for var, average_var in zip(
-            self.model.trainable_variables,
+            self.model.variables_to_train,
             optimizer._model_variables_moving_average,
         ):
             # if isinstance(var, tf.Variable):
@@ -512,7 +557,7 @@ class TensorPotential:
 
     def _finalize_ema_values(self, optimizer):
         for var, average_var in zip(
-            self.model.trainable_variables,
+            self.model.variables_to_train,
             optimizer._model_variables_moving_average,
         ):
             # if isinstance(var, tf.Variable):
@@ -524,3 +569,24 @@ class TensorPotential:
                 lambda a, b: a.assign(b),
                 args=(var,),
             )
+
+    def enable_lora_adaptation(self, lora_config=None):
+        raise NotImplementedError("This functionality is not yet fully implemented")
+        self.model.enable_lora_adaptation(lora_config=lora_config)
+        with self.strategy.scope():
+            self.setup_checkpoint()
+
+    def finalize_lora_update(self):
+        raise NotImplementedError("This functionality is not yet fully implemented")
+        self.model.finalize_lora_update()
+        logging.info("Resetting optimizer after reducing LORA")
+        self.reset_optimizer()
+
+    def set_trainable_variables(self, only_trainable_names, verbose=False):
+        with self.strategy.scope():
+            self.model.set_trainable_variables(
+                only_trainable_names=only_trainable_names, verbose=verbose
+            )
+
+    def is_lora_enabled(self):
+        return self.model.is_lora_enabled()

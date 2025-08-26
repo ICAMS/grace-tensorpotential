@@ -1,6 +1,14 @@
 import os
 
 import pytest
+from ase.neighborlist import neighbor_list
+from tensorpotential.functions.lora import (
+    initialize_lora_tensors,
+    lora_reconstruction,
+    apply_lora_update,
+)
+
+from tensorpotential.functions.nn import DenseLayer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
@@ -55,9 +63,9 @@ def test_radial_basis():
         # basis_type="Cheb",
         nfunc=nfunc,
         rcut=rcut,
-        p=10,
+        p=16,
         normalized=False,
-        init_gamma=100,
+        init_gamma=1,
     )
     basis.build(float64)
     baza = basis.frwrd({"fake_bonds": fake_bonds})
@@ -113,7 +121,7 @@ def test_mlp_function():
     fake_bonds = np.random.uniform(0, rcut, size=(100_000, 1))
     data = {"fake_bonds": fake_bonds}
     basis = RadialBasis(
-        name="baza",
+        name="base",
         bonds="fake_bonds",
         # basis_type="Cheb",
         basis_type="RadSinBessel",
@@ -259,7 +267,7 @@ def test_bond_cut():
         name=constants.PLACEHOLDER,
     )
     z = ScalarChemicalEmbedding("z", element_map=el_map, embedding_size=2)
-    model = TPModel(instructions=[d_ij, bs, z], compute_function=ComputePlaceholder)
+    model = TPModel(instructions=[d_ij, bs, z], compute_function=ComputePlaceholder())
     model.build(float64)
     calc = TPCalculator(
         model=model,
@@ -550,9 +558,6 @@ def test_avg_sg():
 
 
 def test_fc_func():
-    from ase.build import bulk
-    from ase.neighborlist import neighbor_list
-    from tensorpotential.instructions.compute import FCRight2Left
 
     cutoff = 4
     c = bulk("C", "diamond", cubic=True)
@@ -883,6 +888,694 @@ def test_rot_invar(norm):
     I_l.build(float64)
     inpt_dict = I_l(inpt_dict)
     out = inpt_dict[I_l.name]
+    print(out)
+    print(out[:3] - out[3:])
+    assert np.allclose(out[:3], out[3:])
+
+
+def test_Dense_layer():
+
+    float_dtype = tf.float64
+    n_in = 10
+    n_out = 20
+    dense = DenseLayer(n_in=n_in, n_out=n_out, name="TestDenseLayer")
+    dense.build(float_dtype)
+
+    batch_size = 15
+    x = tf.random.uniform(
+        shape=(
+            batch_size,
+            n_in,
+        ),
+        dtype=float_dtype,
+    )
+    assert x.shape == (batch_size, n_in)
+    y = dense(x)
+    assert y.shape == (batch_size, n_out)
+    assert not np.allclose(y.numpy(), 0.0)
+
+
+def test_LORA_Dense_layer_activate_reduce():
+
+    float_dtype = tf.float64
+    n_in = 10
+    n_out = 20
+    lora_rank = 2
+    lora_config = {"rank": lora_rank, "alpha": 1.0}
+    dense = DenseLayer(
+        n_in=n_in,
+        n_out=n_out,
+        name="TestDenseLayer",
+    )
+    dense.build(float_dtype)
+
+    batch_size = 15
+    x = tf.random.uniform(
+        shape=(
+            batch_size,
+            n_in,
+        ),
+        dtype=float_dtype,
+    )
+    assert x.shape == (batch_size, n_in)
+    y = dense(x)
+    assert y.shape == (batch_size, n_out)
+    assert dense.w._trainable
+    assert not hasattr(dense, "lora_tensors")
+    assert not dense.lora
+
+    # activate lora
+    dense.enable_lora_adaptation(lora_config)
+    y_lora = dense(x)
+
+    assert hasattr(dense, "lora_tensors")
+    assert dense.lora
+    assert not dense.w._trainable
+    assert np.allclose(y.numpy(), y_lora.numpy())
+
+    # reduce_lora
+    dense.finalize_lora_update()
+    y_reduce_lora = dense(x)
+
+    assert not hasattr(dense, "lora_tensors")
+    assert not dense.lora
+    assert dense.w._trainable
+    assert np.allclose(y.numpy(), y_reduce_lora.numpy())
+
+
+def test_LORA_Dense_layer_init():
+
+    float_dtype = tf.float64
+    n_in = 10
+    n_out = 20
+    lora_rank = 2
+    lora_config = {"rank": lora_rank, "alpha": 1.0}
+    dense = DenseLayer(
+        n_in=n_in, n_out=n_out, name="TestDenseLayer", lora_config=lora_config
+    )
+    dense.build(float_dtype)
+
+    batch_size = 15
+    x = tf.random.uniform(
+        shape=(
+            batch_size,
+            n_in,
+        ),
+        dtype=float_dtype,
+    )
+    assert x.shape == (batch_size, n_in)
+    y = dense(x).numpy()
+    assert y.shape == (batch_size, n_out)
+    assert not dense.w._trainable
+    assert hasattr(dense, "lora_tensors")
+    assert dense.lora
+
+    # modify lora tensors
+    for t in dense.lora_tensors:
+        t.assign(1e-2 * tf.ones_like(t))
+
+    yb = dense(x).numpy()
+    assert not np.allclose(y, yb)
+
+    # reduce_lora
+    dense.finalize_lora_update()
+    y_reduce_lora = dense(x).numpy()
+    assert not hasattr(dense, "lora_tensors")
+    assert not dense.lora
+    assert dense.w._trainable
+    assert np.allclose(yb, y_reduce_lora)
+
+
+def test_LORA_ScalarChemicalEmbedding():
+    float_dtype = tf.float64
+    Z = ScalarChemicalEmbedding(
+        name="Z", element_map={"H": 0, "C": 1}, embedding_size=7
+    )
+    Z.build(float_dtype)
+
+    w = Z.frwrd({}).numpy()
+    assert w.shape == (2, 7)
+    assert not Z.lora
+
+    Z.enable_lora_adaptation({"rank": 5, "alpha": 1})
+
+    w_new = Z.frwrd({}).numpy()
+    assert Z.lora
+    assert w_new.shape == (2, 7)
+    assert np.allclose(w_new, w)
+    assert hasattr(Z, "lora_tensors")
+
+    # modify lora tensors
+    for t in Z.lora_tensors:
+        t.assign(tf.ones_like(t))
+
+    w_newb = Z.frwrd({}).numpy()
+    assert not np.allclose(w_new, w_newb)
+
+    Z.finalize_lora_update()
+
+    w_new_2 = Z.frwrd({}).numpy()
+    assert not Z.lora
+    assert w_new_2.shape == (2, 7)
+    assert np.allclose(w_new_2, w_newb)
+    assert not hasattr(Z, "lora_tensors")
+
+
+def test_LORA_FCRight2Left():
+    cutoff = 4
+    c = bulk("C", "diamond", cubic=True)
+    c.rattle(stdev=0.1)
+    ind_i, ind_j, bond_vector = neighbor_list("ijD", c, cutoff=cutoff)
+    size = 10
+    lmax = 4
+    n_out = 23
+    np.random.seed(322)
+    fake_neighbors = np.random.normal(0, 3, size=(size, 3))
+    fake_center = np.array([0, 0, 0]).reshape(1, -1)
+    tensor_dict = {
+        constants.BOND_VECTOR: bond_vector,
+        constants.BOND_IND_I: ind_i,
+        constants.N_ATOMS_BATCH_TOTAL: len(c),
+    }
+    d_ij = BondLength()
+    d_ij.build(float64)
+    tensor_dict = d_ij(tensor_dict)
+
+    rhat = ScaledBondVector(bond_length=d_ij)
+    rhat.build(float64)
+    tensor_dict = rhat(tensor_dict)
+
+    Y = SphericalHarmonic(vhat=rhat, lmax=lmax, name="Y")
+    Y.build(float64)
+    Y.n_out = n_out
+    tensor_dict = Y(tensor_dict)
+    #
+    # tensor_dict[Y.name] =  tensor_dict[Y.name][:, tf.newaxis, :]
+    tensor_dict[Y.name] = repeated_tensor = tf.repeat(
+        tensor_dict[Y.name][:, tf.newaxis, :], repeats=n_out, axis=1
+    )
+
+    p = ProductFunction(
+        left=Y,
+        right=Y,
+        name="AA",
+        lmax=lmax,
+        Lmax=1,
+        keep_parity=[[0, 1], [1, -1], [2, 1], [3, -1]],
+    )
+    p.build(float64)
+    tensor_dict = p(tensor_dict)
+
+    fc = FCRight2Left(left=Y, right=p, n_out=7, name="fc", norm_out=True)
+    fc.build(float64)
+    fc_res = fc.frwrd(tensor_dict).numpy()
+
+    print(fc_res.shape)
+    print(f"{fc.w_left.shape=}")
+    print(f"{fc.w_right.shape=}")
+
+    # activate LORA
+    lora_config = {"rank": 2, "alpha": 1}
+    fc.enable_lora_adaptation(lora_config)
+    assert fc.lora
+    assert len(fc.w_left_lora_tensors) == 3
+    assert len(fc.w_right_lora_tensors) == 3
+    assert not fc.w_left.trainable
+    assert not fc.w_right.trainable
+
+    fc_res_2 = fc.frwrd(tensor_dict).numpy()
+    assert np.allclose(fc_res, fc_res_2)
+
+    # upd LORA tensors
+    for t in fc.w_left_lora_tensors:
+        t.assign(1e-2 * tf.ones_like(t))
+
+    for t in fc.w_right_lora_tensors:
+        t.assign(1e-2 * tf.ones_like(t))
+
+    fc_res_2b = fc.frwrd(tensor_dict).numpy()
+    assert not np.allclose(fc_res, fc_res_2b)
+
+    # reduce LORA
+    fc.finalize_lora_update()
+
+    assert not fc.lora
+    assert not hasattr(fc, "w_left_lora_tensors")
+    assert not hasattr(fc, "w_right_lora_tensors")
+    assert fc.w_left.trainable
+    assert fc.w_right.trainable
+
+    fc_res_3 = fc.frwrd(tensor_dict).numpy()
+
+    assert np.allclose(fc_res_2b, fc_res_3)
+
+
+def test_LORA_MLPRadialFunction():
+    nfunc = 8
+    rcut = 6.2
+    n_rad_max = 22
+    lmax = 2
+
+    fake_bonds = np.random.uniform(0, rcut, size=(100_000, 1))
+    data = {"fake_bonds": fake_bonds}
+    g_k = RadialBasis(
+        name="base",
+        bonds="fake_bonds",
+        basis_type="RadSinBessel",
+        p=5,
+        nfunc=nfunc,
+        rcut=rcut,
+        normalized=True,
+    )
+    g_k.build(float64)
+    data = g_k(data)
+
+    R_nl = MLPRadialFunction(
+        n_rad_max=n_rad_max,
+        input_shape=nfunc,
+        lmax=lmax,
+        basis=g_k,
+        name="R",
+        activation="tanh",
+    )
+    R_nl.build(float64)
+
+    r1 = R_nl.frwrd(data).numpy()
+    print("Before LORA")
+    train_var_names_1 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_1 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_1=}")
+    print(f"{non_train_var_names_1=}")
+
+    # activate LORA
+    lora_config = {"rank": 2, "alpha": 1}
+    R_nl.enable_lora_adaptation(lora_config)
+
+    r2 = R_nl.frwrd(data).numpy()
+
+    print("AFTER LORA")
+    train_var_names_2 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_2 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_2=}")
+    print(f"{non_train_var_names_2=}")
+
+    assert np.allclose(r1, r2)
+    assert train_var_names_1 != train_var_names_2
+    assert non_train_var_names_1 != non_train_var_names_2
+
+    for i in range(R_nl.mlp.nlayers):
+        layer = getattr(R_nl.mlp, f"layer{i}")
+        for t in layer.lora_tensors:
+            t.assign(tf.ones_like(t))
+
+    r2b = R_nl.frwrd(data).numpy()
+    assert not np.allclose(r1, r2b)
+
+    R_nl.finalize_lora_update()
+
+    print("AFTER REDUCE LORA")
+    r3 = R_nl.frwrd(data).numpy()
+    train_var_names_3 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_3 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_3=}")
+    print(f"{non_train_var_names_3=}")
+
+    assert train_var_names_1 == train_var_names_3
+    assert non_train_var_names_1 == non_train_var_names_3
+
+    assert np.allclose(r2b, r3)
+
+    R_nl_lora = MLPRadialFunction(
+        n_rad_max=n_rad_max,
+        input_shape=nfunc,
+        lmax=lmax,
+        basis=g_k,
+        name="R",
+        activation="tanh",
+        lora_config=lora_config,
+    )
+    R_nl_lora.build(float64)
+
+    train_var_names_4 = sorted([var.name for var in R_nl_lora.trainable_variables])
+    non_train_var_names_4 = sorted(
+        [var.name for var in R_nl_lora.non_trainable_variables]
+    )
+    print(f"{train_var_names_4=}")
+    print(f"{non_train_var_names_4=}")
+
+    assert train_var_names_2 == train_var_names_4
+    assert non_train_var_names_2 == non_train_var_names_4
+
+
+def test_LORA_MLPRadialFunction_v2():
+    nfunc = 8
+    rcut = 6.2
+    n_rad_max = 22
+    lmax = 2
+
+    fake_bonds = np.random.uniform(0, rcut, size=(100_000, 1))
+    data = {"fake_bonds": fake_bonds}
+    g_k = RadialBasis(
+        name="base",
+        bonds="fake_bonds",
+        basis_type="RadSinBessel",
+        p=5,
+        nfunc=nfunc,
+        rcut=rcut,
+        normalized=True,
+    )
+    g_k.build(float64)
+    data = g_k(data)
+
+    R_nl = MLPRadialFunction_v2(
+        n_rad_max=n_rad_max,
+        input_shape=nfunc,
+        lmax=lmax,
+        basis=g_k,
+        name="R",
+        activation="tanh",
+    )
+    R_nl.build(float64)
+
+    r1 = R_nl.frwrd(data).numpy()
+    print("Before LORA")
+    train_var_names_1 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_1 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_1=}")
+    print(f"{non_train_var_names_1=}")
+
+    # activate LORA
+    lora_config = {"rank": 2, "alpha": 1}
+    R_nl.enable_lora_adaptation(lora_config)
+
+    r2 = R_nl.frwrd(data).numpy()
+
+    print("AFTER LORA")
+    train_var_names_2 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_2 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_2=}")
+    print(f"{non_train_var_names_2=}")
+
+    assert np.allclose(r1, r2)
+    assert train_var_names_1 != train_var_names_2
+    assert non_train_var_names_1 != non_train_var_names_2
+
+    for layer in R_nl.layers:
+        for t in layer.lora_tensors:
+            t.assign(tf.ones_like(t))
+
+    r2b = R_nl.frwrd(data).numpy()
+    assert not np.allclose(r1, r2b)
+
+    R_nl.finalize_lora_update()
+
+    print("AFTER REDUCE LORA")
+    r3 = R_nl.frwrd(data).numpy()
+    train_var_names_3 = sorted([var.name for var in R_nl.trainable_variables])
+    non_train_var_names_3 = sorted([var.name for var in R_nl.non_trainable_variables])
+    print(f"{train_var_names_3=}")
+    print(f"{non_train_var_names_3=}")
+
+    assert train_var_names_1 == train_var_names_3
+    assert non_train_var_names_1 == non_train_var_names_3
+
+    assert np.allclose(r2b, r3)
+
+    R_nl_lora = MLPRadialFunction_v2(
+        n_rad_max=n_rad_max,
+        input_shape=nfunc,
+        lmax=lmax,
+        basis=g_k,
+        name="R",
+        activation="tanh",
+        lora_config=lora_config,
+    )
+    R_nl_lora.build(float64)
+
+    train_var_names_4 = sorted([var.name for var in R_nl_lora.trainable_variables])
+    non_train_var_names_4 = sorted(
+        [var.name for var in R_nl_lora.non_trainable_variables]
+    )
+    print(f"{train_var_names_4=}")
+    print(f"{non_train_var_names_4=}")
+
+    assert train_var_names_2 == train_var_names_4
+    assert non_train_var_names_2 == non_train_var_names_4
+
+
+def test_initialize_lora_tensors_keep_dims():
+    w_shape = [89, 13, 32, 5]
+    w = tf.Variable(tf.zeros(w_shape, dtype=tf.float64))
+    lora_config = dict(rank=3, alpha=1, keep_dims=1)
+
+    lora_tensors = initialize_lora_tensors(w, lora_config=lora_config, name="w")
+    for t in lora_tensors:
+        print(t.name, t.shape)
+    assert len(lora_tensors) == 3
+    assert lora_tensors[0].shape.as_list() == [89, 13, 3]
+    assert lora_tensors[1].shape.as_list() == [89, 32, 3]
+    assert lora_tensors[2].shape.as_list() == [89, 5, 3]
+
+    delta_w = lora_reconstruction(*lora_tensors, lora_config=lora_config)
+
+    print(f"{delta_w.shape.as_list()=}")
+    assert delta_w.shape.as_list() == w_shape
+
+    apply_lora_update(w, *lora_tensors, lora_config=lora_config)
+    assert w._trainable
+
+
+def test_initialize_lora_tensors_additive():
+    w_shape = [89, 13, 32, 5]
+    w = tf.Variable(tf.zeros(w_shape, dtype=tf.float64))
+    lora_config = dict(mode="full_additive")
+
+    lora_tensors = initialize_lora_tensors(w, lora_config=lora_config, name="w")
+    assert not w._trainable
+    for t in lora_tensors:
+        print(t.name, t.shape)
+        assert t._trainable
+    assert len(lora_tensors) == 1
+    assert lora_tensors[0].shape.as_list() == w_shape
+
+    delta_w = lora_reconstruction(*lora_tensors, lora_config=lora_config)
+
+    print(f"{delta_w.shape.as_list()=}")
+    assert delta_w.shape.as_list() == w_shape
+
+    apply_lora_update(w, *lora_tensors, lora_config=lora_config)
+    assert w._trainable
+
+
+@pytest.mark.parametrize(
+    "full_par",
+    [
+        True,
+        False,
+    ],
+)
+def test_rot_invar_2l(full_par):
+    from tensorpotential.instructions.compute import Parity
+
+    lmax_bond = 5
+    n_rad_base = 8
+    n_rad_max_bond = 5
+    n_rad_max_out = 6
+    cutoff_rad = 6.0
+
+    np.random.seed(322)
+    tf.random.set_seed(322)
+
+    axis = np.array([1, 1, 3])
+    theta = np.pi / 2.2
+    axis = axis / np.linalg.norm(axis)  # normalize the rotation vector first
+    rot = Rotation.from_rotvec(theta * axis)
+
+    coord = np.array([[0.2, 0.3, 2.1], [0.1, 3.2, 0.5], [0.3, 1, 2]])
+    coord_r = rot.apply(coord)
+    coord_2 = np.vstack([coord, coord_r]).astype(np.float64)
+    print(coord_2)
+    # stage 1: input vectors:
+
+    indj = [1, 2, 0, 2, 0, 1, 4, 5, 3, 5, 3, 4]
+    indi = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+    atomic_mu_i = [0, 1, 0, 0, 1, 0]
+    # muj = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+    muj = np.take(atomic_mu_i, indj, axis=0)
+    rj = np.take(coord_2, indj, axis=0)
+    ri = np.take(coord_2, indi, axis=0)
+    rij = rj - ri
+    inpt_dict = {
+        constants.BOND_VECTOR: rij,
+        constants.BOND_IND_J: indj,
+        constants.BOND_MU_J: muj,
+        constants.BOND_IND_I: indi,
+        constants.N_ATOMS_BATCH_TOTAL: len(coord_2),
+        constants.ATOMIC_MU_I: atomic_mu_i,
+    }
+    ###########################################################################################
+    with InstructionManager() as instructor:
+        d_ij = BondLength()
+        # d_ij.build(float64)
+        # inpt_dict = d_ij(inpt_dict)
+        rhat = ScaledBondVector(bond_length=d_ij)
+        # rhat.build(float64)
+        # inpt_dict = rhat(inpt_dict)
+        g_k = RadialBasis(
+            bonds=d_ij,
+            basis_type="SBessel",
+            nfunc=n_rad_base,
+            rcut=cutoff_rad,
+            p=5,
+        )
+        # g_k.build(float64)
+        # inpt_dict = g_k(inpt_dict)
+
+        R_nl = MLPRadialFunction(
+            n_rad_max=n_rad_max_bond, lmax=lmax_bond, basis=g_k, name="R"
+        )
+        # R_nl.build(float64)
+        # inpt_dict = R_nl(inpt_dict)
+
+        Y = SphericalHarmonic(vhat=rhat, lmax=lmax_bond, name="Y")
+        # Y.build(float64)
+        # inpt_dict = Y(inpt_dict)
+
+        z = ScalarChemicalEmbedding(
+            element_map={"H": 0, "C": 1},
+            embedding_size=54,
+            name="Z",
+        )
+        # z.build(float64)
+        # inpt_dict = z(inpt_dict)
+
+        A = SingleParticleBasisFunctionScalarInd(
+            radial=R_nl,
+            angular=Y,
+            indicator=z,
+            name="A",
+        )
+        # A.build(float64)
+        # A.lin_transform.build(float64)
+        # inpt_dict = A(inpt_dict)
+
+        AA = ProductFunction(
+            left=A,
+            right=A,
+            name="AA",
+            lmax=lmax_bond,
+            Lmax=lmax_bond,
+            normalize=True,
+        )
+        # AA.build(float64)
+        # inpt_dict = AA(inpt_dict)
+
+        AAA = ProductFunction(
+            left=AA,
+            right=A,
+            name="AAA",
+            lmax=lmax_bond,
+            Lmax=lmax_bond,
+            normalize=True,
+        )
+        # AAA.build(float64)
+        # inpt_dict = AAA(inpt_dict)
+        I = FunctionReduceN(
+            instructions=[A, AA, AAA],
+            name="E",
+            ls_max=[lmax_bond, lmax_bond, lmax_bond],
+            # n_in=n_rad_max_bond,
+            n_out=n_rad_max_bond,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=2,
+            allowed_l_p=Parity.REAL_PARITY,
+        )
+        # I_l.build(float64)
+        # inpt_dict = I_l(inpt_dict)
+        R1_nl = MLPRadialFunction(
+            n_rad_max=n_rad_max_bond,
+            lmax=lmax_bond,
+            basis=g_k,
+            name="R1",
+            hidden_layers=[64, 64],
+            activation="tanh",
+        )
+        if full_par:
+            p_sec_lay = Parity.FULL_PARITY
+        else:
+            p_sec_lay = Parity.REAL_PARITY
+        YI = SingleParticleBasisFunctionEquivariantInd(
+            radial=R1_nl,
+            angular=Y,
+            indicator=I,
+            name="YI",
+            lmax=lmax_bond,
+            Lmax=lmax_bond,
+            avg_n_neigh=1.0,
+            keep_parity=p_sec_lay,
+            normalize=True,
+        )
+
+        B = FunctionReduceN(
+            instructions=[YI, I],
+            name="B",
+            ls_max=lmax_bond,
+            out_norm=False,
+            n_out=n_rad_max_bond,
+            is_central_atom_type_dependent=False,
+            allowed_l_p=p_sec_lay,
+        )
+        B1 = FCRight2Left(
+            left=B,
+            right=B,
+            name="B1",
+            n_out=n_rad_max_bond,
+            is_central_atom_type_dependent=False,
+            norm_out=True,
+        )
+        BB = ProductFunction(
+            left=B1,
+            right=B1,
+            name="BB",
+            lmax=lmax_bond,
+            Lmax=lmax_bond,
+            keep_parity=p_sec_lay,
+            normalize=True,
+        )
+
+        BB1 = FCRight2Left(
+            left=BB,
+            right=B,
+            name="BB1",
+            n_out=n_rad_max_bond,
+            is_central_atom_type_dependent=False,
+            norm_out=True,
+        )
+        BBB = ProductFunction(
+            left=BB1,
+            right=B,
+            name="BBB",
+            lmax=0,
+            Lmax=0,
+            keep_parity=[[0, 1]],
+            normalize=True,
+        )
+        I2 = FunctionReduceN(
+            instructions=[B, BB, BBB],
+            name="E2",
+            ls_max=[0, 0, 0],
+            # n_in=n_rad_max_bond,
+            n_out=n_rad_max_bond,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=2,
+            allowed_l_p=Parity.REAL_PARITY,
+        )
+    ins = instructor.get_instructions()
+    for i_n, i in ins.items():
+        i.build(tf.float64)
+        inpt_dict = i(inpt_dict)
+
+    out = inpt_dict[I2.name]
     print(out)
     print(out[:3] - out[3:])
     assert np.allclose(out[:3], out[3:])

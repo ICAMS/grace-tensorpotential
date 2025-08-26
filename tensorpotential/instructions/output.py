@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import tensorflow as tf
 
@@ -8,10 +10,13 @@ from tensorpotential.functions.nn import (
     FullyConnectedMLP,
     Linear,
     scalar_rms_ln,
+    ACTIVATION_DICT,
 )
 from tensorpotential.instructions.base import (
     capture_init_args,
     TPInstruction,
+    LORAInstructionMixin,
+    ElementsReduceInstructionMixin,
 )
 from tensorpotential.instructions.compute import (
     FunctionReduce,
@@ -30,6 +35,7 @@ class CreateOutputTarget(TPInstruction):
         else:
             self.value = initial_value
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
             self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
@@ -100,6 +106,7 @@ class LinearOut2Target(TPOutputInstruction):
                 for ins in self.origin
             ]
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
             if self.trainable:
@@ -155,6 +162,7 @@ class FSOut2ScalarTarget(TPOutputInstruction):
         ), f"`n_out` if FSOut2ScalarTarget.origin should be equal to len(fs_parameters)"
         self.fs_parameters = fs_parameters
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         self.fs_parameters = [
             (
@@ -251,8 +259,10 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
             hidden_layers=self.hidden_layers,
             output_size=self.n_out,
             activation=activation,
+            name=self.name + "_MLP",
         )
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.mlp.is_built:
             self.mlp.build(float_dtype)
@@ -260,7 +270,7 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
             shape = [1, self.origin[0].n_out]
             # self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
             self.scale = tf.Variable(
-                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype)
+                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype), name="scale"
             )
         self.is_built = True
 
@@ -297,7 +307,7 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
 
 
 @capture_init_args
-class LinMLPOut2ScalarTarget(TPOutputInstruction):
+class LinMLPOut2ScalarTarget(TPOutputInstruction, LORAInstructionMixin):
     """
     Adds origin to target via MLP transformation and a single element without transformation
     """
@@ -317,9 +327,12 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction):
         normalize: str = None,
         activation: str = None,
         l: int = 0,
+        lora_config: dict[str, Any] = None,
         **kwargs,
     ):
         super(LinMLPOut2ScalarTarget, self).__init__(name=name, target=target)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
+
         self.origin = origin
         self.n_out = n_out
         self.normalize = normalize
@@ -344,8 +357,11 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction):
             hidden_layers=self.hidden_layers,
             activation=activation,
             output_size=self.n_out,
+            lora_config=lora_config,
+            name=self.name + "_MLP",
         )
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.mlp.is_built:
             self.mlp.build(float_dtype)
@@ -353,9 +369,30 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction):
             shape = [1, self.origin[0].n_out - 1]
             # self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
             self.scale = tf.Variable(
-                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype)
+                tf.random.normal(shape, stddev=1e-16, dtype=float_dtype), name="scale"
             )
+
+        if self.lora_config:
+            self.enable_lora_adaptation(self.lora_config)
+
         self.is_built = True
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        # 1. upd _init_args,
+        # 2. add new trainable LORA weights,
+        # 3. set main weights as non-trainable
+        super().enable_lora_adaptation(lora_config)
+        self.mlp.enable_lora_adaptation(lora_config)
+        if self.normalize is not None:
+            self.scale._trainable = False
+
+    def finalize_lora_update(self):
+        # common part
+        super().finalize_lora_update()
+        self.mlp.finalize_lora_update()
+        if self.normalize is not None:
+            self.scale._trainable = True
 
     def frwrd(self, input_data, training=False):
         target = input_data[f"{self.target.name}"]
@@ -384,6 +421,86 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction):
         norm_out = transformed_origin + lin_origin
 
         return target + norm_out
+
+
+@capture_init_args
+class LinMLPOut2ScalarTarget_v2(TPOutputInstruction):
+    """
+    Adds origin to target via MLP transformation and a single element without transformation
+    """
+
+    input_tensor_spec = {
+        constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
+        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        origin: list[FunctionReduce],
+        target: CreateOutputTarget,
+        hidden_layers: list[int] = None,
+        name="LinMLPOut2ScalarTarget_v2",
+        n_out: int = 1,
+        init_type: str = "normal",
+        normalize: bool = True,
+        activation: str = "tanh",
+        l: int = 0,
+        **kwargs,
+    ):
+        super(LinMLPOut2ScalarTarget_v2, self).__init__(name=name, target=target)
+        self.origin = origin
+        self.n_out = n_out
+        self.normalize = normalize
+
+        if hidden_layers is None:
+            self.hidden_layers = [32]
+        else:
+            self.hidden_layers = hidden_layers
+        try:
+            lmax = np.max([ins.lmax for ins in self.origin])
+        except AttributeError:
+            lmax = 0
+        assert lmax == 0, "Trying to output non-scalar origin to a scalar target"
+        self.assert_l_compatibility(target)
+        out_shapes = [ins.n_out for ins in self.origin]
+        assert len(set(out_shapes)) == 1, "Not all shapes are the same"
+
+        total_shapes = [out_shapes[0] - 1] + self.hidden_layers + [self.n_out]
+        self.layers = []
+        for i, (n_in, n_out) in enumerate(zip(total_shapes, total_shapes[1:])):
+            self.layers.append(
+                Linear(
+                    n_in,
+                    n_out,
+                    name=f"{self.name}_Linear_{i}",
+                    init_type=init_type,
+                    normalize=normalize,
+                )
+            )
+        self.activation = ACTIVATION_DICT[activation]
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            for layer in self.layers:
+                layer.build(float_dtype)
+            self.is_built = True
+
+    def frwrd(self, input_data, training=False):
+        target = input_data[f"{self.target.name}"]
+
+        transformed_origin = 0.0
+        lin_origin = 0.0
+        for ins in self.origin:
+            full_scalar = input_data[f"{ins.name}"][:, :, 0]
+            transformed_origin += full_scalar[:, 1:]
+            lin_origin += tf.reshape(full_scalar[:, 0], [-1, 1])
+
+        for i in range(len(self.hidden_layers)):
+            transformed_origin = self.activation(self.layers[i](transformed_origin))
+        transformed_origin = self.layers[-1](transformed_origin)
+        full_out = transformed_origin + lin_origin
+
+        return target + full_out
 
 
 @capture_init_args
@@ -433,6 +550,7 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
                 )
             self.apply_shift = True
 
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         self.scale = tf.constant(self.scale, dtype=float_dtype)
         if self.constant_shift != 0:
@@ -569,3 +687,56 @@ class LinearOut2EquivarTarget(TPOutputInstruction):
                 )
 
         return target
+
+
+@capture_init_args
+class TrainableShiftTarget(TPOutputInstruction, ElementsReduceInstructionMixin):
+    input_tensor_spec = {
+        constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
+        constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
+        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        target: TPInstruction,
+        number_of_atom_types: int,
+        name: str = "TrainableShiftTarget",
+        l: int = 0,
+    ):
+        super(TrainableShiftTarget, self).__init__(name=name, target=target, l=l)
+        self.number_of_atom_types = number_of_atom_types
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            self.at_shifts = tf.Variable(
+                tf.zeros([self.number_of_atom_types, 1], dtype=float_dtype),
+                trainable=True,
+                name="tr_atomic_shift",
+            )
+        self.is_built = True
+
+    def frwrd(self, input_data: dict, training: bool = False):
+        target = input_data[f"{self.target.name}"]
+        n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
+        n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
+
+        # Updating only real atoms, fake stay at 0.
+        r_map = tf.reshape(
+            tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1]
+        )
+        real_shift = tf.gather(
+            self.at_shifts, input_data[constants.ATOMIC_MU_I], axis=0
+        )
+        real_shift = tf.where(r_map < n_at_b_real, real_shift, tf.zeros_like(target))
+        return target + real_shift
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        return {
+            "at_shifts": tf.Variable(
+                tf.gather(self.at_shifts, index_to_select, axis=0)
+            ),
+        }
+
+    def upd_init_args_new_elements(self, new_element_map):
+        self._init_args["number_of_atom_types"] = len(new_element_map)

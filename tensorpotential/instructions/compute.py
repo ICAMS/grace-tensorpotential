@@ -1,36 +1,29 @@
 from __future__ import annotations
 
 import logging
-from enum import Enum
+from typing import Literal, Any
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-
-from typing import Literal, List, Tuple
 from ase.data import atomic_numbers
 from ase.units import _eps0, _e
-from itertools import product, combinations_with_replacement
 
-from tensorpotential.export import (
-    get_symbol,
-    init_coupling_symbols,
-    normalize_poly,
-    Polynomial,
-    Monomial,
-)
-from tensorpotential.instructions.base import (
-    TPInstruction,
-    TPEquivariantInstruction,
-    capture_init_args,
-    NoInstructionManager,
-)
 from tensorpotential import constants
-from tensorpotential.utils import process_cutoff_dict
 from tensorpotential.functions.couplings import (
     real_coupling_metainformation,
 )
-from tensorpotential.functions.nn import FullyConnectedMLP, DenseLayer
+from tensorpotential.functions.lora import (
+    initialize_lora_tensors,
+    lora_reconstruction,
+    apply_lora_update,
+)
+from tensorpotential.functions.nn import (
+    FullyConnectedMLP,
+    DenseLayer,
+    Linear,
+    ACTIVATION_DICT,
+)
 from tensorpotential.functions.radial import (
     SinBesselRadialBasisFunction,
     SimplifiedBesselRadialBasisFunction,
@@ -41,6 +34,21 @@ from tensorpotential.functions.radial import (
     cutoff_func_p_order_poly,
 )
 from tensorpotential.functions.spherical_harmonics import SphericalHarmonics
+from tensorpotential.instructions.base import (
+    TPInstruction,
+    TPEquivariantInstruction,
+    capture_init_args,
+    ElementsReduceInstructionMixin,
+    LORAInstructionMixin,
+)
+from tensorpotential.poly import (
+    Monomial,
+    Polynomial,
+    init_coupling_symbols,
+    get_symbol,
+    normalize_poly,
+)
+from tensorpotential.utils import process_cutoff_dict
 
 
 class Parity:
@@ -96,14 +104,20 @@ class BondLength(TPInstruction):
 
     input_tensor_spec = {constants.BOND_VECTOR: {"shape": [None, 3], "dtype": "float"}}
 
-    def __init__(self, instruction_with_bonds: TPInstruction = None, name="BondLength"):
+    def __init__(
+        self, instruction_with_bonds: TPInstruction | str = None, name="BondLength"
+    ):
         super().__init__(name=name)
 
-        self._instruction_with_bonds_name = (
-            instruction_with_bonds.name
-            if instruction_with_bonds is not None
-            else constants.BOND_VECTOR
-        )
+        if instruction_with_bonds is not None:
+            if isinstance(instruction_with_bonds, str):
+                self._instruction_with_bonds_name = instruction_with_bonds
+            elif isinstance(instruction_with_bonds, TPInstruction):
+                self._instruction_with_bonds_name = instruction_with_bonds.name
+            else:
+                raise TypeError(f"Unexpected type {type(instruction_with_bonds)=}")
+        else:
+            self._instruction_with_bonds_name = constants.BOND_VECTOR
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
@@ -111,11 +125,19 @@ class BondLength(TPInstruction):
 
     def frwrd(self, input_data: dict, training=False):
 
-        return tf.linalg.norm(
-            input_data[self._instruction_with_bonds_name],
-            axis=1,
-            keepdims=True,
+        return tf.sqrt(
+            tf.reduce_sum(
+                input_data[self._instruction_with_bonds_name] ** 2,
+                axis=1,
+                keepdims=True,
+            )
+            + 1e-10,
         )
+        # return tf.linalg.norm(
+        #     input_data[self._instruction_with_bonds_name],
+        #     axis=1,
+        #     keepdims=True,
+        # )
 
 
 @capture_init_args
@@ -133,12 +155,24 @@ class ScaledBondVector(TPInstruction):
 
     # data_spec = {"bond_vector": GeometricalDataBuilder}
 
-    def __init__(self, bond_length: TPInstruction | str, name="ScaledBondVector"):
+    def __init__(
+        self,
+        bond_length: TPInstruction | str,
+        bonds: TPInstruction | str = None,
+        name="ScaledBondVector",
+    ):
         super().__init__(name=name)
-        if isinstance(bond_length, BondLength):
+        if isinstance(bond_length, TPInstruction):
             self.bond_length = bond_length.name
         elif isinstance(bond_length, str):
             self.bond_length = bond_length
+        if bonds is not None:
+            if isinstance(bonds, TPInstruction):
+                self.bonds = bonds.name
+            elif isinstance(bonds, str):
+                self.bonds = bonds
+        else:
+            self.bonds = constants.BOND_VECTOR
         self.epsilon = None
 
     @tf.Module.with_name_scope
@@ -148,7 +182,7 @@ class ScaledBondVector(TPInstruction):
             self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
-        r_ij = input_data[constants.BOND_VECTOR]
+        r_ij = input_data[self.bonds]
         d_ij = input_data[self.bond_length]
         return r_ij / (d_ij + self.epsilon)
 
@@ -533,7 +567,7 @@ class LinearRadialFunction(TPInstruction):
 
 
 @capture_init_args
-class MLPRadialFunction(TPInstruction):
+class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
     input_tensor_spec = {
         constants.BOND_MU_I: {"shape": [None], "dtype": "int"},
         constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
@@ -552,8 +586,12 @@ class MLPRadialFunction(TPInstruction):
         no_weight_decay: bool = True,
         chemical_embedding_i: ScalarChemicalEmbedding = None,
         chemical_embedding_j: ScalarChemicalEmbedding = None,
+        lora_config: dict[str, Any] = None,
+        **kwargs,
     ):
         super().__init__(name=name)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
+
         self.n_rad_max = n_rad_max
         self.lmax = lmax
         if hidden_layers is None:
@@ -598,6 +636,8 @@ class MLPRadialFunction(TPInstruction):
                 hidden_layers=self.hidden_layers,
                 output_size=self.n_rad_max * (self.lmax + 1),
                 no_weight_decay=no_weight_decay,
+                lora_config=lora_config,
+                name=self.name + "_MLP",
             )
         elif isinstance(activation, str):
             self.mlp = FullyConnectedMLP(
@@ -606,6 +646,8 @@ class MLPRadialFunction(TPInstruction):
                 output_size=self.n_rad_max * (self.lmax + 1),
                 activation=activation,
                 no_weight_decay=no_weight_decay,
+                lora_config=lora_config,
+                name=self.name + "_MLP",
             )
         else:
             raise ValueError("MLP activation must be predefined str or None")
@@ -622,7 +664,21 @@ class MLPRadialFunction(TPInstruction):
                     tf.random.normal(shape=[1, self.n_out], dtype=float_dtype)
                 )
                 self.epsilon = tf.convert_to_tensor(1e-5, dtype=float_dtype)
+
+            if self.lora_config:
+                self.enable_lora_adaptation(self.lora_config)
+
             self.is_built = True
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        super().enable_lora_adaptation(lora_config)
+        self.mlp.enable_lora_adaptation(lora_config)
+
+    def finalize_lora_update(self):
+        # common part
+        super().finalize_lora_update()
+        self.mlp.finalize_lora_update()
 
     def frwrd(self, input_data, training=False):
         basis = input_data[self.basis_name]
@@ -652,7 +708,161 @@ class MLPRadialFunction(TPInstruction):
 
 
 @capture_init_args
-class ScalarChemicalEmbedding(TPInstruction):
+class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
+    input_tensor_spec = {
+        constants.BOND_MU_I: {"shape": [None], "dtype": "int"},
+        constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        n_rad_max: int,
+        lmax: int,
+        basis: RadialBasis | TPInstruction | str = None,
+        input_shape: int = None,
+        hidden_layers: list[int] = None,
+        name="MLPRadialFunction",
+        activation: list[str] | str = None,
+        no_weight_decay: bool = True,
+        init_type: str = "normal",
+        normalize: bool = True,
+        chem_embedding: ScalarChemicalEmbedding = None,
+        embed_i: bool = False,
+        embed_j: bool = True,
+        lora_config: dict[str, Any] = None,
+        **kwargs,
+    ):
+        super().__init__(name=name)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
+
+        self.n_rad_max = n_rad_max
+        self.lmax = lmax
+        if hidden_layers is None:
+            self.hidden_layers = [64, 64]
+        else:
+            self.hidden_layers = hidden_layers
+        if activation is None:
+            self.activation = ["silu" for _ in self.hidden_layers]
+        else:
+            if isinstance(activation, str):
+                activation = [activation] * len(self.hidden_layers)
+            assert len(activation) == len(self.hidden_layers)
+            self.activation = activation
+
+        if isinstance(basis, RadialBasis):
+            self.basis_name = basis.name
+            self.input_shape = basis.basis_function.nfunc
+        elif isinstance(basis, str):
+            self.basis_name = basis
+            assert (
+                input_shape is not None
+            ), f"Need to provide shape if basis is not TPInstruction"
+            self.input_shape = input_shape
+        elif isinstance(basis, TPInstruction):
+            self.basis_name = basis.name
+            self.input_shape = basis.nfunc
+        elif basis is not None:
+            raise ValueError(f"Unknown {basis = }")
+        elif basis is None:
+            assert (
+                input_shape is not None
+            ), f"Need to provide shape if basis is not TPInstruction"
+            self.input_shape = input_shape
+
+        self.l_tile = tf.cast(
+            tf.concat([tf.ones((2 * l + 1)) * l for l in range(self.lmax + 1)], axis=0),
+            tf.int32,
+        )
+        total_shapes = (
+            [self.input_shape] + self.hidden_layers + [self.n_rad_max * (self.lmax + 1)]
+        )
+        self.layers = []
+        for i, (n_in, n_out) in enumerate(zip(total_shapes, total_shapes[1:])):
+            self.layers.append(
+                Linear(
+                    n_in,
+                    n_out,
+                    name=f"{self.name}_Linear_{i}",
+                    no_weight_decay=no_weight_decay,
+                    init_type=init_type,
+                    normalize=normalize,
+                    lora_config=lora_config,
+                )
+            )
+        self.n_out = self.n_rad_max * (self.lmax + 1)
+
+        self.chem_embedding = chem_embedding
+        if self.chem_embedding is not None:
+            self.embed_transform = Linear(
+                self.chem_embedding.embedding_size,
+                self.n_out,
+                name=f"{self.name}_ChemEmb_Linear",
+                lora_config=lora_config,
+            )
+            self.embed_i = embed_i
+            self.embed_j = embed_j
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype):
+        if not self.is_built:
+            for layer in self.layers:
+                layer.build(float_dtype)
+            if self.chem_embedding is not None:
+                self.embed_transform.build(float_dtype)
+
+            if self.lora_config:
+                self.enable_lora_adaptation(self.lora_config)
+
+            self.is_built = True
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        super().enable_lora_adaptation(lora_config)
+        for layer in self.layers:
+            layer.enable_lora_adaptation(lora_config)
+
+        if self.chem_embedding is not None:
+            self.embed_transform.enable_lora_adaptation(lora_config)
+
+    def finalize_lora_update(self):
+        # common part
+        super().finalize_lora_update()
+
+        for layer in self.layers:
+            layer.finalize_lora_update()
+
+        if self.chem_embedding is not None:
+            self.embed_transform.finalize_lora_update()
+
+    def frwrd(self, input_data, training=False):
+        basis = input_data[self.basis_name]
+
+        for act, layer in zip(self.activation, self.layers):
+            act = ACTIVATION_DICT[act]
+            basis = act(layer(basis))
+        y = self.layers[-1](basis)
+
+        if self.chem_embedding is not None:
+            z = self.embed_transform(input_data[self.chem_embedding.name])
+            embedding = 1.0
+            if self.embed_j:
+                mu_j = tf.gather(z, input_data[constants.BOND_MU_J], axis=0)
+                embedding *= mu_j
+            if self.embed_i:
+                mu_i = tf.gather(z, input_data[constants.BOND_MU_I], axis=0)
+                embedding *= mu_i
+                embedding = tf.nn.tanh(embedding)
+            y *= embedding
+
+        y = tf.reshape(y, [-1, self.n_rad_max, self.lmax + 1])
+        y_l = tf.gather(y, self.l_tile, axis=-1)
+        return y_l
+
+
+@capture_init_args
+class ScalarChemicalEmbedding(
+    TPInstruction, LORAInstructionMixin, ElementsReduceInstructionMixin
+):
     """
     Vector chemical embedding
 
@@ -671,8 +881,11 @@ class ScalarChemicalEmbedding(TPInstruction):
         embedding_size: int,
         is_trainable: bool = True,
         init: str = "random",
+        lora_config: dict[str, Any] = None,
     ):
         super().__init__(name=name)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
+
         self.element_map_symbols = tf.Variable(
             list(element_map.keys()), trainable=False, name="element_map_symbols"
         )
@@ -721,10 +934,18 @@ class ScalarChemicalEmbedding(TPInstruction):
                     f"Unknown initialization method: ScalarChemicalEmbedding.init={self.init}"
                 )
 
+            if self.lora_config:
+                self.enable_lora_adaptation(self.lora_config)
+
             self.is_built = True
 
     def frwrd(self, input_data: dict, training=False):
-        return self.w
+        if not self.lora:
+            return self.w
+        else:
+            return self.w + lora_reconstruction(
+                *self.lora_tensors, lora_config=self.lora_config
+            )
 
     def get_index_to_select(self, elements_to_select):
         index_to_select = []
@@ -749,12 +970,24 @@ class ScalarChemicalEmbedding(TPInstruction):
             "w": tf.Variable(tf.gather(self.w, index_to_select, axis=0)),
         }
 
-    def patch_init_args(self, new_element_map):
+    def upd_init_args_new_elements(self, new_element_map):
         self._init_args["element_map"] = new_element_map
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        super().enable_lora_adaptation(lora_config)
+        self.lora_tensors = initialize_lora_tensors(self.w, lora_config, name="w")
+
+    def finalize_lora_update(self):
+        apply_lora_update(self.w, *self.lora_tensors, lora_config=self.lora_config)
+        del self.lora_tensors
+        super().finalize_lora_update()
 
 
 @capture_init_args
-class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
+class SingleParticleBasisFunctionScalarInd(
+    TPEquivariantInstruction, LORAInstructionMixin
+):
     """
     Compute ACE single particle basis function with scalar indicator or without any
 
@@ -776,8 +1009,17 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
         indicator_l_depend: bool = False,
         sum_neighbors: bool = True,
         avg_n_neigh: float | dict = 1.0,
+        lora_config: dict[str, Any] = None,
+        lmax: int = None,
     ):
-        super().__init__(name=name, lmax=angular.lmax)
+        if lmax is not None:
+            assert (
+                angular.lmax >= lmax
+            ), f"{angular.lmax=} is too small for specified {lmax=}"
+        else:
+            lmax = angular.lmax
+        super().__init__(name=name, lmax=lmax)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
         self.radial = radial
         self.angular = angular
         self.indicator = indicator
@@ -807,11 +1049,26 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
                 n_in=self.indicator.embedding_size,
                 n_out=n_out,
                 activation=None,
-                name="ChemIndTransf",
+                name=self.name + "_ChemIndTransf",
+                lora_config=lora_config,
             )
-        # TODO: This should somehow be consistent and obligatory?
+
         self.n_out = self.radial.n_rad_max
-        self.coupling_meta_data = self.angular.coupling_meta_data
+
+        if self.angular.lmax > self.lmax:
+            self.slice_angular = (self.lmax + 1) ** 2
+        else:
+            self.slice_angular = None
+        assert (
+            self.radial.lmax == self.lmax
+        ), "Radial part and angular part lmax do not match"
+
+        if self.slice_angular is not None:
+            self.coupling_meta_data = self.angular.coupling_meta_data.query(
+                f"l <= {self.lmax}"
+            )
+        else:
+            self.coupling_meta_data = self.angular.coupling_meta_data
         self.coupling_origin = self.angular.coupling_origin
 
         init_coupling_symbols(self)
@@ -830,6 +1087,9 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
     def frwrd(self, input_data: dict, training=False):
         r = input_data[self.radial.name]
         y = input_data[self.angular.name]
+        if self.slice_angular is not None:
+            y = y[:, : self.slice_angular]
+
         # y = y[:, tf.newaxis, :]
 
         a_nl = tf.einsum("jnl,jl->jnl", r, y)
@@ -866,6 +1126,18 @@ class SingleParticleBasisFunctionScalarInd(TPEquivariantInstruction):
                     a_nl *= self.inv_avg_n_neigh
 
         return a_nl
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config: dict[str, Any]):
+        super().enable_lora_adaptation(lora_config)
+        if self.lin_transform is not None:
+            assert not self.lin_transform.use_bias
+            self.lin_transform.enable_lora_adaptation(lora_config)
+
+    def finalize_lora_update(self):
+        super().finalize_lora_update()
+        if self.lin_transform is not None:
+            self.lin_transform.finalize_lora_update()
 
 
 @capture_init_args
@@ -935,6 +1207,20 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         assert self.angular.coupling_meta_data is not None
         assert self.indicator.coupling_meta_data is not None
 
+        if self.angular.lmax > lmax:
+            if self.radial is not None:
+                assert self.radial.lmax == lmax, (
+                    f"Radial function is prepared for lmax={self.radial.lmax},"
+                    f" while currently specified value is {lmax=}"
+                )
+            self.slice_angular = (lmax + 1) ** 2
+        else:
+            self.slice_angular = None
+            if self.radial is not None:
+                assert (
+                    self.radial.lmax == self.angular.lmax
+                ), "Radial part and angular part lmax do not match"
+
         if keep_parity is None:
             plist = []
             for l in range(Lmax + 1):
@@ -998,6 +1284,7 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                 output_size=self.indicator.n_out
                 * (self.angular.lmax + 1)
                 * (self.lmax + 1),
+                name=self.name + "_MLP",
             )
             self.l_tile = tf.cast(
                 tf.concat(
@@ -1044,6 +1331,8 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             prod = tf.einsum("jnol,jnr->jnolr", prod, bond_I)
         else:
             r = input_data[self.radial.name]
+            if self.slice_angular is not None:
+                y = y[:, : self.slice_angular]
             bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
             prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
 
@@ -1135,7 +1424,10 @@ class ProductFunction(TPEquivariantInstruction):
         self.plist = plist
         self.normalize = normalize
         self.max_sum_l = max_sum_l
+
+        # TODO: This must not be done
         self.lmax = lmax
+
         self.lmax_A = lmax_left
         self.lmax_B = lmax_right
         self.lmax_hist = lmax_hist
@@ -1357,7 +1649,7 @@ class CropProductFunction(TPEquivariantInstruction):
 
 
 @capture_init_args
-class FunctionReduce(TPEquivariantInstruction):
+class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -1413,9 +1705,12 @@ class FunctionReduce(TPEquivariantInstruction):
                         lbl = 0 if p > 0 else 1
                         # TODO: rethink how to define history here. Then, possibly move to the base class method
                         collector_data.append([l, m, f"", p, l])
-        self.coupling_meta_data = pd.DataFrame(
+        cdf = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
+        self.coupling_meta_data = cdf.sort_values(
+            ["l", "parity", "hist", "m"]
+        ).reset_index(drop=True)
 
         # TODO: Special case when only one instruction to collect from
         self.simplify = simplify
@@ -1600,12 +1895,14 @@ class FunctionReduce(TPEquivariantInstruction):
 
             return new_tensors
 
-    def patch_init_args(self, new_element_map):
+    def upd_init_args_new_elements(self, new_element_map):
         self._init_args["number_of_atom_types"] = len(new_element_map)
 
 
 @capture_init_args
-class FunctionReduceN(TPEquivariantInstruction):
+class FunctionReduceN(
+    TPEquivariantInstruction, ElementsReduceInstructionMixin, LORAInstructionMixin
+):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -1621,13 +1918,16 @@ class FunctionReduceN(TPEquivariantInstruction):
         out_norm: bool = False,
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
-        init_vars: Literal["random", "zeros"] = "random",
-        init_target_value: Literal["zeros", "ones"] = "zeros",
+        init_vars: str = "random",
+        normalize: bool = True,
+        init_target_value: str = "zeros",
         simplify: bool = False,
         scale=1.0,
+        lora_config: dict[str, Any] = None,
         **kwargs,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
         self.instructions = instructions
         if isinstance(ls_max, int):
             ls_max = [ls_max] * len(instructions)
@@ -1640,7 +1940,8 @@ class FunctionReduceN(TPEquivariantInstruction):
         self.number_of_atom_types = number_of_atom_types
         self.n_instr = len(self.instructions)
         assert init_vars in [
-            "random",
+            "random",  # normal
+            "uniform",
             "zeros",
         ], f'Unknown variable initialization "{init_vars}"'
         self.init_vars = init_vars
@@ -1648,6 +1949,7 @@ class FunctionReduceN(TPEquivariantInstruction):
             "zeros",
             "ones",
         ], f'Unknown target initialization "{init_target_value}"'
+        self.normalize = normalize
         self.init_collection = init_target_value
         self.scale = scale
         if self.is_central_atom_type_dependent:
@@ -1667,9 +1969,13 @@ class FunctionReduceN(TPEquivariantInstruction):
                         lbl = 0 if p > 0 else 1
                         # TODO:  possibly move to the base class method
                         collector_data.append([l, m, f"", p, l])
-        self.coupling_meta_data = pd.DataFrame(
+                        # collector_data.append([l, m, f"({lbl},0)", p, l])
+        cdf = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
+        self.coupling_meta_data = cdf.sort_values(
+            ["l", "parity", "hist", "m"]
+        ).reset_index(drop=True)
         norms = np.zeros((self.coupling_meta_data.shape[0]))
 
         # TODO: Special case when only one instruction to collect from
@@ -1694,18 +2000,6 @@ class FunctionReduceN(TPEquivariantInstruction):
                     ):
                         instruction_collection["total_sum_ind"].append(idx)
                         norms[idx] += 1
-            # u_map, u_count = np.unique(
-            #     instruction_collection["total_sum_ind"],
-            #     return_counts=True,
-            # )
-            # norms = np.take(u_count, instruction_collection["total_sum_ind"])
-            # u_norms = tf.math.unsorted_segment_mean(
-            #     norms,
-            #     instruction_collection["w_l_tile"],
-            #     num_segments=instruction_collection["w_shape"],
-            # )
-            #
-            # instruction_collection["w_norm"] = tf.reshape(tf.math.rsqrt(u_norms), [-1])
             instruction_collection["total_sum_ind"] = tf.constant(
                 np.array(instruction_collection["total_sum_ind"]).reshape(-1, 1),
                 dtype=tf.int32,
@@ -1772,22 +2066,38 @@ class FunctionReduceN(TPEquivariantInstruction):
                 else:
                     c_shape = [self.n_out, n_in, w_shape]
 
+                if self.normalize:
+                    init_value = self.scale
+                    norm_vlue = self.scale / n_in**0.5
+                else:
+                    init_value = 1.0 / n_in**0.5
+                    norm_vlue = 1.0
+
                 if self.init_vars == "random":
-                    limit = 1
                     setattr(
                         self,
                         f"reducing_{k}",
                         tf.Variable(
-                            tf.random.normal(c_shape, stddev=limit, dtype=float_dtype),
+                            tf.random.normal(
+                                c_shape, stddev=init_value, dtype=float_dtype
+                            ),
                             name=f"reducing_{k}",
                         ),
                     )
+                elif self.init_vars == "uniform":
                     setattr(
                         self,
-                        f"norm_{k}",
-                        tf.constant(self.scale / n_in**0.5, dtype=float_dtype),
+                        f"reducing_{k}",
+                        tf.Variable(
+                            tf.random.uniform(
+                                minval=-init_value,
+                                maxval=init_value,
+                                shape=c_shape,
+                                dtype=float_dtype,
+                            ),
+                            name=f"reducing_{k}",
+                        ),
                     )
-
                 elif self.init_vars == "zeros":
                     coeff = np.zeros(c_shape)
                     setattr(
@@ -1799,15 +2109,15 @@ class FunctionReduceN(TPEquivariantInstruction):
                             name=f"reducing_{k}",
                         ),
                     )
-                    setattr(
-                        self,
-                        f"norm_{k}",
-                        tf.constant(1.0 / n_in**0.5, dtype=float_dtype),
-                    )
                 else:
                     raise NotImplementedError(
                         f"FunctionCollector.init = {self.init_vars} is unknown"
                     )
+                setattr(
+                    self,
+                    f"norm_{k}",
+                    tf.constant(norm_vlue, dtype=float_dtype),
+                )
 
             self.float_dtype = float_dtype
             if self.out_norm:
@@ -1816,7 +2126,33 @@ class FunctionReduceN(TPEquivariantInstruction):
                 )
             else:
                 self.norm_map = tf.constant(1, dtype=float_dtype)
+
+            if self.lora_config:
+                self.enable_lora_adaptation(self.lora_config)
+
             self.is_built = True
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config):
+        super().enable_lora_adaptation(lora_config)
+        for ins_name in self.collector:
+            w = getattr(self, f"reducing_{ins_name}")
+            lora_tensors = initialize_lora_tensors(
+                w, lora_config=lora_config, name=f"reducing_{ins_name}"
+            )
+            setattr(self, f"reducing_{ins_name}_lora_tensors", lora_tensors)
+
+    def finalize_lora_update(self):
+        # common part
+
+        for ins_name in self.collector:
+            w = getattr(self, f"reducing_{ins_name}")
+            lora_tensors = getattr(self, f"reducing_{ins_name}_lora_tensors")
+
+            apply_lora_update(w, *lora_tensors, lora_config=self.lora_config)
+            delattr(self, f"reducing_{ins_name}_lora_tensors")
+
+        super().finalize_lora_update()
 
     def compute_l2_regularization_loss(self):
         total_l2_regularization = 0.0
@@ -1825,10 +2161,7 @@ class FunctionReduceN(TPEquivariantInstruction):
         return total_l2_regularization
 
     def frwrd(self, input_data, training=False):
-        if self.init_collection == "zeros":
-            init_func = tf.zeros
-        else:
-            init_func = tf.ones
+        init_func = tf.zeros if self.init_collection == "zeros" else tf.ones
         collection = init_func(
             [
                 self.coupling_meta_data.shape[0],
@@ -1844,11 +2177,14 @@ class FunctionReduceN(TPEquivariantInstruction):
                 instruction_collection["func_collect_ind"],
                 axis=2,
             )
+            w = getattr(self, f"reducing_{instr.name}")
+            # lora
+            if self.lora:
+                lora_tensors = getattr(self, f"reducing_{instr.name}_lora_tensors")
+                w = w + lora_reconstruction(*lora_tensors, lora_config=self.lora_config)
             if self.is_central_atom_type_dependent:
-                w = getattr(self, f"reducing_{instr.name}")
                 eq = "aknw,anw->wak"
             else:
-                w = getattr(self, f"reducing_{instr.name}")
                 eq = "knw,anw->wak"
             w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             # For performance
@@ -1877,12 +2213,12 @@ class FunctionReduceN(TPEquivariantInstruction):
 
             return new_tensors
 
-    def patch_init_args(self, new_element_map):
+    def upd_init_args_new_elements(self, new_element_map):
         self._init_args["number_of_atom_types"] = len(new_element_map)
 
 
 @capture_init_args
-class CollectInvarBasis(TPEquivariantInstruction):
+class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -1893,13 +2229,13 @@ class CollectInvarBasis(TPEquivariantInstruction):
         instructions: list[TPEquivariantInstruction],
         name: str,
         ls_max: list[int] | int,
-        n_out: int,
-        allowed_l_p: list[list],
-        out_norm: bool = False,
-        is_central_atom_type_dependent: bool = False,
-        number_of_atom_types: int = None,
-        init_vars: Literal["random", "zeros"] = "random",
-        scale=1.0,
+        # n_out: int,
+        # allowed_l_p: list[list],
+        # out_norm: bool = False,
+        # is_central_atom_type_dependent: bool = False,
+        # number_of_atom_types: int = None,
+        # init_vars: Literal["random", "zeros"] = "random",
+        # scale=1.0,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
         self.instructions = instructions
@@ -1909,23 +2245,24 @@ class CollectInvarBasis(TPEquivariantInstruction):
         assert np.max(ls_max) == 0
 
         self.ls_max = ls_max
-        self.n_out = n_out
-        self.out_norm = out_norm
+        # self.n_out = n_out
+        # self.out_norm = out_norm
         # enforce conversion to list of lists
+        allowed_l_p = [[0, 1]]
         self.allowed_l_p = [list(lp) for lp in allowed_l_p]
-        self.is_central_atom_type_dependent = is_central_atom_type_dependent
-        self.number_of_atom_types = number_of_atom_types
+        # self.is_central_atom_type_dependent = is_central_atom_type_dependent
+        # self.number_of_atom_types = number_of_atom_types
         self.n_instr = len(self.instructions)
 
-        assert init_vars in [
-            "random",
-            "zeros",
-        ], f'Unknown variable initialization "{init_vars}"'
-        self.init_vars = init_vars
-
-        self.scale = scale
-        if self.is_central_atom_type_dependent:
-            assert self.number_of_atom_types is not None
+        # assert init_vars in [
+        #     "random",
+        #     "zeros",
+        # ], f'Unknown variable initialization "{init_vars}"'
+        # self.init_vars = init_vars
+        #
+        # self.scale = scale
+        # if self.is_central_atom_type_dependent:
+        #     assert self.number_of_atom_types is not None
 
         instr_names = [instr.name for instr in self.instructions]
         assert len(instr_names) == len(set(instr_names)), "duplicate instruction names"
@@ -1969,48 +2306,48 @@ class CollectInvarBasis(TPEquivariantInstruction):
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
-            size = 0
-            for k, v in self.collector.items():
-                w_shape = v["w_shape"]
-                n_in = v["n_out"]
-                size += w_shape * n_in
-            if self.is_central_atom_type_dependent:
-                c_shape = [self.number_of_atom_types, self.n_out, size]
-            else:
-                c_shape = [self.n_out, size]
-
-            name_v = "full"
-            if self.init_vars == "random":
-                limit = 1
-                setattr(
-                    self,
-                    f"reducing_{name_v}",
-                    tf.Variable(
-                        tf.random.normal(
-                            c_shape,
-                            stddev=self.scale * limit,
-                            dtype=float_dtype,
-                        ),
-                        name=f"reducing_{name_v}",
-                    ),
-                )
-            elif self.init_vars == "zeros":
-                coeff = np.zeros(c_shape)
-                setattr(
-                    self,
-                    f"reducing_{name_v}",
-                    tf.Variable(
-                        coeff,
-                        dtype=float_dtype,
-                        name=f"reducing_{name_v}",
-                    ),
-                )
-            else:
-                raise NotImplementedError(
-                    f"FunctionCollector.init = {self.init_vars} is unknown"
-                )
-
-            self.norm = tf.constant(1 / size, dtype=float_dtype)
+            # size = 0
+            # for k, v in self.collector.items():
+            #     w_shape = v["w_shape"]
+            #     n_in = v["n_out"]
+            #     size += w_shape * n_in
+            # if self.is_central_atom_type_dependent:
+            #     c_shape = [self.number_of_atom_types, self.n_out, size]
+            # else:
+            #     c_shape = [self.n_out, size]
+            #
+            # name_v = "full"
+            # if self.init_vars == "random":
+            #     limit = 1
+            #     setattr(
+            #         self,
+            #         f"reducing_{name_v}",
+            #         tf.Variable(
+            #             tf.random.normal(
+            #                 c_shape,
+            #                 stddev=self.scale * limit,
+            #                 dtype=float_dtype,
+            #             ),
+            #             name=f"reducing_{name_v}",
+            #         ),
+            #     )
+            # elif self.init_vars == "zeros":
+            #     coeff = np.zeros(c_shape)
+            #     setattr(
+            #         self,
+            #         f"reducing_{name_v}",
+            #         tf.Variable(
+            #             coeff,
+            #             dtype=float_dtype,
+            #             name=f"reducing_{name_v}",
+            #         ),
+            #     )
+            # else:
+            #     raise NotImplementedError(
+            #         f"FunctionCollector.init = {self.init_vars} is unknown"
+            #     )
+            #
+            # self.norm = tf.constant(1 / size, dtype=float_dtype)
             self.float_dtype = float_dtype
             self.is_built = True
 
@@ -2025,23 +2362,24 @@ class CollectInvarBasis(TPEquivariantInstruction):
             )
             shp = tf.shape(A)
             A = tf.reshape(A, [-1, shp[1] * shp[2]])
-            rms = tf.math.rsqrt(tf.reduce_mean(A**2, axis=-1, keepdims=True) + 1e-16)
-            collection += [A * rms]
-            # collection += [A]
+            # rms = tf.math.rsqrt(tf.reduce_mean(A**2, axis=-1, keepdims=True) + 1e-16)
+            # collection += [A * rms]
+            collection += [A]
         basis = tf.concat(collection, axis=1)
 
         # rms = tf.math.rsqrt(tf.reduce_mean(basis**2, axis=-1, keepdims=True) + 1e-16)
         # basis *= rms
 
-        w = getattr(self, f"reducing_full")
-        if self.is_central_atom_type_dependent:
-            w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
-            eq = "akn,an->ak"
-        else:
-            eq = "kn,an->ak"
-        pr = tf.einsum(eq, w, basis, name=f"ein_basis") * self.norm
-
-        return pr[:, :, tf.newaxis]
+        # w = getattr(self, f"reducing_full")
+        # if self.is_central_atom_type_dependent:
+        #     w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
+        #     eq = "akn,an->ak"
+        # else:
+        #     eq = "kn,an->ak"
+        # pr = tf.einsum(eq, w, basis, name=f"ein_basis") * self.norm
+        #
+        # return pr[:, :, tf.newaxis]
+        return basis
 
     def prepare_variables_for_selected_elements(self, index_to_select):
         if self.is_central_atom_type_dependent:
@@ -2049,7 +2387,9 @@ class CollectInvarBasis(TPEquivariantInstruction):
 
 
 @capture_init_args
-class FCRight2Left(TPEquivariantInstruction):
+class FCRight2Left(
+    TPEquivariantInstruction, ElementsReduceInstructionMixin, LORAInstructionMixin
+):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -2057,17 +2397,21 @@ class FCRight2Left(TPEquivariantInstruction):
 
     def __init__(
         self,
-        left,
-        right,
+        left: TPEquivariantInstruction,
+        right: TPEquivariantInstruction,
         name: str,
         n_out: int,
         left_coefs: bool = True,
         is_central_atom_type_dependent: list[bool] | bool = None,
         number_of_atom_types: int = None,
-        init_vars: Literal["random", "zeros"] = "random",
+        init_vars: str = "random",
+        normalize: bool = True,
         norm_out: bool = False,
+        lora_config: dict[str, Any] = None,
     ):
         super().__init__(name=name, lmax=left.lmax)
+        LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
+
         self.left = left
         self.right = right
         self.left_coefs = left_coefs
@@ -2095,10 +2439,12 @@ class FCRight2Left(TPEquivariantInstruction):
         self.number_of_atom_types = number_of_atom_types
         self.norm_out = norm_out
         assert init_vars in [
-            "random",
+            "random",  # normal
+            "uniform",
             "zeros",
         ], f'Unknown variable initialization "{init_vars}"'
         self.init_vars = init_vars
+        self.normalize = normalize
 
         # if self.is_central_atom_type_dependent:
         #     assert self.number_of_atom_types is not None
@@ -2146,51 +2492,147 @@ class FCRight2Left(TPEquivariantInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if self.left_coefs:
-            self.w_tile_left = tf.constant(self.w_tile_left, dtype=tf.int32)
-            if self.is_central_atom_type_dependent[0]:
-                c_shape_left = [
+        if not self.is_built:
+            if self.left_coefs:
+                self.w_tile_left = tf.constant(self.w_tile_left, dtype=tf.int32)
+                if self.is_central_atom_type_dependent[0]:
+                    c_shape_left = [
+                        self.number_of_atom_types,
+                        self.n_out,
+                        self.left.n_out,
+                        self.w_shape_left,
+                    ]
+                else:
+                    c_shape_left = [
+                        self.n_out,
+                        self.left.n_out,
+                        self.w_shape_left,
+                    ]
+            if self.is_central_atom_type_dependent[1]:
+                c_shape_right = [
                     self.number_of_atom_types,
                     self.n_out,
-                    self.left.n_out,
-                    self.w_shape_left,
+                    self.right.n_out,
+                    self.w_shape_right,
                 ]
             else:
-                c_shape_left = [
-                    self.n_out,
-                    self.left.n_out,
-                    self.w_shape_left,
-                ]
-        if self.is_central_atom_type_dependent[1]:
-            c_shape_right = [
-                self.number_of_atom_types,
-                self.n_out,
-                self.right.n_out,
-                self.w_shape_right,
-            ]
-        else:
-            c_shape_right = [self.n_out, self.right.n_out, self.w_shape_right]
+                c_shape_right = [self.n_out, self.right.n_out, self.w_shape_right]
 
-        limit = 1.0
+            if self.normalize:
+                init_value = 1.0
+                norm_value = 1 / self.left.n_out**0.5
+            else:
+                init_value = 1 / self.left.n_out**0.5
+                norm_value = 1.0
+
+            if self.left_coefs:
+                if self.init_vars == "random":
+                    self.w_left = tf.Variable(
+                        tf.random.normal(
+                            c_shape_left, stddev=init_value, dtype=float_dtype
+                        ),
+                        name=f"w_left_FC",
+                    )
+                elif self.init_vars == "uniform":
+                    self.w_left = tf.Variable(
+                        tf.random.uniform(
+                            minval=-init_value,
+                            maxval=init_value,
+                            shape=c_shape_left,
+                            dtype=float_dtype,
+                        ),
+                        name=f"w_left_FC",
+                    )
+                elif self.init_vars == "zeros":
+                    self.w_left = tf.Variable(
+                        tf.zeros(shape=c_shape_left, dtype=float_dtype),
+                        name=f"w_left_FC",
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"FunctionCollector.init = {self.init_vars} is unknown"
+                    )
+                self.norm_left = tf.constant(norm_value, dtype=float_dtype)
+            if self.normalize:
+                init_value = 1.0
+                norm_value = 1 / self.right.n_out**0.5
+            else:
+                init_value = 1 / self.right.n_out**0.5
+                norm_value = 1.0
+
+            if self.init_vars == "random":
+                self.w_right = tf.Variable(
+                    tf.random.normal(
+                        c_shape_right, stddev=init_value, dtype=float_dtype
+                    ),
+                    name=f"w_right_FC",
+                )
+            elif self.init_vars == "uniform":
+                self.w_right = tf.Variable(
+                    tf.random.uniform(
+                        minval=-init_value,
+                        maxval=init_value,
+                        shape=c_shape_right,
+                        dtype=float_dtype,
+                    ),
+                    name=f"w_right_FC",
+                )
+            elif self.init_vars == "zeros":
+                # TODO: split left right initializers
+                self.w_right = tf.Variable(
+                    tf.random.normal(
+                        c_shape_right, stddev=init_value, dtype=float_dtype
+                    ),
+                    name=f"w_right_FC",
+                )
+            else:
+                raise NotImplementedError(
+                    f"FunctionCollector.init = {self.init_vars} is unknown"
+                )
+
+            self.norm_right = tf.constant(norm_value, dtype=float_dtype)
+
+            if self.norm_out:
+                self.norm_out_factor = tf.reshape(
+                    tf.constant(self.norm_map, dtype=float_dtype), [-1, 1, 1]
+                )
+
+            if self.lora_config:
+                self.enable_lora_adaptation(self.lora_config)
+
+            self.is_built = True
+
+    @tf.Module.with_name_scope
+    def enable_lora_adaptation(self, lora_config):
+        # 1. upd _init_args,
+        # 2. add new trainable LORA weights,
+        # 3. set main weights as non-trainable
+        super().enable_lora_adaptation(lora_config)
+        # LORA
         if self.left_coefs:
-            self.w_left = tf.Variable(
-                tf.random.normal(c_shape_left, stddev=limit, dtype=float_dtype),
-                name=f"w_left_FC",
+            self.w_left_lora_tensors = initialize_lora_tensors(
+                self.w_left, lora_config, name="w_left"
             )
-            self.norm_left = tf.constant(1 / self.left.n_out**0.5, dtype=float_dtype)
 
-        self.w_right = tf.Variable(
-            tf.random.normal(c_shape_right, stddev=limit, dtype=float_dtype),
-            name=f"w_right_FC",
+        # lora for self.w_right
+        self.w_right_lora_tensors = initialize_lora_tensors(
+            self.w_right, lora_config, name="w_right"
         )
-        self.norm_right = tf.constant(1 / self.right.n_out**0.5, dtype=float_dtype)
 
-        if self.norm_out:
-            self.norm_out_factor = tf.reshape(
-                tf.constant(self.norm_map, dtype=float_dtype), [-1, 1, 1]
+    def finalize_lora_update(self):
+
+        if self.left_coefs:
+            apply_lora_update(
+                self.w_left, *self.w_left_lora_tensors, lora_config=self.lora_config
             )
+            del self.w_left_lora_tensors
 
-        self.is_built = True
+        apply_lora_update(
+            self.w_right, *self.w_right_lora_tensors, lora_config=self.lora_config
+        )
+        del self.w_right_lora_tensors
+        # common part
+        super().finalize_lora_update()
 
     def compute_l2_regularization_loss(self):
         total_l2_regularization = 0.0
@@ -2201,7 +2643,13 @@ class FCRight2Left(TPEquivariantInstruction):
     def frwrd(self, input_data, training=False):
         left = input_data[self.left.name]
         if self.left_coefs:
-            w_left = tf.gather(self.w_left, self.w_tile_left, axis=-1)
+            w_left = self.w_left
+            # LORA
+            if self.lora:
+                w_left = w_left + lora_reconstruction(
+                    *self.w_left_lora_tensors, lora_config=self.lora_config
+                )
+            w_left = tf.gather(w_left, self.w_tile_left, axis=-1)
             if self.is_central_atom_type_dependent[0]:
                 w_left = tf.gather(w_left, input_data[constants.ATOMIC_MU_I], axis=0)
                 left = (
@@ -2216,7 +2664,13 @@ class FCRight2Left(TPEquivariantInstruction):
             left = tf.transpose(left, [2, 0, 1])
 
         right = tf.gather(input_data[self.right.name], self.collect_from, axis=-1)
-        w_right = tf.gather(self.w_right, self.w_tile_right, axis=-1)
+        w_right = self.w_right
+        # LORA
+        if self.lora:
+            w_right = w_right + lora_reconstruction(
+                *self.w_right_lora_tensors, lora_config=self.lora_config
+            )
+        w_right = tf.gather(w_right, self.w_tile_right, axis=-1)
         if self.is_central_atom_type_dependent[1]:
             w_right = tf.gather(w_right, input_data[constants.ATOMIC_MU_I], axis=0)
             right = (
@@ -2240,9 +2694,103 @@ class FCRight2Left(TPEquivariantInstruction):
         if np.any(self.is_central_atom_type_dependent):
             raise NotImplementedError()
 
+    def upd_init_args_new_elements(self, new_element_map):
+        if np.any(self.is_central_atom_type_dependent):
+            raise NotImplementedError()
+
 
 @capture_init_args
-class FunctionReduceParticular(TPEquivariantInstruction):
+class InvariantLayerRMSNorm(TPInstruction):
+    input_tensor_spec = {
+        constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
+        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        inpt: TPInstruction,
+        name: str,
+        type: str = "only_nonlin",
+        init: str = "zeros",
+    ):
+        super().__init__(name=name)
+        self.input = inpt
+        self.n_out = inpt.n_out
+        assert init in ["zeros", "ones", "random", "near_zero"]
+        self.init = init
+        self.type = type
+        assert self.type in [
+            "full",
+            "only_nonlin",
+            "sep_lin_gate",
+        ], f"Unknown type {self.type}"
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            if self.type == "full":
+                shape = [1, self.n_out, 1]
+            elif self.type == "only_nonlin" or self.type == "sep_lin_gate":
+                shape = [1, self.n_out - 1, 1]
+            else:
+                raise ValueError(f"Unknown type {self.type}")
+
+            if self.init == "zeros":
+                self.scale = tf.Variable(tf.zeros(shape, dtype=float_dtype))
+                if self.type == "sep_lin_gate":
+                    self.lin_scale = tf.Variable(tf.zeros([1, 1], dtype=float_dtype))
+            elif self.init == "ones":
+                self.scale = tf.Variable(tf.ones(shape, dtype=float_dtype))
+                if self.type == "sep_lin_gate":
+                    self.lin_scale = tf.Variable(tf.ones([1, 1], dtype=float_dtype))
+            elif self.init == "random":
+                self.scale = tf.Variable(tf.random.normal(shape, dtype=float_dtype))
+                if self.type == "sep_lin_gate":
+                    self.lin_scale = tf.Variable(
+                        tf.random.normal([1, 1], dtype=float_dtype)
+                    )
+            elif self.init == "near_zero":
+                self.scale = tf.Variable(
+                    tf.random.normal(shape, stddev=1e-8, dtype=float_dtype)
+                )
+                if self.type == "sep_lin_gate":
+                    self.lin_scale = tf.Variable(
+                        tf.random.normal([1, 1], stddev=1e-8, dtype=float_dtype)
+                    )
+
+            self.epsilon = tf.constant(1e-10, dtype=float_dtype)
+        self.is_built = True
+
+    def frwrd(self, input_data: dict, training: bool = False):
+        x = input_data[self.input.name]
+        n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
+        n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
+        r_map = tf.reshape(
+            tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1, 1]
+        )
+        if self.type == "full":
+            rms = tf.math.rsqrt(
+                tf.reduce_mean(x**2, axis=1, keepdims=True) + self.epsilon
+            )
+            rms = tf.where(r_map < n_at_b_real, rms, tf.zeros_like(rms))
+            return x * rms * self.scale
+        elif self.type == "only_nonlin":
+            lin = x[:, 0, :]
+        elif self.type == "sep_lin_gate":
+            lin = x[:, 0, :] * self.lin_scale
+        nonlin = x[:, 1:, :]
+        nl_rms = tf.math.rsqrt(
+            tf.reduce_mean(nonlin**2, axis=1, keepdims=True) + self.epsilon
+        )
+        nl_rms = tf.where(
+            r_map < n_at_b_real, nonlin * nl_rms * self.scale, tf.zeros_like(nl_rms)
+        )
+        return tf.concat([lin[:, tf.newaxis, :], nl_rms], axis=1)
+
+
+@capture_init_args
+class FunctionReduceParticular(
+    TPEquivariantInstruction, ElementsReduceInstructionMixin
+):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
@@ -2385,12 +2933,12 @@ class FunctionReduceParticular(TPEquivariantInstruction):
 
             return new_tensors
 
-    def patch_init_args(self, new_element_map):
+    def upd_init_args_new_elements(self, new_element_map):
         self._init_args["number_of_atom_types"] = len(new_element_map)
 
 
 @capture_init_args
-class ZBLPotential(TPInstruction):
+class ZBLPotential(TPInstruction, ElementsReduceInstructionMixin):
     """
     Compute ZBL pair potential
 
@@ -2590,6 +3138,9 @@ class ZBLPotential(TPInstruction):
         return energy
 
     def prepare_variables_for_selected_elements(self, index_to_select):
+        raise NotImplementedError()
+
+    def upd_init_args_new_elements(self, new_element_map):
         raise NotImplementedError()
 
 
