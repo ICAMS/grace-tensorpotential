@@ -5,6 +5,7 @@ import pandas as pd
 import argparse
 import sys
 from ase.io import read
+from ase.calculators.calculator import PropertyNotImplementedError
 
 import logging
 
@@ -32,9 +33,13 @@ def load_df_from_xyz(extxyz_filename):
     logging.info("Converting to dataframe")
     df = pd.DataFrame({"ase_atoms": data})
     logging.info("Extracting energy")
-    df["energy"] = df["ase_atoms"].map(
-        lambda at: at.get_potential_energy(force_consistent=True)
-    )
+    def get_potential_energy(at):
+        try:
+            return at.get_potential_energy(force_consistent=True)
+        except PropertyNotImplementedError:
+            return at.get_potential_energy()
+
+    df["energy"] = df["ase_atoms"].map(get_potential_energy)
     logging.info("Extracting forces")
     df["forces"] = df["ase_atoms"].map(lambda at: at.get_forces())
 
