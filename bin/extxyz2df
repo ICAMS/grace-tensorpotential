@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 
 import os
-import pandas as pd
 import argparse
 import sys
-from ase.io import read
+from tensorpotential.cli.data import load_extxyz
 
 import logging
 
@@ -21,6 +20,7 @@ def sizeof_fmt(file_name_or_size, suffix="B"):
             return "%3.1f%s%s" % (file_name_or_size, unit, suffix)
         file_name_or_size /= 1024.0
     return "%.1f%s%s" % (file_name_or_size, "Yi", suffix)
+
 
 
 def main(args):
@@ -50,29 +50,7 @@ def main(args):
     logging.info(f"Input filename: {extxyz_filename}")
     logging.info(f"Output filename: {output_dataset_filename}")
 
-    logging.info(
-        f"Reading extxyz file: {extxyz_filename} ({sizeof_fmt(extxyz_filename)})"
-    )
-    data = read(extxyz_filename, format="extxyz", index=":")
-    logging.info(f"{len(data)} structures read from {extxyz_filename}")
-    logging.info("Converting to dataframe")
-    df = pd.DataFrame({"ase_atoms": data})
-    logging.info("Extracting energy")
-    df["energy"] = df["ase_atoms"].map(
-        lambda at: at.get_potential_energy(force_consistent=True)
-    )
-    logging.info("Extracting forces")
-    df["forces"] = df["ase_atoms"].map(lambda at: at.get_forces())
-
-    try:
-        logging.info("Trying to extract stresses")
-        df["stress"] = df["ase_atoms"].map(lambda at: at.get_stress())
-    except Exception as e:
-        logger.error(f"Error while trying to extract stress: {e}, ignoring")
-
-    logging.info("Extracting info")
-    df["info"] = df["ase_atoms"].map(lambda at: at.info)
-
+    df = load_extxyz(extxyz_filename)
     logging.info(f"Saving dataframe")
     df.to_pickle(output_dataset_filename, compression="gzip")
     logging.info(

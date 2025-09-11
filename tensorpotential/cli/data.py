@@ -8,6 +8,8 @@ import random
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from itertools import cycle
+from ase.io import read
+from ase.calculators.calculator import PropertyNotImplementedError
 
 import numpy as np
 import pandas as pd
@@ -72,6 +74,37 @@ def load_dataframe(filename: str, compression: str = "infer") -> pd.DataFrame:
     return df
 
 
+def load_extxyz(filename: str) -> pd.DataFrame:
+    logging.info(
+        f"Reading extxyz file: {filename} ({sizeof_fmt(filename)})"
+    )
+    data = read(filename, format="extxyz", index=":")
+    logging.info(f"{len(data)} structures read from {filename}")
+    logging.info("Converting to dataframe")
+    df = pd.DataFrame({"ase_atoms": data})
+    logging.info("Extracting energy")
+
+    def get_potential_energy(at):
+        try:
+            return at.get_potential_energy(force_consistent=True)
+        except PropertyNotImplementedError:
+            return at.get_potential_energy()
+
+    df["energy"] = df["ase_atoms"].map(get_potential_energy)
+    logging.info("Extracting forces")
+    df["forces"] = df["ase_atoms"].map(lambda at: at.get_forces())
+
+    try:
+        logging.info("Trying to extract stresses")
+        df["stress"] = df["ase_atoms"].map(lambda at: at.get_stress())
+    except Exception as e:
+        logging.error(f"Error while trying to extract stress: {e}, ignoring")
+
+    logging.info("Extracting info")
+    df["info"] = df["ase_atoms"].map(lambda at: at.info)
+    return df
+
+
 def load_dataset(filenames):
     """Load multiple dataframes and concatenate it into one"""
     if isinstance(filenames, str):
@@ -87,7 +120,10 @@ def load_dataset(filenames):
         dfs = []
         for i, fname in enumerate(files_to_load):
             log.info(f"#{i + 1}/{len(files_to_load)}: try to load {fname}")
-            df = load_dataframe(fname)
+            if os.path.splitext(fname)[-1] in [".xyz", ".extxyz"]:
+                df = load_extxyz(fname)
+            else:
+                df = load_dataframe(fname)
             log.info(f" {len(df)} structures found")
             if "name" not in df.columns:
                 df["name"] = fname + ":" + df.index.map(str)
