@@ -115,7 +115,10 @@ def load_dataset(filenames):
         dfs = []
         for i, fname in enumerate(files_to_load):
             log.info(f"#{i + 1}/{len(files_to_load)}: try to load {fname}")
-            df = load_dataframe(fname)
+            if os.path.splitext(fname)[-1] in [".xyz", ".extxyz"]:
+                df = load_extxyz(fname)
+            else:
+                df = load_dataframe(fname)
             log.info(f" {len(df)} structures found")
             if "name" not in df.columns:
                 df["name"] = fname + ":" + df.index.map(str)
