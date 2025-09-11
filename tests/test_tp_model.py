@@ -150,7 +150,10 @@ def test_convert_model_reduce_elements():
     float_dtype = tf.float64
     # stage 1: convert_model_reduce_elements
     instructions = GRACE_2LAYER(
-        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0, basis_type="SBessel"
+        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3},
+        lmax=0,
+        basis_type="Cheb",
+        cutoff_dict={"Mo": 4, "Nb": 5, "Ta": 6, "W": 7},
     )
     tp = TensorPotential(instructions, float_dtype=float_dtype)
 

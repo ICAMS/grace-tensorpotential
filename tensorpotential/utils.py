@@ -943,6 +943,8 @@ def process_cutoff_dict(pair_cutoff_map: str | dict, element_map: dict):
             assert isinstance(s[0], str)
             assert isinstance(s[1], str)
             return s
+        else:
+            raise ValueError(f"Can not parse {s}")
 
     cut_dict = {
         extract_element_pairs_from_str(k): v for k, v in pair_cutoff_map.items()
@@ -1048,10 +1050,11 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
     objects_to_patch_dict = {}
     logging.info(f"Analyzing instructions  to patch:")
     for name, ins in instructions_dict.items():
-        patch_dict = ins.prepare_variables_for_selected_elements(index_to_select)
-        if patch_dict:
-            objects_to_patch_dict[name] = patch_dict
-            logging.info(f" - {name}: {len(patch_dict)} tensors to patch")
+        if isinstance(ins, ElementsReduceInstructionMixin):
+            patch_dict = ins.prepare_variables_for_selected_elements(index_to_select)
+            if patch_dict:
+                objects_to_patch_dict[name] = patch_dict
+                logging.info(f" - {name}: {len(patch_dict)} tensors to patch")
 
     # patching
     logging.info(f"Patching trainable variables:")

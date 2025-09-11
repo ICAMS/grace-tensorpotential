@@ -354,7 +354,7 @@ class RadialBasis(TPInstruction):
 
 
 @capture_init_args
-class BondSpecificRadialBasisFunction(TPInstruction):
+class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMixin):
     """
     Radial Basis function with a cutoff defined specifically for each
     i) element:
@@ -454,6 +454,34 @@ class BondSpecificRadialBasisFunction(TPInstruction):
                     self.scales, dtype=float_dtype, trainable=self.trainable
                 )
             self.is_built = True
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        bond_cutoff_map = np.array(self.bond_cutoff_map).reshape(self.nelem, self.nelem)
+        index_to_select = np.array(index_to_select)
+        new_bond_cutoff_map = bond_cutoff_map[
+            index_to_select[:, np.newaxis], index_to_select
+        ]
+        return {
+            "bond_cutoff_map": tf.Variable(
+                new_bond_cutoff_map.reshape(-1, 1).astype(np.float64)
+            )
+        }
+
+    def upd_init_args_new_elements(self, new_element_map):
+        els = list(new_element_map.keys())
+        new_nelem = len(els)
+        bond_cutoff_map = np.array(self.bond_cutoff_map).reshape((new_nelem, new_nelem))
+
+        new_cutoff_dict = {}
+
+        for el1 in els:
+            for el2 in els:
+                new_cutoff_dict["".join((el1, el2))] = bond_cutoff_map[
+                    new_element_map[el1], new_element_map[el2]
+                ]
+
+        self._init_args["cutoff_dict"] = new_cutoff_dict
+        self._init_args["element_map"] = new_element_map
 
     def frwrd(self, input_data: dict, training: bool = False):
         d = input_data[self.input_name]

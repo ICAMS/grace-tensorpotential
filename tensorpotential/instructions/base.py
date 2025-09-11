@@ -282,9 +282,6 @@ class TPInstruction(tf.Module, ABC):
     def frwrd(self, input_data: dict, training: bool = False):
         pass
 
-    def prepare_variables_for_selected_elements(self, index_to_select):
-        return None
-
     @abstractmethod
     def build(self, float_dtype):
         pass
