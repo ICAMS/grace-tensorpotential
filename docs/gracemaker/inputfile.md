@@ -15,6 +15,7 @@ cutoff: 6
 ######################
 data:
   filename: /path/to/train.pckl.gzip
+  # filename: /path/to/train.extxyz
   #  train_size: 100
   test_filename: /path/to/test.pckl.gzip
   #  test_size: 0.05 # 

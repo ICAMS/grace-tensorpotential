@@ -23,7 +23,11 @@ or build a `pandas.DataFrame` on you own. It must contain the following columns:
 * `stress` - six components of stress
 
 Note, that the `energy_corrected` column is not mandatory and can be constructed automatically by _gracemaker_, 
-if you provide `reference_energy`
+if you provide `reference_energy`.
+
+Alternatively, datasets in extended xyz format can either be converted to the
+format above using the `extxyz2df` tool shipped with this package or used
+directly in the input file.
 
 _____
 
