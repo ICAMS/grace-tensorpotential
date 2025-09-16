@@ -47,12 +47,14 @@ mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RAN
 
 ## How to Evaluate Uncertainty Indication for GRACE Models?
 
-- **For all GRACE models:** Use naive ensembling (query-by-committee). Run parameterization with different seeds, e.g.,  
+**For all GRACE models:** Use naive ensembling (query-by-committee). Run parameterization with different seeds, e.g.,  
+
   ```bash
   gracemaker ... --seed 1
   gracemaker ... --seed 2
   ```
   This generates multiple models in `seed/{number}/`. Use these models with the ASE calculator:  
+
   ```python
   from tensorpotential.calculator import TPCalculator
 
@@ -70,7 +72,7 @@ mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RAN
   calc.results['stress_std']  # Standard deviation of stress predictions
   ```
   
-- **For GRACE/FS models:** In addition to the ensembling method, use extrapolation grades based on D-optimality in [ASE](../quickstart/#gracefs_1) and [LAMMPS](../quickstart/#lammps-gracefs).  
+**For GRACE/FS models:** In addition to the ensembling method, use extrapolation grades based on D-optimality in [ASE](../quickstart/#gracefs_1) and [LAMMPS](../quickstart/#lammps-gracefs).  
 
 ---
 
@@ -100,3 +102,10 @@ To assign custom weights to each structure, include the following columns in the
 * `energy_weight`: A single value representing the weight for each structure.
 * `force_weight`: A per-atom array with a size equal to the number of atoms in the structure.
 * `virial_weight`: (optional): A six-component array representing the weight for virial terms.
+
+## How to get atomic virials with GRACE models in LAMMPS ?
+
+By default, the GRACE model provides total forces. To have LAMMPS receive pairwise forces - which is necessary for calculations like atomic virials - use the `pair_forces` option:
+```
+pair_style grace ... pair_forces
+```

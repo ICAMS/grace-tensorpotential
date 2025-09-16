@@ -217,6 +217,11 @@ To receive messages when new padding and recompilation occurs, add the `pad_verb
 pair_style grace ... pad_verbose
 ```
 
+By default, the GRACE model provides total forces. To have LAMMPS receive pairwise forces - which is necessary for calculations like atomic virials - use the `pair_forces` option:
+```
+pair_style grace ... pair_forces
+```
+
 **Warning**: While GPU usage is optional, TensorFlow is less efficient when running solely on the CPU.
 
 #### Multi-GPU parallelization 
