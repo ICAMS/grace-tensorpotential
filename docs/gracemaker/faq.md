@@ -49,28 +49,28 @@ mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RAN
 
 **For all GRACE models:** Use naive ensembling (query-by-committee). Run parameterization with different seeds, e.g.,  
 
-  ```bash
-  gracemaker ... --seed 1
-  gracemaker ... --seed 2
-  ```
-  This generates multiple models in `seed/{number}/`. Use these models with the ASE calculator:  
+```bash
+gracemaker ... --seed 1
+gracemaker ... --seed 2
+```
+This generates multiple models in `seed/{number}/`. Use these models with the ASE calculator:  
 
-  ```python
-  from tensorpotential.calculator import TPCalculator
+```python
+from tensorpotential.calculator import TPCalculator
 
-  calc_ens = TPCalculator(model=[
-      "fit/seed/1/saved_model/",
-      "fit/seed/2/saved_model/",
-      "fit/seed/3/saved_model/",
-  ])
+calc_ens = TPCalculator(model=[
+    "fit/seed/1/saved_model/",
+    "fit/seed/2/saved_model/",
+    "fit/seed/3/saved_model/",
+])
 
-  at.calc = calc_ens
-  at.get_potential_energy()
+at.calc = calc_ens
+at.get_potential_energy()
 
-  calc.results['energy_std']  # Standard deviation of total energy predictions
-  calc.results['forces_std']  # Standard deviation of forces predictions
-  calc.results['stress_std']  # Standard deviation of stress predictions
-  ```
+calc.results['energy_std']  # Standard deviation of total energy predictions
+calc.results['forces_std']  # Standard deviation of forces predictions
+calc.results['stress_std']  # Standard deviation of stress predictions
+```
   
 **For GRACE/FS models:** In addition to the ensembling method, use extrapolation grades based on D-optimality in [ASE](../quickstart/#gracefs_1) and [LAMMPS](../quickstart/#lammps-gracefs).  
 
