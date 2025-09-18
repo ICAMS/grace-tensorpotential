@@ -244,21 +244,37 @@ def cast_model(args):
     from tensorpotential.instructions.base import load_instructions
     from tensorflow import float32, float64, Variable, Module
 
-    def cast_instruction_vars(instruction, from_dtype, to_dtype):
-        for att_name in instruction.__dict__:
-            attr_value = getattr(instruction, att_name)
-            if isinstance(attr_value, Variable) and attr_value.dtype == from_dtype:
-                setattr(
-                    instruction,
-                    att_name,
-                    Variable(
-                        attr_value.numpy(),
-                        dtype=to_dtype,
-                        name=attr_value.name.replace(":0", ""),
-                    ),
-                )
-            if isinstance(attr_value, Module):  # Check nested objects
-                cast_instruction_vars(attr_value, from_dtype, to_dtype)
+    def recursive_cast_instruction_vars(
+        instruction, from_dtype, to_dtype, max_depth=None, current_depth=0
+    ):
+        if max_depth is not None and current_depth >= max_depth:
+            return
+
+        next_depth = current_depth + 1
+
+        if isinstance(instruction, Module):
+            for attr_name in instruction.__dict__:
+                attr_value = getattr(instruction, attr_name)
+                if isinstance(attr_value, Variable) and attr_value.dtype == from_dtype:
+                    setattr(
+                        instruction,
+                        attr_name,
+                        Variable(
+                            attr_value.numpy(),
+                            dtype=to_dtype,
+                            name=attr_value.name.replace(":0", ""),
+                        ),
+                    )
+                elif isinstance(attr_value, list) or isinstance(attr_value, tuple):
+                    for item in attr_value:
+                        recursive_cast_instruction_vars(
+                            item, from_dtype, to_dtype, max_depth, next_depth
+                        )
+                elif isinstance(attr_value, dict):
+                    for key, value in attr_value.items():
+                        recursive_cast_instruction_vars(
+                            value, from_dtype, to_dtype, max_depth, next_depth
+                        )
 
     preprocess_args(args)
     dtypes = {"fp32": float32, "fp64": float64}
@@ -290,9 +306,18 @@ def cast_model(args):
         tp.model.instructions, dict
     ), "Model is not dict format, cannot cast it. Use `update_model` option to convert it to dict format."
     for iname, ins in tp.model.instructions.items():
-        cast_instruction_vars(ins, d_from, d_to)
-    tp.save_checkpoint(checkpoint_name=checkpoint_path + output_suffix, verbose=True)
+        recursive_cast_instruction_vars(ins, d_from, d_to, max_depth=5)
     logger.info(f"Successfully casted model at {checkpoint_path} to {to_dtype} dtype")
+    tp.save_checkpoint(checkpoint_name=checkpoint_path + output_suffix, verbose=True)
+    logger.info(f"Saved casted checkpoint to {checkpoint_path + output_suffix}")
+
+    current_directory = Path.cwd()
+    full_path = current_directory / "casted_model"
+    instructions = load_instructions(model_path)
+    tp = TensorPotential(potential=instructions, float_dtype=d_to)
+    tp.load_checkpoint(checkpoint_name=checkpoint_path + output_suffix)
+    tp.save_model(exact_path=full_path, jit_compile=True)
+    logger.info(f"Saved casted model to {full_path}")
 
 
 def export_model(args):
