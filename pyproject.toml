@@ -36,10 +36,12 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/ICAMS/grace-tensorpotential"
 
-#[project.scripts]
-#gracemaker = "bin:gracemaker"
-#grace_models = "bin:grace_models"
-#grace_collect = "bin:grace_collect"
-#extxyz2df = "bin:extxyz2df"
-#df2extxyz = "bin:df2extxyz"
-#grace_preprocess = "bin:grace_preprocess"
+[project.scripts]
+gracemaker = "tensorpotential.scripts.gracemaker:main"
+grace_models = "tensorpotential.scripts.grace_models:main"
+grace_collect = "tensorpotential.scripts.grace_collect:main"
+extxyz2df = "tensorpotential.scripts.extxyz2df:main"
+df2extxyz = "tensorpotential.scripts.df2extxyz:main"
+grace_preprocess = "tensorpotential.scripts.grace_preprocess:main"
+grace_predict = "tensorpotential.scripts.grace_predict:main"
+grace_utils = "tensorpotential.scripts.grace_utils:main"

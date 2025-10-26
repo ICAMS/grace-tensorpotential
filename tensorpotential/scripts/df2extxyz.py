@@ -58,7 +58,7 @@ def sizeof_fmt(file_name_or_size, suffix="B"):
     return "%.1f%s%s" % (file_name_or_size, "Yi", suffix)
 
 
-def main(args):
+def main(args=None):
     parser = build_parser()
     args_parse = parser.parse_args(args)
     input_fname = args_parse.input
@@ -105,4 +105,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

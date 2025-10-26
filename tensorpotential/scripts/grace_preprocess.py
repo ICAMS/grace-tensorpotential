@@ -708,7 +708,7 @@ def get_databuilders(
     return databuilders_list
 
 
-def main(args):
+def main(args=None):
     # TODO: apply reference energy (esa_dict)
     # TODO: is_fit_stress, stress_units?
     # TODO: if  shift -> compute esa_dict from lstsq (optional), scale (necessary!)
@@ -1016,4 +1016,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
