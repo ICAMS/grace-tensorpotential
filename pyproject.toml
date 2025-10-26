@@ -22,7 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "tensorflow[and-cuda]<2.20",
+    "tensorflow<2.20; sys_platform == 'win32'",
+    "tensorflow[and-cuda]<2.20; sys_platform != 'win32'",
     "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",
@@ -45,3 +46,4 @@ df2extxyz = "tensorpotential.scripts.df2extxyz:main"
 grace_preprocess = "tensorpotential.scripts.grace_preprocess:main"
 grace_predict = "tensorpotential.scripts.grace_predict:main"
 grace_utils = "tensorpotential.scripts.grace_utils:main"
+
