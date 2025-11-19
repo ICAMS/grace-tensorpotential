@@ -129,7 +129,7 @@ def build_parser():
     return parser
 
 
-def main(args):
+def main(args=None):
     parser = build_parser()
     args_parse = parser.parse_args(args)
 
@@ -140,4 +140,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

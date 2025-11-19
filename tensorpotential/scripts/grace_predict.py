@@ -49,7 +49,7 @@ def predict(row, calc):
     return {"energy": e, "forces": f, "stress": s}
 
 
-def main(args):
+def main(args=None):
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -111,4 +111,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

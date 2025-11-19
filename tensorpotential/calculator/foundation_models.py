@@ -245,32 +245,32 @@ def to_valid_variable_name(name):
     return valid_name
 
 
-def safe_extract(tar, path=".", members=None):
-    # Get top-level items (first level of paths)
-    top_level_items = {
-        os.path.normpath(member.name).split(os.sep)[0]: member
-        for member in tar.getmembers()
-        if os.sep not in member.name
-    }
-
-    # Ensure there's exactly one top-level item
-    if len(top_level_items) == 1:
-        top_folder_name, member = next(iter(top_level_items.items()))
-        if not member.isdir():  # Ensure it's a directory
+def safe_extract(tar_filename, path=".", members=None):
+    with tarfile.open(tar_filename, "r:gz") as tar:
+        # Get top-level items (first level of paths)
+        top_level_items = {
+            member.name.split('/')[0]: member
+            for member in tar.getmembers()
+            if '/' not in member.name.strip('/')
+        }
+        # Ensure there's exactly one top-level item
+        if len(top_level_items) == 1:
+            top_folder_name, member = next(iter(top_level_items.items()))
+            if not member.isdir():  # Ensure it's a directory
+                raise ValueError(
+                    f"Expected a directory, but found a file: {top_folder_name}"
+                )
+        else:
             raise ValueError(
-                f"Expected a directory, but found a file: {top_folder_name}"
+                f"Expected one top-level folder, found: {list(top_level_items.keys())}"
             )
-    else:
-        raise ValueError(
-            f"Expected one top-level folder, found: {list(top_level_items.keys())}"
-        )
 
-    for member in tar.getmembers():
-        if member.name.startswith("/") or ".." in member.name:
-            raise ValueError(f"Unsafe path detected: {member.name}")
-    tar.extractall(path, members)
+        for member in tar.getmembers():
+            if member.name.startswith("/") or ".." in member.name:
+                raise ValueError(f"Unsafe path detected: {member.name}")
+        tar.extractall(path, members)
 
-    return top_folder_name
+        return top_folder_name
 
 
 # automatically try to import experimental models
@@ -300,9 +300,8 @@ def download_extract_rename(url, model_path):
     if "Content-Type: text/html" in http_msg:
         raise RuntimeError(f"Download failed, please check the URL {url!r}")
     # Unpack the .tar.gz file
-    print(f"Unpacking model from {url!r}")
-    with tarfile.open(local_filename, "r:gz") as tar:
-        top_folder_name = safe_extract(tar, path=root_folder)
+    print(f"Unpacking model from {url!r} (local file: {local_filename}) to {root_folder}")
+    top_folder_name = safe_extract(local_filename, path=root_folder)
     os.remove(local_filename)
     extracted_model_path = os.path.join(root_folder, top_folder_name)
     if extracted_model_path != model_path:

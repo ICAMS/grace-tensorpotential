@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.3"  #### UPD in setup.py to avoid confusion
+version = "0.5.4"  
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
@@ -22,7 +22,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "tensorflow[and-cuda]<2.20",
+    # for windows and macos
+    "tensorflow<2.20; sys_platform == 'win32' or sys_platform == 'darwin'",    
+    # for linux
+    "tensorflow[and-cuda]<2.20; sys_platform == 'linux'",
+    
     "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",
@@ -36,10 +40,12 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/ICAMS/grace-tensorpotential"
 
-#[project.scripts]
-#gracemaker = "bin:gracemaker"
-#grace_models = "bin:grace_models"
-#grace_collect = "bin:grace_collect"
-#extxyz2df = "bin:extxyz2df"
-#df2extxyz = "bin:df2extxyz"
-#grace_preprocess = "bin:grace_preprocess"
+[project.scripts]
+gracemaker = "tensorpotential.scripts.gracemaker:main"
+grace_models = "tensorpotential.scripts.grace_models:main"
+grace_collect = "tensorpotential.scripts.grace_collect:main"
+extxyz2df = "tensorpotential.scripts.extxyz2df:main"
+df2extxyz = "tensorpotential.scripts.df2extxyz:main"
+grace_preprocess = "tensorpotential.scripts.grace_preprocess:main"
+grace_predict = "tensorpotential.scripts.grace_predict:main"
+grace_utils = "tensorpotential.scripts.grace_utils:main"

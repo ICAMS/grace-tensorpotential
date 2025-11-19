@@ -23,7 +23,7 @@ def sizeof_fmt(file_name_or_size, suffix="B"):
 
 
 
-def main(args):
+def main(args=None):
     ##############################################################################################
     parser = argparse.ArgumentParser()
 
@@ -59,4 +59,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

@@ -16,15 +16,5 @@ if __name__ == "__main__":
         packages=find_packages(include=["tensorpotential", "tensorpotential.*"]),
         package_data={"tensorpotential": ["resources/input_template.yaml"]},
         include_package_data=True,
-        version="0.5.3",  ### UPD in pyproject.toml to avoid confusion
-        scripts=[
-            "bin/gracemaker",
-            "bin/grace_models",
-            "bin/grace_collect",
-            "bin/extxyz2df",
-            "bin/df2extxyz",
-            "bin/grace_preprocess",
-            "bin/grace_predict",
-            "bin/grace_utils",
-        ],
+        # version is now read from pyproject.toml
     )
