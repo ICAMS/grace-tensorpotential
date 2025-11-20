@@ -23,6 +23,8 @@ from tqdm import tqdm
 
 tqdm.pandas()
 
+NUMBER_ASSERT_ERRORS_SHOWN = 3
+
 
 def set_magmom(at, magmoms):
     magmoms = np.array(magmoms)
@@ -38,15 +40,25 @@ def set_magmom(at, magmoms):
     return at
 
 
-def predict(row, calc):
+def predict(row, calc, raise_errors):
     at = row["ase_atoms"].copy()
     if "mag_mom" in row:
         at = set_magmom(at, row["mag_mom"])
     at.calc = calc
-    e = at.get_potential_energy()
-    f = at.get_forces()
-    s = at.get_stress()
-    return {"energy": e, "forces": f, "stress": s}
+    try:
+        e = at.get_potential_energy()
+        f = at.get_forces()
+        s = at.get_stress()
+        return {"energy": e, "forces": f, "stress": s}
+    except AssertionError as e:
+        if raise_errors:
+            raise e
+        global NUMBER_ASSERT_ERRORS_SHOWN
+        if NUMBER_ASSERT_ERRORS_SHOWN > 0:
+            print("Error: ", e)
+            NUMBER_ASSERT_ERRORS_SHOWN -= 1
+            print("No more errors will be shown.")
+        return {}
 
 
 def main(args=None):
@@ -79,11 +91,21 @@ def main(args=None):
         dest="output",
     )
 
+    parser.add_argument(
+        "-e",
+        "--raise-errors",
+        help="Whether to NOT ignore errors and stop the program.",
+        action="store_true",
+        default=False,
+        dest="raise_errors",
+    )
+
     args_parse = parser.parse_args(args)
 
     model_path = os.path.abspath(args_parse.model_path)
     dataset_file = args_parse.dataset_file
     output_file = args_parse.output
+    raise_errors = args_parse.raise_errors
 
     logger.info(f"Loading model from: {model_path}")
     calc = TPCalculator(
@@ -98,11 +120,10 @@ def main(args=None):
 
     logger.info(f"Starting prediction")
 
-    df["prediction"] = df.progress_apply(predict, axis=1, args=(calc,))
-    df["energy_predicted"] = df["prediction"].map(lambda x: x["energy"])
-    df["forces_predicted"] = df["prediction"].map(lambda x: x["forces"])
-    df["stress_predicted"] = df["prediction"].map(lambda x: x["stress"])
-    # df = df.drop(columns=["ase_atoms", "prediction"])
+    df["prediction"] = df.progress_apply(predict, axis=1, args=(calc, raise_errors))
+    df["energy_predicted"] = df["prediction"].map(lambda x: x.get("energy"))
+    df["forces_predicted"] = df["prediction"].map(lambda x: x.get("forces"))
+    df["stress_predicted"] = df["prediction"].map(lambda x: x.get("stress"))
 
     logger.info(f"Saving dataset to {output_file}")
     df.drop(columns=["ase_atoms", "prediction"]).to_pickle(

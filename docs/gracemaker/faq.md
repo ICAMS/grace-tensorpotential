@@ -1,3 +1,22 @@
+## Resolving the `TypeError: 'NoneType' object is not callable` in TensorFlow Callbacks
+
+If you encounter a `TypeError: 'NoneType' object is not callable` error, typically after the first epoch, the traceback will look similar to this:
+```python
+...
+    if self.monitor_op(current, self.best):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'NoneType' object is not callable
+```
+This issue often occurs due to a change in how TensorFlow/Keras handles callbacks in newer versions.
+To resolve this, ensure that you set the following environment variable before running `gracemaker`:
+```bash
+export TF_USE_LEGACY_KERAS=1
+```
+
+Setting this variable forces the use of the legacy Keras backend, which resolves compatibility conflicts with certain callback implementations.
+
+---
+
 ## How to Continue a Current Fit?
 
 - Run `gracemaker -r` in the folder of the original fit to restart from the previous best-test-loss checkpoint.  

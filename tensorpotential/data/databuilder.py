@@ -21,7 +21,8 @@ from tqdm import tqdm
 
 from tensorpotential import constants
 from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL, STRESS_COL
-from tensorpotential.utils import process_cutoff_dict
+from tensorpotential.utils import process_cutoff_dict, enforce_pbc
+
 
 # from ase.neighborlist import neighbor_list as nl
 
@@ -43,19 +44,6 @@ def start_thread_to_terminate_when_parent_process_dies(ppid):
 
     thread = threading.Thread(target=f, daemon=True)
     thread.start()
-
-
-def enforce_pbc(atoms, cutoff):
-    """Enforce periodic boundary conditions for a given cutoff."""
-    pos = atoms.get_positions()
-    if (atoms.get_pbc() == 0).all():
-        max_d = np.max(np.linalg.norm(pos - pos[0], axis=1))
-        cell = np.eye(3) * ((max_d + cutoff) * 2)
-        atoms.set_cell(cell)
-        atoms.center()
-    atoms.set_pbc(True)
-
-    return atoms
 
 
 def transparent_iterator(iterator, *arg, **kwarg):

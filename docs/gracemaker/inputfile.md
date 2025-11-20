@@ -7,7 +7,7 @@ seed: 42
 cutoff: 6
 
 # cutoff_dict: {Mo: 4, MoNb: 3, W: 5, Ta*: 7 } ## Defining cutoff for each bond type separately, used by certain models
-## possible defaults: DEFAULT_CUTOFF_1L, DEFAULT_CUTOFF_2L
+## possible defaults: DEFAULT_CUTOFF_1L, DEFAULT_CUTOFF_2L, CUTOFF_2L
 
 ######################
 ##       DATA       ##
@@ -23,6 +23,11 @@ data:
   # save_dataset: False # default is True
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
   # max_workers: 6 # for parallel data builder
+  
+  ## Extra input/reference DataBuilder/s required for model
+  # extra_components: {
+  #   MagMomDataBuilder: {},
+  # }
 
 ######################
 ##    POTENTIAL     ##
@@ -86,12 +91,13 @@ fit:
   maxiter: 500 # Max number of optimization epochs
   optimizer: Adam
     # Optimization with Adam: good for large number of parameters, first-order method
-  opt_params: { learning_rate: 0.01, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipnorm: 1.0}
+  opt_params: { learning_rate: 0.008, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipnorm: 1.0}
   # reset_optimizer: True  # reset optimizer state, after being loaded from checkpoint
   # reset_epoch_and_step: False # reset epoch and step internal counters (stored in checkpoint)
   scheduler: cosine_decay # scheduler for learning-rate reduction during training 
     # available options are: reduce_on_plateau, cosine_decay, linear_decay, exponential_decay
-  scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimal_learning_rate": 0.05}
+  scheduler_params: {"minimal_learning_rate": 0.0001}
+  #scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimal_learning_rate": 0.05}
     # If :warmup_epochs: > 0, begin optimization with :cold_learning_rate: and reach :opt_params::learning_rate:
     # within :warmup_epochs: (can be < 1). Else, begin optimization with :opt_params::learning_rate: and decay down to
     # minimum_learning_rate within :maxiter: epochs
