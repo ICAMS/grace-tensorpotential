@@ -16,6 +16,10 @@ N_ATOMS_BATCH_TOTAL: Final[str] = "batch_tot_nat"
 N_STRUCTURES_BATCH_REAL: Final[str] = "batch_total_num_structures"
 N_STRUCTURES_BATCH_TOTAL: Final[str] = "n_struct_total"
 
+CELL_VECTORS: Final[str] = "cell_vectors"
+
+ATOMIC_POS: Final[str] = "atomic_positions"
+
 ATOMIC_MU_I: Final[str] = "atomic_mu_i"
 ATOMIC_MAGMOM: Final[str] = "atomic_magmom"
 ATOMS_TO_STRUCTURE_MAP: Final[str] = "map_atoms_to_structure"

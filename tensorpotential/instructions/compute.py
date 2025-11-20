@@ -976,12 +976,21 @@ class ScalarChemicalEmbedding(
             )
 
     def get_index_to_select(self, elements_to_select):
+        # 1. Create a dictionary mapping {symbol: index} for fast O(1) lookup.
+        # We decode the bytes to string here to match the format of elements_to_select.
+        symbol_to_index_map = {
+            sym.decode(): idx
+            for idx, sym in zip(self.element_map_index.numpy(), self.element_map_symbols.numpy())
+        }
+
+        # 2. Iterate through the input list (elements_to_select) to preserve its order.
         index_to_select = []
-        for ei, es in zip(
-            self.element_map_index.numpy(), self.element_map_symbols.numpy()
-        ):
-            if es.decode() in elements_to_select:
-                index_to_select.append(ei)
+        for element in elements_to_select:
+            # Only append if the element exists in our map
+            if element in symbol_to_index_map:
+                index_to_select.append(symbol_to_index_map[element])
+            else:
+                raise ValueError(f"Element {element} not found in the map ({symbol_to_index_map}).")
 
         return tf.constant(index_to_select, dtype=tf.int32)
 

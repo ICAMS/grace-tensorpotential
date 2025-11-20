@@ -9,6 +9,7 @@ import sys
 
 import tqdm
 from ase.data import chemical_symbols
+import numpy as np
 
 EQUI_STRUCTURE_STRATEGY = "structures"
 EQUI_ATOMS_STRATEGY = "atoms"
@@ -246,19 +247,10 @@ from tensorpotential.data.process_df import (
     FORCES_COL,
     STRESS_COL,
 )
+from tensorpotential.utils import NumpyEncoder
 
-import numpy as np
 
 
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NpEncoder, self).default(obj)
 
 
 remap_type_to_tf_dtype = {
@@ -1012,7 +1004,7 @@ def main(args=None):
             logging.info(f"Aggregated stats: {stats}")
 
             with open(stats_fname, "w") as f:
-                json.dump(stats, f, cls=NpEncoder)
+                json.dump(stats, f, cls=NumpyEncoder)
 
 
 if __name__ == "__main__":

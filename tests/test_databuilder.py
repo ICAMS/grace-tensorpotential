@@ -4,6 +4,7 @@ from ase.build import bulk
 from tensorpotential.data.databuilder import construct_batches, GeometricalDataBuilder
 
 import os
+import pytest
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
@@ -72,6 +73,59 @@ def test_construct_batches_df() -> None:
     #
     # assert b0["batch_tot_nat"] == 199
     # assert b1["batch_tot_nat"] == 199
+
+    assert padding_stats_ref == padding_stats_ref
+
+
+@pytest.mark.xfail
+def test_construct_batches_multiple_db() -> None:
+    from tensorpotential.constants import CELL_VECTORS, ATOMIC_POS
+
+    try:
+        from tensorpotential.experimental.gen_tensor.databuilder import (
+            PositionsDataBuilder,
+            CellDataBuilder,
+        )
+    except ImportError:
+        assert 1 == 0
+    df = pd.read_pickle(os.path.join(dir_path, "data/MoNbTaW_train50.pkl.gz"))
+    elements_map = {"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}
+    data_builders = [
+        GeometricalDataBuilder(elements_map=elements_map, cutoff=6),
+        PositionsDataBuilder(),
+        CellDataBuilder(),
+    ]
+
+    batches, padding_stats = construct_batches(
+        df,
+        data_builders=data_builders,
+        batch_size=10,
+        max_n_buckets=2,
+        return_padding_stats=True,
+        verbose=True,
+    )
+
+    # print("batches", batches)
+    print("padding_stats", padding_stats)
+    padding_stats_ref = {
+        "pad_nstruct": 5,
+        "pad_nat": 5,
+        "pad_nneigh": 56,
+        "nreal_struc": 50,
+        "nreal_atoms": 844,
+        "nreal_neigh": 48904,
+    }
+    assert len(batches) == 5
+    assert padding_stats is not None
+    b0 = batches[0]
+    b1 = batches[1]
+    assert b0["n_struct_total"] == 11
+    assert b1["n_struct_total"] == 11
+    #
+    assert CELL_VECTORS in b0
+    assert len(b1[CELL_VECTORS].shape) == 3
+    assert ATOMIC_POS in b1
+    print("b0", b0[CELL_VECTORS])
 
     assert padding_stats_ref == padding_stats_ref
 

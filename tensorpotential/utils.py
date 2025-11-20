@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -7,12 +8,22 @@ import os.path as p
 import sys
 import time
 
+import numpy as np
 import pandas as pd
 import logging
 
 from tensorpotential.instructions.base import ElementsReduceInstructionMixin
 from yaml import safe_load
 
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 def load_metrics(fname):
     """Load metrics from YAML file, written by gracemaker"""
@@ -1121,3 +1132,16 @@ def convert_model_reduce_elements(
 
     logging.info(f"Saving converted model to {new_potential_file_name}")
     save_instructions_dict(new_potential_file_name, instructions_dict)
+
+
+def enforce_pbc(atoms, cutoff):
+    """Enforce periodic boundary conditions for a given cutoff."""
+    pos = atoms.get_positions()
+    if (atoms.get_pbc() == 0).all():
+        max_d = np.max(np.linalg.norm(pos - pos[0], axis=1))
+        cell = np.eye(3) * ((max_d + cutoff) * 2)
+        atoms.set_cell(cell)
+        atoms.center()
+    atoms.set_pbc(True)
+
+    return atoms

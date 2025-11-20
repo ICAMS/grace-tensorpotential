@@ -25,6 +25,7 @@ from tensorpotential.cli.train_callbacks import (
     LRSchedulerFactory,
     CustomReduceLROnPlateau,
 )
+from tensorpotential.utils import NumpyEncoder
 
 LEGACY_SCHEDULER_PARAMS = "learning_rate_reduction"
 SCHEDULER_PARAMS = "scheduler_params"
@@ -41,7 +42,7 @@ def dump_metrics(filename, metrics):
     directory = os.path.dirname(filename)
     if not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
-    json_repr = json.dumps(metrics)
+    json_repr = json.dumps(metrics, cls=NumpyEncoder)
     with open(filename, "at") as f:
         print("-", json_repr, file=f)
 

@@ -382,9 +382,38 @@ class TPCalculator(Calculator):
         )
         self.data_builders = [self.geom_data_builder]
         if constants.ATOMIC_MAGMOM in self.data_keys:
-            from tensorpotential.experimental.mag.databuilder import MagMomDataBuilder
+            try:
+                from tensorpotential.experimental.mag.databuilder import (
+                    MagMomDataBuilder,
+                )
+            except ModuleNotFoundError:
+                raise ImportError(
+                    "TensorPotential.experimental.mag.databuilder not found"
+                )
 
             self.data_builders.append(MagMomDataBuilder())
+        if constants.ATOMIC_POS in self.data_keys:
+            try:
+                from tensorpotential.experimental.gen_tensor.databuilder import (
+                    PositionsDataBuilder,
+                )
+            except ModuleNotFoundError:
+                raise ImportError(
+                    "TensorPotential.experimental.gen_tensor.databuilder not found"
+                )
+
+            self.data_builders.append(PositionsDataBuilder(cutoff=self.cutoff))
+        if constants.CELL_VECTORS in self.data_keys:
+            try:
+                from tensorpotential.experimental.gen_tensor.databuilder import (
+                    CellDataBuilder,
+                )
+            except ModuleNotFoundError:
+                raise ImportError(
+                    "TensorPotential.experimental.gen_tensor.databuilder not found"
+                )
+
+            self.data_builders.append(CellDataBuilder(cutoff=self.cutoff))
 
         self.padding_manager = PaddingManager(
             data_builders=self.data_builders,
