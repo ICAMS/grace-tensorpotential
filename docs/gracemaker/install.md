@@ -121,6 +121,8 @@ cmake -DCMAKE_BUILD_TYPE=Release -D BUILD_MPI=ON -DPKG_ML-PACE=ON -DPKG_MC=ON ..
 ```
 
 Ensure that the line `TensorFlow library is FOUND at ...` appears after running the above command.
+You can manually specify the path to the TensorFlow library file (e.g., ``libtensorflow_cc.so``, ``.dylib``, or ``.dll``) with ``-D TF_LIB_FILE=/path/to/library``.
+This overrides automatic discovery and downloading.
 
 * Compile:
 ```bash
