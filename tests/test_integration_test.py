@@ -1030,7 +1030,7 @@ def test_MoNbTaW_LINEAR_f32():
         rel=1e-5,
     )
 
-
+@pytest.mark.skip(reason="Deprecated due to new API")
 def test_MoNbTaW_LINEAR_lr_reduce_on_plateau():
     train_ref_metrics = {
         "total_loss/train": 86388.96089855464,

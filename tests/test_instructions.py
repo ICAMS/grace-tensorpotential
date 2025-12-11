@@ -1375,7 +1375,7 @@ def test_initialize_lora_tensors_additive():
     ],
 )
 def test_rot_invar_2l(full_par):
-    from tensorpotential.instructions.compute import Parity
+    from tensorpotential.utils import Parity
 
     lmax_bond = 5
     n_rad_base = 8

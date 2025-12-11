@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from tensorpotential.instructions.base import *
-from tensorpotential.instructions.compute import *
-from tensorpotential.instructions.output import (
-    CreateOutputTarget,
-    LinearOut2Target,
-    FSOut2ScalarTarget,
-    ConstantScaleShiftTarget,
-    LinMLPOut2ScalarTarget,
-)
+from tensorpotential.instructions import *
+from tensorpotential.utils import Parity
+from tensorpotential import constants
+
+from typing import Literal
+
+from tensorpotential.potentials.registry import register_preset
 
 
+@register_preset("LINEAR")
 def LINEAR(
     element_map: dict,
     rcut: float = 6.0,
@@ -124,6 +123,42 @@ def LINEAR(
     return instructor.get_instructions()
 
 
+@register_preset(
+    "FS",
+    public=True,
+    settings={
+        "small": {
+            "rcut": 7,
+            "max_order": 3,
+            "lmax": [5, 5, 4],
+            "n_rad_max": [20, 15, 10],
+            "embedding_size": 32,
+            "fs_parameters": [[1.0, 1.0], [1.0, 0.5]],
+        },
+        "medium": {
+            "rcut": 7,
+            "lmax": [5, 5, 4, 3],
+            "n_rad_max": [20, 15, 10, 5],
+            "embedding_size": 64,
+            "max_order": 4,
+            "fs_parameters": [[1.0, 1.0], [1.0, 0.5], [1.0, 2], [1.0, 0.75]],
+        },
+        "large": {
+            "rcut": 7,
+            "lmax": [5, 5, 4, 3],
+            "n_rad_max": [20, 20, 15, 10],
+            "embedding_size": 72,
+            "max_order": 4,
+            "fs_parameters": [
+                [1.0, 1.0],
+                [1.0, 0.5],
+                [1.0, 2],
+                [1.0, 0.75],
+                [1.0, 1.5],
+            ],
+        },
+    },
+)
 def FS(
     element_map: dict,
     rcut: float = 6.0,
@@ -262,7 +297,34 @@ def FS(
     return instructor.get_instructions()
 
 
-def GRACE_1LAYER(
+@register_preset(
+    "GRACE_1LAYER",
+    public=True,
+    settings={
+        "small": {
+            "rcut": 6,
+            "lmax": 3,
+            "n_rad_max": 20,
+            "max_order": 3,
+            "n_mlp_dens": 10,
+        },
+        "medium": {
+            "rcut": 6,
+            "lmax": 4,
+            "n_rad_max": 32,
+            "max_order": 4,
+            "n_mlp_dens": 12,
+        },
+        "large": {
+            "rcut": 6,
+            "lmax": 4,
+            "n_rad_max": 48,
+            "max_order": 4,
+            "n_mlp_dens": 16,
+        },
+    },
+)
+def GRACE_1LAYER_v1_24(
     element_map: dict,
     rcut: float = 6.0,
     avg_n_neigh: float = 1.0,
@@ -430,10 +492,37 @@ def GRACE_1LAYER(
     return instructor.get_instructions()
 
 
-GRACE_1LAYER_v2 = GRACE_1LAYER  # for backward compatibility
+GRACE_1LAYER_v2 = GRACE_1LAYER_v1_24  # for backward compatibility
 
 
-def GRACE_2LAYER(
+@register_preset(
+    "GRACE_2LAYER",
+    public=True,
+    settings={
+        "small": {
+            "rcut": 6,
+            "lmax": [3, 2],
+            "max_order": 3,
+            "n_rad_max": [20, 32],
+            "n_mlp_dens": 8,
+        },
+        "medium": {
+            "rcut": 6,
+            "lmax": [3, 3],
+            "max_order": 4,
+            "n_rad_max": [32, 42],
+            "n_mlp_dens": 10,
+        },
+        "large": {
+            "rcut": 6,
+            "lmax": [4, 3],
+            "max_order": 4,
+            "n_rad_max": [32, 48],
+            "n_mlp_dens": 12,
+        },
+    },
+)
+def GRACE_2LAYER_v1_24(
     element_map: dict,
     rcut: float = 5.0,
     avg_n_neigh: float = 1.0,
@@ -741,7 +830,7 @@ def GRACE_2LAYER_scaled(
     chem_init: Literal["random", "zeros"] = "random",
     cutoff_dict: dict = None,
     zbl_cutoff: dict = None,
-    scales: List[float] = (1, 1),
+    scales: list[float] = (1, 1),
     **kwargs,
 ):
     if isinstance(lmax, int):
@@ -1008,6 +1097,515 @@ def GRACE_2LAYER_scaled(
             shift=constant_out_shift,
             atomic_shift_map=atomic_shift_map,
         )
+        if zbl_cutoff is not None:
+            zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
+            LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")
+
+    return instructor.get_instructions()
+
+
+@register_preset(
+    "GRACE_1LAYER_latest",
+    default=True,
+    public=True,
+    settings={
+        "small": {
+            "rcut": 6,
+            "lmax": 4,
+            "n_rad_max": 32,
+            "prod_func_n_max": 32,
+            "max_order": 4,
+            "n_mlp_dens": 10,
+            "n_rad_base": 8,
+        },
+        "medium": {
+            "rcut": 6,
+            "lmax": 4,
+            "n_rad_max": 32,
+            "prod_func_n_max": 64,
+            "max_order": 4,
+            "n_mlp_dens": 12,
+            "n_rad_base": 8,
+        },
+        "large": {
+            "rcut": 6,
+            "lmax": 4,
+            "n_rad_max": 42,
+            "prod_func_n_max": 64,
+            "max_order": 4,
+            "n_mlp_dens": 16,
+            "n_rad_base": 10,
+        },
+    },
+)
+def GRACE_1LAYER_v2_25(
+    element_map: dict,
+    rcut: float = 6,
+    avg_n_neigh: float = 1.0,
+    constant_out_shift: float = 0.0,
+    constant_out_scale: float = 1.0,
+    lmax=4,
+    basis_type: str = "Cheb",
+    cutoff_function_order: int = 16,
+    n_rad_base=10,
+    n_rad_max=32,
+    prod_func_n_max=64,
+    embedding_size=128,
+    n_mlp_dens: int = 16,
+    max_order: int = 4,
+    func_init="random",
+    chem_init="random",
+    cutoff_dict: dict = None,
+    atomic_shift_map: dict = None,
+    zbl_cutoff: dict = None,
+    **kwargs,
+):
+    num_elements = len(element_map)
+    with InstructionManager() as instructor:
+        d_ij = BondLength()
+        rhat = ScaledBondVector(bond_length=d_ij)
+
+        if cutoff_dict is None:
+            g_k = RadialBasis(
+                bonds=d_ij,
+                basis_type=basis_type,
+                nfunc=n_rad_base,
+                p=cutoff_function_order,
+                normalized=False,
+                rcut=rcut,
+            )
+        else:
+            g_k = BondSpecificRadialBasisFunction(
+                bonds=d_ij,
+                element_map=element_map,
+                cutoff_dict=cutoff_dict,
+                cutoff=rcut,
+                cutoff_type="symmetric_bond",
+                cutoff_function_param=cutoff_function_order,
+                basis_type=basis_type,
+                nfunc=n_rad_base,
+            )
+
+        z = ScalarChemicalEmbedding(
+            element_map=element_map,
+            embedding_size=embedding_size,
+            name="Z",
+            init=chem_init,
+        )
+
+        R_nl = MLPRadialFunction_v2(
+            n_rad_max=n_rad_max,
+            lmax=lmax,
+            basis=g_k,
+            name="R",
+            hidden_layers=[64, 64],
+            activation=["silu", "silu"],
+        )
+
+        Y = SphericalHarmonic(vhat=rhat, lmax=lmax, name="Y")
+        A = SingleParticleBasisFunctionScalarInd(
+            radial=R_nl, angular=Y, indicator=z, name="A", avg_n_neigh=avg_n_neigh
+        )
+
+        instructions = [A]
+
+        if max_order > 1:
+            A1 = FCRight2Left(
+                left=A, right=A, name="A1", n_out=prod_func_n_max, norm_out=True
+            )
+            AA = ProductFunction(
+                left=A1,
+                right=A1,
+                name="AA",
+                lmax=lmax,
+                Lmax=lmax,
+                keep_parity=Parity.REAL_PARITY,
+                is_left_right_equal=True,
+                normalize=True,
+            )
+            instructions.append(AA)
+
+        if max_order > 2:
+            AA1 = FCRight2Left(
+                left=AA, right=A, name="AA1", n_out=prod_func_n_max, norm_out=True
+            )
+            AAA = ProductFunction(
+                left=AA1,
+                right=A1,
+                name="AAA",
+                lmax=lmax,
+                Lmax=0,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions.append(AAA)
+        if max_order > 3:
+            AA2 = FCRight2Left(
+                left=AA, right=A, name="AA2", n_out=prod_func_n_max, norm_out=True
+            )
+            AAAA = ProductFunction(
+                left=AA2,
+                right=AA2,
+                name="AAAA",
+                lmax=lmax,
+                Lmax=0,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions.append(AAAA)
+
+        I = FunctionReduceN(
+            instructions=instructions,
+            name="rho",
+            ls_max=0,
+            n_out=n_mlp_dens + 1,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=num_elements,
+            allowed_l_p=Parity.REAL_PARITY,
+            init_vars=func_init,
+        )
+
+        out_instr = CreateOutputTarget(name=constants.PREDICT_ATOMIC_ENERGY)
+        LinMLPOut2ScalarTarget(
+            origin=[I], target=out_instr, hidden_layers=[64], activation="silu"
+        )
+        if (
+            (constant_out_shift != 0)
+            or (constant_out_scale != 1)
+            or (atomic_shift_map is not None)
+        ):
+            ConstantScaleShiftTarget(
+                target=out_instr,
+                scale=constant_out_scale,
+                shift=constant_out_shift,
+                atomic_shift_map=atomic_shift_map,
+            )
+        TrainableShiftTarget(target=out_instr, number_of_atom_types=num_elements)
+        if zbl_cutoff is not None:
+            zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
+            LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")
+
+    return instructor.get_instructions()
+
+
+@register_preset(
+    "GRACE_2LAYER_latest",
+    public=True,
+    settings={
+        "small": {
+            "rcut": 6,
+            "lmax": [4, 3],
+            "max_order": 4,
+            "indicator_lmax": 1,
+            "n_rad_max": [32, 32],
+            "prod_func_n_max": [32, 32],
+            "n_mlp_dens": 12,
+            "n_rad_base": 8,
+        },
+        "medium": {
+            "rcut": 6,
+            "lmax": [4, 3],
+            "max_order": 4,
+            "indicator_lmax": 1,
+            "n_rad_max": [32, 32],
+            "prod_func_n_max": [42, 64],
+            "n_mlp_dens": 16,
+            "n_rad_base": 8,
+        },
+        "large": {
+            "rcut": 6,
+            "lmax": [4, 3],
+            "max_order": 4,
+            "indicator_lmax": 3,
+            "n_rad_max": [42, 32],
+            "prod_func_n_max": [42, 64],
+            "n_mlp_dens": 16,
+            "n_rad_base": 10,
+        },
+    },
+)
+def GRACE_2LAYER_v2_25(
+    element_map: dict,
+    rcut: float = 6,
+    avg_n_neigh: float = 1.0,
+    constant_out_shift: float = 0.0,
+    constant_out_scale: float = 1.0,
+    lmax=(4, 3),
+    basis_type: str = "Cheb",
+    cutoff_function_order: int = 16,
+    n_rad_base=10,
+    n_rad_max=(42, 32),
+    prod_func_n_max=(42, 64),
+    embedding_size=128,
+    n_mlp_dens: int = 16,
+    max_order: int = 4,
+    indicator_lmax: int = 3,
+    func_init="random",
+    chem_init="random",
+    cutoff_dict: dict = None,
+    atomic_shift_map: dict = None,
+    zbl_cutoff: dict = None,
+    **kwargs,
+):
+    if isinstance(lmax, int):
+        # expand parameter for both layers
+        lmax = [lmax, lmax]
+    if isinstance(n_rad_max, int):
+        # expand parameter for both layers
+        n_rad_max = [n_rad_max, n_rad_max]
+    if isinstance(prod_func_n_max, int):
+        # expand parameter for both layers
+        prod_func_n_max = [prod_func_n_max, prod_func_n_max]
+    Il = indicator_lmax
+    num_elements = len(element_map)
+    with InstructionManager() as instructor:
+        d_ij = BondLength()
+        rhat = ScaledBondVector(bond_length=d_ij)
+
+        if cutoff_dict is None:
+            g_k = RadialBasis(
+                bonds=d_ij,
+                basis_type=basis_type,
+                nfunc=n_rad_base,
+                p=cutoff_function_order,
+                normalized=False,
+                rcut=rcut,
+            )
+        else:
+            g_k = BondSpecificRadialBasisFunction(
+                bonds=d_ij,
+                element_map=element_map,
+                cutoff_dict=cutoff_dict,
+                cutoff=rcut,
+                cutoff_type="symmetric_bond",
+                cutoff_function_param=cutoff_function_order,
+                basis_type=basis_type,
+                nfunc=n_rad_base,
+            )
+        R_nl = MLPRadialFunction_v2(
+            n_rad_max=n_rad_max[0],
+            lmax=lmax[0],
+            basis=g_k,
+            name="R",
+            hidden_layers=[64, 64],
+            activation=["silu", "silu"],
+        )
+
+        Y = SphericalHarmonic(vhat=rhat, lmax=lmax[0], name="Y")
+        z = ScalarChemicalEmbedding(
+            element_map=element_map,
+            embedding_size=embedding_size,
+            name="Z",
+            init=chem_init,
+        )
+        A = SingleParticleBasisFunctionScalarInd(
+            radial=R_nl, angular=Y, indicator=z, name="A", avg_n_neigh=avg_n_neigh
+        )
+
+        instructions = [A]
+
+        if max_order > 1:
+            A1 = FCRight2Left(
+                left=A, right=A, name="A1", n_out=prod_func_n_max[0], norm_out=True
+            )
+            AA = ProductFunction(
+                left=A1,
+                right=A1,
+                name="AA",
+                lmax=lmax[0],
+                Lmax=lmax[0],
+                keep_parity=Parity.REAL_PARITY,
+                is_left_right_equal=True,
+                normalize=True,
+            )
+            instructions.append(AA)
+
+        if max_order > 2:
+            AA1 = FCRight2Left(
+                left=AA, right=A, name="AA1", n_out=prod_func_n_max[0], norm_out=True
+            )
+            AAA = ProductFunction(
+                left=AA1,
+                right=A,
+                name="AAA",
+                lmax=lmax[0],
+                Lmax=Il,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions.append(AAA)
+        if max_order > 3:
+            AA2 = FCRight2Left(
+                left=AA, right=A, name="AA2", n_out=prod_func_n_max[0], norm_out=True
+            )
+            AAAA = ProductFunction(
+                left=AA2,
+                right=AA2,
+                name="AAAA",
+                lmax=lmax[0],
+                Lmax=1 if Il > 0 else 0,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions.append(AAAA)
+
+        I1 = FunctionReduceN(
+            name="I1",
+            instructions=[A, AA, AAA, AAAA],
+            ls_max=[Il, Il, Il, 1 if Il > 0 else 0],
+            n_out=12,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=num_elements,
+            allowed_l_p=Parity.REAL_PARITY,
+        )
+
+        I = FunctionReduceN(
+            name="I",
+            instructions=[I1],
+            ls_max=[Il],
+            n_out=n_rad_max[1],
+            is_central_atom_type_dependent=False,
+            allowed_l_p=Parity.REAL_PARITY,
+            init_vars=func_init,
+        )
+
+        I_0 = FunctionReduceN(
+            instructions=instructions,
+            name="I_out_0",
+            ls_max=0,
+            n_out=n_mlp_dens + 1,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=num_elements,
+            allowed_l_p=Parity.SCALAR,
+            init_vars=func_init,
+        )
+        I_0_LN = InvariantLayerRMSNorm(inpt=I_0, name="I_out_0_LN", type="only_nonlin")
+
+        R1_nl = MLPRadialFunction_v2(
+            n_rad_max=n_rad_max[1],
+            lmax=lmax[0],
+            basis=g_k,
+            name="R1",
+            hidden_layers=[64, 64],
+            activation=["silu", "silu"],
+        )
+        B0 = SingleParticleBasisFunctionScalarInd(
+            radial=R1_nl,
+            angular=Y,
+            indicator=z,
+            name="B0",
+            avg_n_neigh=avg_n_neigh,
+        )
+
+        YI = SingleParticleBasisFunctionEquivariantInd(
+            radial=R1_nl,
+            angular=Y,
+            indicator=I,
+            name="YI",
+            lmax=lmax[0],
+            Lmax=lmax[1],
+            avg_n_neigh=avg_n_neigh,
+            keep_parity=Parity.FULL_PARITY,
+            normalize=True,
+        )
+        B = FunctionReduceN(
+            instructions=[YI, B0],
+            name="B",
+            ls_max=lmax[1],
+            out_norm=False,
+            n_out=prod_func_n_max[1],
+            is_central_atom_type_dependent=False,
+            allowed_l_p=Parity.FULL_PARITY,
+        )
+        instructions2 = [B]
+
+        if max_order > 1:
+            B1 = FCRight2Left(
+                left=B,
+                right=B,
+                name="B1",
+                n_out=prod_func_n_max[1],
+                norm_out=True,
+            )
+            BB = ProductFunction(
+                left=B1,
+                right=B1,
+                name="BB",
+                lmax=lmax[1],
+                Lmax=lmax[1],
+                keep_parity=Parity.FULL_PARITY + [[0, -1]],
+                is_left_right_equal=True,
+                normalize=True,
+            )
+            instructions2.append(BB)
+        if max_order > 2:
+            BB1 = FCRight2Left(
+                left=BB,
+                right=B,
+                name="BB1",
+                n_out=prod_func_n_max[1],
+                norm_out=True,
+            )
+            BBB = ProductFunction(
+                left=BB1,
+                right=B,
+                name="BBB",
+                lmax=lmax[1],
+                Lmax=0,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions2.append(BBB)
+        if max_order > 3:
+            BB2 = FCRight2Left(
+                left=BB,
+                right=B,
+                name="BB2",
+                n_out=prod_func_n_max[1],
+                norm_out=True,
+            )
+            BBBB = ProductFunction(
+                left=BB2,
+                right=BB2,
+                name="BBBB",
+                lmax=lmax[1],
+                Lmax=0,
+                keep_parity=Parity.REAL_PARITY,
+                normalize=True,
+            )
+            instructions2.append(BBBB)
+
+        I_1 = FunctionReduceN(
+            instructions=instructions2,
+            name="I_out_1",
+            ls_max=0,
+            n_out=n_mlp_dens + 1,
+            is_central_atom_type_dependent=True,
+            number_of_atom_types=num_elements,
+            allowed_l_p=Parity.SCALAR,
+            init_vars=func_init,
+        )
+        I_1_LN = InvariantLayerRMSNorm(inpt=I_1, name="I_1_LN", type="full")
+
+        out_instr = CreateOutputTarget(name=constants.PREDICT_ATOMIC_ENERGY)
+        LinMLPOut2ScalarTarget(
+            origin=[I_0_LN, I_1_LN],
+            target=out_instr,
+            hidden_layers=[64],
+            activation="tanh",
+        )
+        if (
+            (constant_out_shift != 0)
+            or (constant_out_scale != 1)
+            or (atomic_shift_map is not None)
+        ):
+            ConstantScaleShiftTarget(
+                target=out_instr,
+                scale=constant_out_scale,
+                shift=constant_out_shift,
+                atomic_shift_map=atomic_shift_map,
+            )
+        TrainableShiftTarget(target=out_instr, number_of_atom_types=num_elements)
         if zbl_cutoff is not None:
             zbl = ZBLPotential(bonds=d_ij, cutoff=zbl_cutoff, element_map=element_map)
             LinearOut2Target(origin=[zbl], target=out_instr, name="zbl_output")

@@ -51,50 +51,6 @@ from tensorpotential.poly import (
 from tensorpotential.utils import process_cutoff_dict
 
 
-class Parity:
-    FULL_PARITY = [
-        [0, 1],
-        [1, -1],
-        [1, 1],
-        [2, -1],
-        [2, 1],
-        [3, -1],
-        [3, 1],
-        [4, -1],
-        [4, 1],
-        [5, -1],
-        [5, 1],
-        [6, -1],
-        [6, 1],
-    ]
-
-    REAL_PARITY = [
-        [0, 1],
-        [1, -1],
-        [2, 1],
-        [3, -1],
-        [4, 1],
-        [5, -1],
-        [6, 1],
-    ]
-
-    PSEUDO_PARITY = [
-        [0, -1],
-        [1, 1],
-        [2, -1],
-        [3, 1],
-        [4, -1],
-        [5, 1],
-        [6, -1],
-    ]
-
-    SCALAR = [[0, 1]]
-
-    VECTOR = [[1, -1]]
-
-    TENSOR = [[2, 1]]
-
-
 @capture_init_args
 class BondLength(TPInstruction):
     """
@@ -980,7 +936,9 @@ class ScalarChemicalEmbedding(
         # We decode the bytes to string here to match the format of elements_to_select.
         symbol_to_index_map = {
             sym.decode(): idx
-            for idx, sym in zip(self.element_map_index.numpy(), self.element_map_symbols.numpy())
+            for idx, sym in zip(
+                self.element_map_index.numpy(), self.element_map_symbols.numpy()
+            )
         }
 
         # 2. Iterate through the input list (elements_to_select) to preserve its order.
@@ -990,7 +948,9 @@ class ScalarChemicalEmbedding(
             if element in symbol_to_index_map:
                 index_to_select.append(symbol_to_index_map[element])
             else:
-                raise ValueError(f"Element {element} not found in the map ({symbol_to_index_map}).")
+                raise ValueError(
+                    f"Element {element} not found in the map ({symbol_to_index_map})."
+                )
 
         return tf.constant(index_to_select, dtype=tf.int32)
 
@@ -1098,7 +1058,7 @@ class SingleParticleBasisFunctionScalarInd(
             self.slice_angular = None
         assert (
             self.radial.lmax == self.lmax
-        ), "Radial part and angular part lmax do not match"
+        ), f"Radial part and angular part lmax do not match ({self.radial.lmax} vs {self.lmax})"
 
         if self.slice_angular is not None:
             self.coupling_meta_data = self.angular.coupling_meta_data.query(

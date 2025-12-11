@@ -2,6 +2,12 @@ import os
 import sys
 import warnings
 
+try:
+    from importlib.metadata import version, PackageNotFoundError
+    __version__ = version("tensorpotential")
+except (ImportError,PackageNotFoundError) as e:
+    # If the package is not installed, don't crash.
+    __version__ = "unknown"
 
 def _configure_keras_backend(verbose=True):
     """

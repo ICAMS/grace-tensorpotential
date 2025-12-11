@@ -24,12 +24,14 @@ from importlib import resources
 import json
 
 from tensorpotential import constants as tc
-from tensorpotential.potentials.presets import (
-    LINEAR,
-    FS,
-    GRACE_1LAYER,
-    GRACE_2LAYER,
+
+from tensorpotential.potentials import (
+    get_preset,
+    get_public_preset_list,
+    get_default_preset_name,
+    get_preset_settings,
 )
+
 from tensorpotential.loss import *
 from tensorpotential.metrics import *
 from tensorpotential.instructions.base import (
@@ -52,71 +54,8 @@ LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
 
-# TODO - need better names
-ALLOWED_PRESETS = {
-    "LINEAR": LINEAR,
-    "FS": FS,
-    "GRACE_1LAYER": GRACE_1LAYER,
-    "GRACE_2LAYER": GRACE_2LAYER,
-}
-default_preset = "GRACE_1LAYER"
-allowed_preset_complexities = {
-    "FS": {
-        "small": {
-            "max_order": 3,
-            "lmax": [5, 5, 4],
-            "n_rad_max": [20, 15, 10],
-            "embedding_size": 32,
-            "fs_parameters": [[1.0, 1.0], [1.0, 0.5]],
-        },
-        "medium": {
-            "lmax": [5, 5, 4, 3],
-            "n_rad_max": [20, 15, 10, 5],
-            "embedding_size": 64,
-            "max_order": 4,
-            "fs_parameters": [[1.0, 1.0], [1.0, 0.5], [1.0, 2], [1.0, 0.75]],
-        },
-        "large": {
-            "lmax": [5, 5, 4, 3],
-            "n_rad_max": [20, 20, 15, 10],
-            "embedding_size": 72,
-            "max_order": 4,
-            "fs_parameters": [
-                [1.0, 1.0],
-                [1.0, 0.5],
-                [1.0, 2],
-                [1.0, 0.75],
-                [1.0, 1.5],
-            ],
-        },
-    },
-    "GRACE_1LAYER": {
-        "small": {"lmax": 3, "n_rad_max": 20, "max_order": 3, "n_mlp_dens": 10},
-        "medium": {"lmax": 4, "n_rad_max": 32, "max_order": 4, "n_mlp_dens": 12},
-        "large": {"lmax": 4, "n_rad_max": 48, "max_order": 4, "n_mlp_dens": 16},
-    },
-    "GRACE_2LAYER": {
-        "small": {
-            "lmax": [3, 2],
-            "max_order": 3,
-            "n_rad_max": [20, 32],
-            "n_mlp_dens": 8,
-        },
-        "medium": {
-            "lmax": [3, 3],
-            "max_order": 4,
-            "n_rad_max": [32, 42],
-            "n_mlp_dens": 10,
-        },
-        "large": {
-            "lmax": [4, 3],
-            "max_order": 4,
-            "n_rad_max": [32, 48],
-            "n_mlp_dens": 12,
-        },
-    },
-}
-default_cutoff = {"FS": 7.0, "GRACE_1LAYER": 6.0, "GRACE_2LAYER": 5.0}
+
+# default_cutoff = {"FS": 7.0, "GRACE_1LAYER": 6.0, "GRACE_2LAYER": 5.0}
 
 
 @dataclass
@@ -147,32 +86,19 @@ def construct_model(
         log.info(f"Model kwargs: {kwargs}")
 
     if preset is not None:
-        # assert (
-        #     preset in ALLOWED_PRESETS
-        # ), f"Preset `{preset}` must be in {ALLOWED_PRESETS.keys()}"
-        if preset in ALLOWED_PRESETS:
-            build_fn = ALLOWED_PRESETS[preset]
-        else:
-            try:
-                extra_presets = importlib.import_module(
-                    "tensorpotential.experimental.presets"
-                )
-                build_fn = getattr(extra_presets, preset)
-            except ModuleNotFoundError:
-                build_fn = None
-        if build_fn is not None:
-            instructions = build_fn(
-                element_map=element_map,
-                rcut=rcut,
-                cutoff_dict=cutoff_dict,
-                avg_n_neigh=avg_n_neigh,
-                constant_out_shift=constant_out_shift,
-                constant_out_scale=constant_out_scale,
-                atomic_shift_map=atomic_shift_map,
-                **kwargs,
-            )
-        else:
-            raise ValueError(f"Unknown preset {preset}")
+        build_fn = get_preset(preset)
+
+        instructions = build_fn(
+            element_map=element_map,
+            rcut=rcut,
+            cutoff_dict=cutoff_dict,
+            avg_n_neigh=avg_n_neigh,
+            constant_out_shift=constant_out_shift,
+            constant_out_scale=constant_out_scale,
+            atomic_shift_map=atomic_shift_map,
+            **kwargs,
+        )
+
     elif potential_config.get("custom"):
         model = potential_config.get("custom")
         sys.path.append(os.getcwd())
@@ -192,8 +118,7 @@ def construct_model(
         raise ValueError(
             f"Neither `preset` nor `custom` specified in input.yaml::potential"
         )
-    # if isinstance(instructions, list):
-    #     instructions = {ins.name: ins for ins in instructions}
+
     return instructions
 
 
@@ -387,18 +312,6 @@ def build_loss_function(fit_config):
             except AttributeError as e:
                 raise NameError(f"Could not find loss function {loss_comp_name}")
 
-    # loss_comp_name = tc.INPUT_FIT_LOSS_EFG
-    # if loss_comp_name in fit_loss:
-    #     from tensorpotential.experimental.efg.loss import WeightedMSEEFGLoss
-    #
-    #     loss_components[loss_comp_name] = get_loss_component(
-    #         loss_comp_name,
-    #         {
-    #             "square": WeightedMSEEFGLoss,
-    #             # "huber": None,
-    #         },
-    #     )
-
     loss_func: LossFunction = LossFunction(loss_components=loss_components)
 
     reg_loss: LossFunction = build_reg_loss(fit_config)
@@ -551,7 +464,7 @@ def generate_template_input():
         elements = ""
     input_yaml_text = input_yaml_text.replace("{{ELEMENTS}}", elements)
 
-    learning_rate = 0.01
+    learning_rate = 0.008
     eval_init_stats = False
 
     finetune_model = input_choice(
@@ -572,7 +485,8 @@ def generate_template_input():
             choices=available_foundation_models,
             default_choice="GRACE-1L-OMAT",
         )
-        potential_template = f"""finetune_foundation_model: {foundation_model_name} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+        potential_template = f"""finetune_foundation_model: {foundation_model_name} 
+        
   reduce_elements: True #  default - False, reduce elements to those provided in dataset 
         """
         input_yaml_text = input_yaml_text.replace("{{CUTOFF}}", "n/a")
@@ -580,12 +494,13 @@ def generate_template_input():
         eval_init_stats = True
     else:
         print("Fitting from scratch")
+        def_preset = get_default_preset_name()
         preset_name = input_choice(
             f"Enter model preset",
-            choices=ALLOWED_PRESETS.keys(),
-            default_choice=default_preset,
+            choices=get_public_preset_list(),
+            default_choice=def_preset if def_preset is not None else "GRACE_1LAYER",
         )
-        potential_template = """preset: {{PRESET_NAME}} # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+        potential_template = """preset: {{PRESET_NAME}} 
 
   ## For custom model from model.py::custom_model
   #  custom: model.custom_model
@@ -599,24 +514,28 @@ def generate_template_input():
             "{{PRESET_NAME}}", str(preset_name)
         )
 
-        preset_complexity = input_choice(
-            "Model complexity",
-            choices=allowed_preset_complexities[preset_name].keys(),
-            default_choice="medium",
-        )
-        kwargs_str = json.dumps(
-            allowed_preset_complexities[preset_name][preset_complexity],
-        ).strip()
-        kwargs_str = kwargs_str.replace('"', "").replace("'", "")
-        potential_template = potential_template.replace("{{KWARGS}}", kwargs_str)
-
-        def_cutoff = default_cutoff[preset_name]
-        cutoff = float(
-            input_with_default(
-                f"Enter cutoff (default={def_cutoff})",
-                default_choice=def_cutoff,
+        avail_preset_complexities = get_preset_settings(preset_name)
+        if avail_preset_complexities is not None:
+            preset_complexity = input_choice(
+                "Model complexity",
+                choices=avail_preset_complexities.keys(),
+                default_choice="medium",
             )
-        )
+            kwargs = avail_preset_complexities[preset_complexity]
+            def_cutoff = kwargs.pop("rcut")
+
+            kwargs_str = json.dumps(kwargs).strip()
+            kwargs_str = kwargs_str.replace('"', "").replace("'", "")
+            potential_template = potential_template.replace("{{KWARGS}}", kwargs_str)
+
+            cutoff = float(
+                input_with_default(
+                    f"Enter cutoff (default={def_cutoff})",
+                    default_choice=def_cutoff,
+                )
+            )
+        else:
+            cutoff = 6
         print("Cutoff: ", cutoff)
         input_yaml_text = input_yaml_text.replace("{{CUTOFF}}", str(cutoff))
 
@@ -627,6 +546,9 @@ def generate_template_input():
         "{{eval_init_stats}}", str(eval_init_stats)
     )
     input_yaml_text = input_yaml_text.replace("{{learning_rate}}", str(learning_rate))
+    input_yaml_text = input_yaml_text.replace(
+        "{{min_learning_rate}}", str(learning_rate / 12)
+    )
 
     ####### loss function type ###
     loss_type = input_choice(
