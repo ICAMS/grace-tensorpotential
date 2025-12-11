@@ -4,8 +4,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 from pathlib import Path
 
-from tensorpotential.instructions.base import load_instructions
-from tensorpotential.potentials.presets import *
+from tensorpotential.instructions import load_instructions
+from tensorpotential.potentials import get_preset
 
 prefix = Path(__file__).parent.resolve()
 
@@ -31,6 +31,7 @@ def test_preset_FS_HEA25_with_simplification():
         max_order=4,
         simplify_prod=False,
     )
+    FS = get_preset("FS")
     pot = FS(element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, **kwargs)
     print(len(pot))
     assert len(pot) == 14

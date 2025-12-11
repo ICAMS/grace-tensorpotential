@@ -5,6 +5,8 @@ from tensorpotential.instructions.base import (
     NoInstructionManager,
     TPInstruction,
     TPEquivariantInstruction,
+    save_instructions_dict,
+    load_instructions,
 )
 
 from tensorpotential.instructions.compute import (
@@ -74,6 +76,8 @@ __all__ = [
     "MLPRadialFunction_v2",
     "TrainableShiftTarget",
     "InvariantLayerRMSNorm",
+    "save_instructions_dict",
+    "load_instructions",
 ]
 
 try:

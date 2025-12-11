@@ -15,6 +15,7 @@ import logging
 from tensorpotential.instructions.base import ElementsReduceInstructionMixin
 from yaml import safe_load
 
+
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -24,6 +25,7 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
+
 
 def load_metrics(fname):
     """Load metrics from YAML file, written by gracemaker"""
@@ -1145,3 +1147,47 @@ def enforce_pbc(atoms, cutoff):
     atoms.set_pbc(True)
 
     return atoms
+
+
+class Parity:
+    FULL_PARITY = [
+        [0, 1],
+        [1, -1],
+        [1, 1],
+        [2, -1],
+        [2, 1],
+        [3, -1],
+        [3, 1],
+        [4, -1],
+        [4, 1],
+        [5, -1],
+        [5, 1],
+        [6, -1],
+        [6, 1],
+    ]
+
+    REAL_PARITY = [
+        [0, 1],
+        [1, -1],
+        [2, 1],
+        [3, -1],
+        [4, 1],
+        [5, -1],
+        [6, 1],
+    ]
+
+    PSEUDO_PARITY = [
+        [0, -1],
+        [1, 1],
+        [2, -1],
+        [3, 1],
+        [4, -1],
+        [5, 1],
+        [6, -1],
+    ]
+
+    SCALAR = [[0, 1]]
+
+    VECTOR = [[1, -1]]
+
+    TENSOR = [[2, 1]]

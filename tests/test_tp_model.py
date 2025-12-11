@@ -16,11 +16,10 @@ import shutil
 from tensorpotential.utils import convert_model_reduce_elements
 from tensorpotential.tensorpot import TensorPotential
 from tensorpotential.tpmodel import TPModel
-from tensorpotential.potentials.presets import (
-    GRACE_2LAYER,
-    save_instructions_dict,
-    load_instructions,
-)
+
+
+from tensorpotential.potentials import get_preset
+from tensorpotential.instructions import load_instructions, save_instructions_dict
 from tensorpotential.calculator import TPCalculator
 
 from ase import Atoms
@@ -32,6 +31,7 @@ log = logging.getLogger()
 
 # TODO: maybe parameterise with @pytest.mark.parametrize
 def test_tp_model_repr_verbose_0():
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
 
     tp = TPModel(list_of_instructions)
@@ -63,6 +63,7 @@ def test_tp_model_repr_verbose_0():
 
 
 def test_tp_model_repr_verbose_1():
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
 
     tp = TPModel(list_of_instructions)
@@ -95,6 +96,7 @@ def test_tp_model_repr_verbose_1():
 
 
 def test_tp_model_repr_verbose_2():
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
 
     tp = TPModel(list_of_instructions)
@@ -128,7 +130,7 @@ def test_tp_model_repr_verbose_2():
 
 
 def test_set_trainable_variables():
-
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
     tp = TPModel(list_of_instructions)
     tp.build(tf.float64)
@@ -149,6 +151,7 @@ def test_convert_model_reduce_elements():
 
     float_dtype = tf.float64
     # stage 1: convert_model_reduce_elements
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3},
         lmax=0,
@@ -225,6 +228,7 @@ def test_convert_model_reduce_elements():
 def test_activate_reduce_lora():
     LORA_CONFIG = {"rank": 4, "alpha": 1}
     float_dtype = tf.float64
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0, basis_type="SBessel"
     )
@@ -309,6 +313,7 @@ def test_activate_reduce_lora():
 def test_activate_reduce_additive():
     LORA_CONFIG = {"mode": "full_additive"}
     float_dtype = tf.float64
+    GRACE_2LAYER = get_preset("GRACE_2LAYER")
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0, basis_type="SBessel"
     )

@@ -6,7 +6,7 @@ from tensorpotential.instructions.output import (
 )
 from tensorpotential.instructions.base import *
 from tensorpotential.instructions.compute import *
-from tensorpotential.potentials.presets import Parity
+from tensorpotential.utils import Parity
 
 
 @capture_init_args
@@ -100,7 +100,7 @@ def custom_model(
     embedding_size=3,
     n_mlp_dens=2,
     n_rad_func=2,
-    **kwargs
+    **kwargs,
 ):
     num_elements = len(element_map)
     with InstructionManager() as instructor:

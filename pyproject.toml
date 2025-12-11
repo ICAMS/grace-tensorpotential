@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.5"
+version = "0.5.6"
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
@@ -26,7 +26,6 @@ dependencies = [
     "tensorflow<2.20; sys_platform == 'win32' or sys_platform == 'darwin'",
     # for linux
     "tensorflow[and-cuda]<2.20; sys_platform == 'linux'",
-
     "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",

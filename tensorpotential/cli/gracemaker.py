@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 from ase.data import chemical_symbols
 
+import tensorpotential
 from tensorpotential import constants as tc
 from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
 from tensorpotential.cli.data import load_and_prepare_datasets
@@ -258,6 +259,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
     log.info("=" * 40)
     log.info(" " * 12 + "Start GRACEmaker")
     log.info("=" * 40)
+    log.info(f"GRACEmaker version: {tensorpotential.__version__}")
     log.info(f"Tensorflow version: {tf.__version__}")
     log.info("Loaded {}... ".format(input_yaml_filename))
     assert isinstance(args_yaml, dict)
