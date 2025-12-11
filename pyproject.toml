@@ -23,10 +23,10 @@ classifiers = [
 ]
 dependencies = [
     # for windows and macos
-    "tensorflow<2.20; sys_platform == 'win32' or sys_platform == 'darwin'",    
+    "tensorflow<2.20; sys_platform == 'win32' or sys_platform == 'darwin'",
     # for linux
     "tensorflow[and-cuda]<2.20; sys_platform == 'linux'",
-    
+
     "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",
