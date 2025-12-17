@@ -1307,10 +1307,10 @@ def GRACE_1LAYER_v2_25(
             "lmax": [4, 3],
             "max_order": 4,
             "indicator_lmax": 1,
-            "n_rad_max": [32, 32],
+            "n_rad_max": [42, 32],
             "prod_func_n_max": [42, 64],
             "n_mlp_dens": 16,
-            "n_rad_base": 8,
+            "n_rad_base": 10,
         },
         "large": {
             "rcut": 6,
@@ -1356,6 +1356,11 @@ def GRACE_2LAYER_v2_25(
     if isinstance(prod_func_n_max, int):
         # expand parameter for both layers
         prod_func_n_max = [prod_func_n_max, prod_func_n_max]
+
+    assert prod_func_n_max[0] == n_rad_max[0], (
+        f"n_rad_max[0] and prod_func_n_max[0] must match, "
+        f"but {n_rad_max[0]} and {prod_func_n_max[0]} instead."
+    )
     Il = indicator_lmax
     num_elements = len(element_map)
     with InstructionManager() as instructor:
@@ -1451,8 +1456,8 @@ def GRACE_2LAYER_v2_25(
 
         I1 = FunctionReduceN(
             name="I1",
-            instructions=[A, AA, AAA, AAAA],
-            ls_max=[Il, Il, Il, 1 if Il > 0 else 0],
+            instructions=instructions,
+            ls_max=[Il, Il, Il, 1 if Il > 0 else 0][: len(instructions)],
             n_out=12,
             is_central_atom_type_dependent=True,
             number_of_atom_types=num_elements,
