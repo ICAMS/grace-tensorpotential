@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.6"
+version = "0.5.7"
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
