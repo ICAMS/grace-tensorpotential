@@ -344,6 +344,14 @@ def main(argv=None, strategy=None, strategy_desc=""):
             f'FINETUNING: set model path to {potential_config["filename"]} and '
             + f"checkpoint to {potential_config[tc.INPUT_POTENTIAL_CHECKPOINT_NAME]}"
         )
+    elif finetune_model and (
+        args_parse.restart_best_test or args_parse.restart_latest
+    ):
+        # Restart: load existing run's model so we don't call construct_model (which needs preset/custom)
+        potential_config["filename"] = os.path.join(output_dir, MODEL_CONFIG_YAML)
+        log.info(
+            f"FINETUNING restart: loading model from {potential_config['filename']}"
+        )
 
     potential_file_name = args_parse.potential or potential_config.get("filename")
     if potential_file_name:
