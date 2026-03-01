@@ -14,7 +14,7 @@ readme = "README.md"
 requires-python = ">=3.9,<3.13" # Update if needed
 license = { text = "Academic Software License (ASL)" }
 classifiers = [
-    "License :: OSI Approved :: Academic Free License (AFL)",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
