@@ -322,8 +322,14 @@ def construct_model_functions(fit_config):
     # Try import from default tpmodel.py, then experimental, then extra package
     # Code should work even if experimental package is removed!
     mod = importlib.import_module("tensorpotential.tpmodel")
-    mod_exp = importlib.import_module("tensorpotential.experimental.model_computes")
-    mod_extra = importlib.import_module("tensorpotential.extra.model_computes")
+    try:
+        mod_exp = importlib.import_module("tensorpotential.experimental.model_computes")
+    except ModuleNotFoundError:
+        mod_exp = None
+    try:
+        mod_extra = importlib.import_module("tensorpotential.extra.model_computes")
+    except ModuleNotFoundError:
+        mod_extra = None
     compute_function_config = fit_config.get("compute_function_config", {})
 
     def _resolve_compute_fn(name):
