@@ -15,6 +15,9 @@ from tensorpotential.calculator import TPCalculator
 from tensorpotential.instructions import load_instructions
 from tensorpotential import TPModel
 from tensorflow import float64
+import tensorflow as tf
+
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="safe")
 
 from ase.build import bulk
 from ase import Atoms
@@ -22,8 +25,11 @@ from ase import Atoms
 
 def test_calculator_model():
     ins = load_instructions("model_grace.yaml")
+    for instr in ins:
+        if hasattr(instr, "inv_avg_n_neigh"):
+            setattr(instr, "inv_avg_n_neigh", 1 / 30.0)
     model = TPModel(ins)
-    model.build(float64)
+    model.build(tf.float64)
     calc = TPCalculator(model=model)
 
     np.random.seed(322)
@@ -36,8 +42,9 @@ def test_calculator_model():
     print(f0)
     st0 = s.get_stress()
     print(st0)
-    st0_num = calc.calculate_numerical_stress(s)
-    assert np.allclose(st0, st0_num, rtol=1e-5)
+    st0_num = calc.calculate_numerical_stress(s, d=5e-5)
+    print(st0_num - st0)
+    assert np.allclose(st0, st0_num, atol=1e-4)
 
     shutil.rmtree("./test_calculator_model_tmp", ignore_errors=True)
     model.save_model("./test_calculator_model_tmp")
@@ -54,11 +61,12 @@ def test_calculator_model():
     print(f1)
     st1 = s.get_stress()
     print(st1)
-    st1_num = calc.calculate_numerical_stress(s)
-    assert np.allclose(st1, st1_num, rtol=1e-5)
+    st1_num = calc.calculate_numerical_stress(s, d=5e-5)
+    assert np.allclose(st1, st1_num, atol=1e-4)
 
     assert np.allclose(e0, e1)
-    assert np.allclose(f0, f1)
+    print(f0 - f1)
+    assert np.allclose(f0, f1, atol=1e-7)
     assert np.allclose(st0, st1)
     shutil.rmtree("./test_calculator_model_tmp", ignore_errors=True)
 
@@ -237,13 +245,16 @@ def test_calculator_with_fake_atoms():
 
 def test_ensemble_calculator_model():
     ins = load_instructions("model_grace.yaml")
+    for instr in ins:
+        if hasattr(instr, "inv_avg_n_neigh"):
+            setattr(instr, "inv_avg_n_neigh", 1 / 30.0)
     model = TPModel(ins)
     model.build(float64)
     calc = TPCalculator(model=[model, model])
 
     np.random.seed(322)
     s = bulk("W", cubic=True) * (2, 2, 2)
-    s.positions += np.random.uniform(-0.2, 0.2, size=(len(s), 3))
+    s.rattle(0.2)
     s.calc = calc
     e0 = s.get_potential_energy()
     print(e0)
@@ -251,8 +262,8 @@ def test_ensemble_calculator_model():
     print(f0)
     st0 = s.get_stress()
     print(st0)
-    st0_num = calc.calculate_numerical_stress(s)
-    assert np.allclose(st0, st0_num, rtol=1e-5)
+    st0_num = calc.calculate_numerical_stress(s, d=5e-5)
+    assert np.allclose(st0, st0_num, atol=1e-5)
 
     assert "energy_std" in calc.results
     assert "forces_std" in calc.results

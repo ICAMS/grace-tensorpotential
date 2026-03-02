@@ -6,16 +6,16 @@ data:
   {{TEST_DATA}}
   reference_energy: 0
   # reference_energy: {Al: -1.23, Li: -3.56}
-  save_dataset: False
+  save_dataset: {{SAVE_DATASET}}
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
 
 
 potential:
-  {{ELEMENTS}} # If elements not provided - determined automatically from data
+  # elements: [Cu, Al] # If elements not provided - determined automatically from data
   {{POTENTIAL_SETTINGS}}
 fit:
   loss: {
-    energy: { weight: 1, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
+    energy: { weight: {{ENERGY_LOSS_WEIGHT}}, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
     forces: { weight: {{FORCE_LOSS_WEIGHT}}, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
     {{STRESS_LOSS}}
     {{SWITCH_LOSS}}
@@ -23,22 +23,11 @@ fit:
 
   {{WEIGHTING_SCHEME}}
 
-  maxiter: 500 # Number of epochs / iterations
+  target_total_updates: {{TARGET_TOTAL_UPDATES}} # Number of total gradient updates
+  # Switch E/F loss weights mid-training: after_iter can be fraction (0.75 = 75% of maxiter) or int
+  # learning_rate_reduction_factor: 0.1 → new LR = current_LR × factor  (preferred over absolute learning_rate)
 
-  optimizer: Adam
-  opt_params: {
-            learning_rate: {{learning_rate}},
-            use_ema: True,
-            ema_momentum: 0.99,
-            weight_decay: null,
-            clipnorm: 1.0,
-        }
-
-  scheduler: cosine_decay # scheduler for learning-rate reduction during training
-  scheduler_params: { "minimal_learning_rate": {{min_learning_rate}} }
-  #  optimizer: L-BFGS-B
-  #  opt_params: { "maxcor": 100, "maxls": 20 }
-
+{{OPTIMIZER_BLOCK}}
   ## needed for low-energy tier metrics and for "convex_hull"-based distance of energy-based weighting scheme
   compute_convex_hull: {{COMPUTE_CONVEX_HULL}}
   batch_size: {{BATCH_SIZE}} # Important hyperparameter for Adam and irrelevant (but must be) for L-BFGS-B
@@ -46,9 +35,11 @@ fit:
 
   jit_compile: True
   eval_init_stats: {{eval_init_stats}} # to evaluate initial metrics
+  reset_epoch_and_step: {{RESET_EPOCH}}
 
-  train_max_n_buckets: 10 # max number of buckets (group of batches of same shape) in train set
-  test_max_n_buckets: 5 # same for test
+  train_max_n_buckets: auto # max number of buckets (group of batches of same shape) in train set
+  test_max_n_buckets: auto # same for test
+  auto_bucket_max_padding: 0.3 # max allowed padding overhead for neighbours when using 'auto' buckets
 
   checkpoint_freq: 2 # frequency for **REGULAR** checkpoints.
   # save_all_regular_checkpoints: True # to store ALL regular checkpoints

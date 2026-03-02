@@ -4,6 +4,10 @@ from typing import Callable, Optional, Any
 
 import tensorflow as tf
 
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="safe")
+
+
 from tensorpotential.functions.lora import (
     initialize_lora_tensors,
     lora_reconstruction,
@@ -46,16 +50,17 @@ class Linear(tf.Module):
         self.lora = lora_config is not None
 
     @tf.Module.with_name_scope
-    def build(self, float_dtype):
+    def build(self, float_dtype=tf.float64, init_value=1.0):
+
         if not self.is_built:
             var_name = f"Linear_{self.name}_{self.weight_decay}"
             shape = [self.n_in, self.n_out]
             b_shape = [1, self.n_out]
             if self.normalize:
-                init_value = 1.0
+                init_value = init_value
                 self.norm = 1.0 / self.n_in**0.5
             else:
-                init_value = 1.0 / self.n_in**0.5
+                init_value = init_value / self.n_in**0.5
             if self.init_type == "normal":
                 self.w = tf.Variable(
                     tf.random.normal(shape=shape, stddev=init_value, dtype=float_dtype),
@@ -97,7 +102,7 @@ class Linear(tf.Module):
                     self.b = tf.Variable(
                         tf.zeros(shape=b_shape, dtype=float_dtype),
                     )
-            self.norm = tf.convert_to_tensor(self.norm, dtype=float_dtype)
+            self.norm = tf.convert_to_tensor(self.norm, dtype=self.w.dtype)
 
             if self.lora:
                 self.enable_lora_adaptation(self.lora_config)
@@ -127,6 +132,8 @@ class Linear(tf.Module):
                 *self.lora_tensors, lora_config=self.lora_config
             )
         w = w * self.norm
+        if w.dtype != x.dtype:
+            x = tf.cast(x, dtype=w.dtype)
         x = tf.einsum("...k,...kn->...n", x, w)
         if self.use_bias:
             x += self.b * self.norm
@@ -162,6 +169,7 @@ class DenseLayer(tf.Module):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
+
         if not self.is_built:
             var_name = f"DenseLayer_{self.name}_{self.weight_decay}"
             self.w = tf.Variable(
@@ -173,7 +181,7 @@ class DenseLayer(tf.Module):
                     tf.zeros(shape=[self.n_out], dtype=float_dtype),
                     name=var_name + "_bias",
                 )
-            self.norm = tf.convert_to_tensor(1 / self.n_in**0.5, dtype=float_dtype)
+            self.norm = tf.convert_to_tensor(1 / self.n_in**0.5, dtype=self.w.dtype)
 
             if self.lora:
                 self.enable_lora_adaptation(self.lora_config)
@@ -188,6 +196,8 @@ class DenseLayer(tf.Module):
                 *self.lora_tensors, lora_config=self.lora_config
             )
         w = w * self.norm
+        if x.dtype != w.dtype:
+            x = tf.cast(x, dtype=w.dtype)
         x = tf.einsum("...k,...kn->...n", x, w)
         if self.use_bias:
             x += self.b
@@ -327,9 +337,9 @@ def scalar_LN(x, scale: tf.Variable, shift: tf.Variable = None, r_map=None):
     return x
 
 
-def scalar_rms_ln(x, scale: tf.Variable, r_map=None):
+def scalar_rms_ln(x, scale: tf.Variable, r_map=None, epsilon=1e-16):
     xx = x**2
-    rms = tf.math.rsqrt(tf.reduce_mean(xx, axis=-1, keepdims=True) + 1e-12)
+    rms = tf.math.rsqrt(tf.reduce_mean(xx, axis=-1, keepdims=True) + epsilon)
     if r_map is not None:
         rms = tf.where(r_map, rms, tf.zeros_like(rms))
 

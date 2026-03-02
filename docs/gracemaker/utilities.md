@@ -50,18 +50,19 @@ ___
 Utility to convert, export and summarize GRACE models
 
 ```
-usage: grace_utils [-h] -p POTENTIAL [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary} ...
+usage: grace_utils [-h] -p POTENTIAL [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary,aux_model} ...
 
 CLI tool for model conversions and summarization
 
 positional arguments:
-  {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary}
+  {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary,aux_model}
     update_model        Update model (model.yaml) and corresponding checkpoint.
     resave_checkpoint   Resave model's (model.yaml) checkpoint (no optimizer)
     reduce_elements     Reduce elements from the model.
     cast_model          Change model's floating point precision.
     export              Export model to saved_model or FS/C++ format.
     summary             Show info about the model
+    aux_model           Upgrade model with different compute functions: parallel_2L, compute_energy_only,
 
 options:
   -h, --help            show this help message and exit
@@ -103,6 +104,14 @@ summary:
 
 -v {0,1,2}, --verbose {0,1,2}
                         Verbosity level: 0, 1 or 2
+--------
+aux_model:
+
+  -o OUTPUT_PATH, --output-path OUTPUT_PATH
+                        Path to save the upgraded model
+  -ck COMMUNICATED_KEYS [COMMUNICATED_KEYS ...], --communicated-keys COMMUNICATED_KEYS [COMMUNICATED_KEYS ...]
+                        List of communicated keys
+  --aux AUX [AUX ...]   List of aux functions to add: parallel_2L, energy_only, compute_local (all by default)
 ```
 #### Update models
 If a model was fitted with `gracemaker` version < 0.5, it will break in the newer versions due to the format change.
@@ -149,6 +158,14 @@ To print summary of the GRACE model with different level of verbosity (0 - least
 
 ```bash
 grace_utils -p /path/to/model.yaml summary -v 1
+```
+
+#### Upgrade model with auxiliary compute functions
+One can add auxiliary compute functions to the model, for example to compute energy only (using `energy_only` compute function).
+Also, one can split the 2L model into two parts for parallel computation (using `parallel_2L` aux function).
+
+```bash
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index aux_model -o /path/to/upgraded_model --aux energy_only parallel_2L
 ```
 
 ## `grace_predict`
@@ -211,4 +228,3 @@ options:
   --stage-4             Run stage 4, compute statistics
   --remove_stage1       If True - during stage 3, remove corresponding shard from stage1 folder
 ```
-

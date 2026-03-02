@@ -79,8 +79,9 @@ fit:
   # stress: { type: huber, weight: 32., delta: 0.01},   #
 
   ## Change weights for energy/forces/stress loss components
-  ## and learning_rate after "after_iter" epochs
-  #    switch: { after_iter: 350,
+  ## and learning_rate after "after_iter" epochs (or fraction: 0.75 = 75% of maxiter, or "auto" = 0.75)
+  ## NOTE: switch requires `scheduler: reduce_on_plateau` (set automatically by `gracemaker -t`)
+  #    switch: { after_iter: 0.75,  # or e.g. 350
   #              energy: { weight: 5.0 }, 
   #              forces: { weight: 2.0 }, 
   #              stress: {weight: 0.001},
@@ -88,7 +89,12 @@ fit:
   }
 
   
-  maxiter: 500 # Max number of optimization epochs
+  maxiter: auto # Max number of optimization epochs.
+    ## "auto" mode: ~50k total updates for scratch, ~10k for finetuning.
+    ## For BFGS, "auto" is ~500 epochs (scratch) or ~100 (finetuning).
+  # target_total_updates: 50000 
+    ## Alternative to maxiter: specify total gradient updates. 
+    ## maxiter will be auto-computed. Recommended ~100-500 for BFGS.
   optimizer: Adam
     # Optimization with Adam: good for large number of parameters, first-order method
   opt_params: { learning_rate: 0.008, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipnorm: 1.0}
@@ -124,9 +130,15 @@ fit:
 
   jit_compile: True  # for XLA compilation, must be used in almost all cases
   ## To use jit_compile efficiently, data must be padded.
-  ## Bucket is a group of batches padded to the same shape
-  train_max_n_buckets: 10  ## max number of buckets in train set  
-  test_max_n_buckets: 3  ## same for test
+  ## Bucket is a group of batches padded to the same shape for efficient JIT execution.
+  ## max_n_buckets can be an integer or "auto".
+  ## In "auto" mode, the number of buckets is estimated as ~sqrt(num_batches), clamped to [1, 32].
+  ## `train_max_n_buckets`: "auto" (default) or integer. Max number of distinct buffer shapes (buckets) for training.
+  ##   - "auto": dynamically determines the minimum number of buckets (1-32) that keeps padding overhead below `auto_bucket_max_padding`.
+  ## `test_max_n_buckets`: "auto" (default) or integer. Same for test set.
+  ## `auto_bucket_max_padding`: 0.3 (default). Target maximum padding overhead fraction for neighbours when using `"auto"` bucketing. 0.3 means 30%.
+  train_max_n_buckets: auto  ## max number of buckets in train set
+  test_max_n_buckets: auto   ## same for test
 
   checkpoint_freq: 10 # frequency for **REGULAR** checkpoints. 
   # save_all_regular_checkpoints: False # to store ALL regular checkpoints

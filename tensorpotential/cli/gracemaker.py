@@ -18,8 +18,8 @@ from tensorpotential.cli.prepare import (
     construct_model,
     convert_to_tensors_for_model,
     construct_model_functions,
-    generate_template_input,
 )
+from tensorpotential.cli.wizard import generate_template_input
 from tensorpotential.cli.train import try_load_checkpoint, train_adam, train_bfgs
 from tensorpotential.instructions.base import (
     load_instructions,
@@ -35,6 +35,14 @@ MODEL_CONFIG_YAML = "model.yaml"
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
+
+DEFAULT_TARGET_UPDATES = {
+    "Adam": {"scratch": 50_000, "finetune": 10_000},
+    "BFGS": {"scratch": 500, "finetune": 100},
+    "L-BFGS-B": {"scratch": 500, "finetune": 100},
+}
 
 
 def build_parser():
@@ -232,6 +240,21 @@ def add_loaded_model_parameter(potential_file_name, args_yaml):
     return args_yaml
 
 
+def compute_maxiter(target_total_updates: int, num_batches: int, optimizer: str) -> int:
+    """Convert total gradient updates to epochs.
+
+    - For Adam: updates are per-mini-batch.
+    - For BFGS/L-BFGS-B: updates are per-epoch (full dataset).
+    """
+    if optimizer in ("L-BFGS-B", "BFGS"):
+        raw = target_total_updates
+    else:
+        raw = target_total_updates / max(num_batches, 1)
+
+    rounded = int(round(raw / 10) * 10)  # round to nearest 10
+    return max(10, min(5000, rounded))  # clamped [10, 5000]
+
+
 def main(argv=None, strategy=None, strategy_desc=""):
     if argv is None:
         argv = []
@@ -368,9 +391,58 @@ def main(argv=None, strategy=None, strategy_desc=""):
             test_batch_size=test_batch_size,
             seed=seed,
             strategy=strategy,
-            float_dtype=float_dtype_param,
         )
         has_test_set = test_data is not None
+
+        # Resolve maxiter from target_total_updates or auto
+        num_train_batches = len(train_data)
+        target_total_updates = fit_config.get("target_total_updates")
+        maxiter_raw = fit_config.get("maxiter", "auto")
+        optimizer = fit_config.get("optimizer", "Adam")
+
+        if target_total_updates is not None:
+            resolved_maxiter = compute_maxiter(
+                target_total_updates, num_train_batches, optimizer
+            )
+            log.info(
+                f"maxiter resolved from target_total_updates={target_total_updates}: {resolved_maxiter} epochs"
+            )
+            fit_config["maxiter"] = resolved_maxiter
+        elif maxiter_raw == "auto":
+            is_finetune = bool(
+                potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+            )
+            mode = "finetune" if is_finetune else "scratch"
+            default_target = DEFAULT_TARGET_UPDATES.get(optimizer, {}).get(mode)
+
+            if default_target is None:
+                # fallback if optimizer not in dict
+                default_target = 100 if is_finetune else 500
+
+            resolved_maxiter = compute_maxiter(
+                default_target, num_train_batches, optimizer
+            )
+            log.info(
+                f"maxiter auto ({optimizer}, {mode}): target={default_target} → {resolved_maxiter} epochs"
+            )
+            fit_config["maxiter"] = resolved_maxiter
+        # else: maxiter is already an int, pass through unchanged
+
+        # Resolve switch.after_iter from fraction/auto to an integer epoch count
+        final_maxiter = fit_config.get("maxiter", 500)
+        switch_params = fit_config.get("loss", {}).get("switch", {})
+        if switch_params and "after_iter" in switch_params:
+            after_iter_raw = switch_params["after_iter"]
+            if after_iter_raw == "auto":
+                after_iter_raw = 0.75  # default: switch after 75% of training
+            if isinstance(after_iter_raw, float) and 0.0 < after_iter_raw < 1.0:
+                resolved_after_iter = max(1, round(after_iter_raw * final_maxiter))
+                log.info(
+                    f"switch.after_iter resolved from fraction {after_iter_raw}: "
+                    f"{resolved_after_iter} epochs (of {final_maxiter} total)"
+                )
+                switch_params["after_iter"] = resolved_after_iter
+        # else: after_iter is already an int, pass through unchanged
 
     if args_parse.save_model:
         potential_file_name = potential_file_name or os.path.join(
@@ -409,9 +481,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
         potential_file_name = new_potential_file_name
         checkpoint_name = new_checkpoint_name
 
+    # Initialize communicated_keys; may be set by preset or overridden by input.yaml
+    _communicated_keys = potential_config.get("communicated_keys", None)
+
     target_potential_file_name = os.path.join(output_dir, MODEL_CONFIG_YAML)
     if potential_file_name:
-        # load from potential_file_name
+        # load from potential_file_name (restart path: -r / -rl)
         log.info(f"Loading model config from `{potential_file_name}`")
         pot = load_instructions(potential_file_name)
         # enforce to save model.yaml into output_dir
@@ -420,13 +495,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
         if cut_dict:
             log.info(f"User-defined cutoff dict: {cut_dict}")
         log.info(f"Constructing model from config")
-        pot = construct_model(
+        pot, _preset_communicated_keys = construct_model(
             potential_config,
             element_map=element_map,
             rcut=rcut,
             cutoff_dict=cut_dict,
             **data_stats,
         )
+        # Preset keys take priority; fall back to input.yaml key if preset didn't set any
+        if _preset_communicated_keys is not None:
+            _communicated_keys = _preset_communicated_keys
     else:  # save model, but initialized from scratch
         # TODO: should be possible
         raise ValueError("Cannot save just-initialized model")
@@ -484,13 +562,15 @@ def main(argv=None, strategy=None, strategy_desc=""):
         #     tp.finalize_lora_update()
 
         if args_parse.save_fs:
-            log.info("Exporting FS-model, please wait...")
-            tp.export_to_yaml("FS_model.yaml")
-            log.info("Exporting FS-model done")
+            log.info("Exporting FS-model to `saved_model.yaml`, please wait...")
+            tp.export_to_yaml("saved_model.yaml")
+            log.info("Exporting to `saved_model.yaml` done")
         log.info("Saving model to `saved_model` and exit.")
         # TODO: first save with jit will convert function to JIT forever!
         # tp.save_model("saved_model_no_jit", jit_compile=False)  # first - no-jit
-        tp.save_model("saved_model", jit_compile=True)
+        tp.save_model_with_aux_computes(
+            "saved_model", jit_compile=True, communicated_keys=_communicated_keys
+        )
         sys.exit(0)
 
     # if potential_config.get("lora"):
@@ -527,7 +607,9 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
     def save_tp_model(name):
         log.info(f"Saving model to `{name}`")
-        tp.save_model(name, jit_compile=True)
+        tp.save_model_with_aux_computes(
+            name, jit_compile=True, communicated_keys=_communicated_keys
+        )
 
     log.info("Convert data to tensors")
     train_batches, test_batches = convert_to_tensors_for_model(
@@ -596,7 +678,7 @@ def check_model(args_yaml, float_dtype):
     cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
     if cut_dict:
         log.info(f"User-defined cutoff dict: {cut_dict}")
-    pot = construct_model(
+    pot, _ = construct_model(
         potential_config, element_map=element_map, rcut=rcut, cutoff_dict=cut_dict
     )
     model = TPModel(pot)

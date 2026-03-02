@@ -4,7 +4,8 @@ from typing import Any, Dict, Union, Protocol
 
 import numpy as np
 import tensorflow as tf
-
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 from tensorpotential import TensorPotential
 
@@ -60,6 +61,7 @@ class TPCallback(tf.keras.callbacks.Callback):
                 else self._decay_function(batch - self.warmup_steps, self.warmup_target)
             )
         lr = self.min_lr if batch >= self.total_steps else lr
+        lr = tf.cast(lr, self.model.optimizer.learning_rate.dtype)
         self.model.optimizer.learning_rate.assign(lr)
         self._log_lr(batch, lr)
 
@@ -143,7 +145,7 @@ class CustomReduceLROnPlateau(tf.keras.callbacks.ReduceLROnPlateau):
                 if old_lr > np.float32(self.min_lr):
                     new_lr = old_lr * self.factor
                     new_lr = max(new_lr, self.min_lr)
-                    self.model.optimizer.learning_rate.assign(new_lr)
+                    self.model.optimizer.learning_rate.assign(tf.cast(new_lr, self.model.optimizer.learning_rate.dtype))
                     log.info(
                         f"Reducing learning rate: {current_lr:.5e} -> {new_lr:.5e}"
                     )

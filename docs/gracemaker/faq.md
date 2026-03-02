@@ -56,11 +56,42 @@ Here, the padding for neighbors is only +1.74%. It is recommended to keep this v
 
 ---
 
-## How to Run a GRACE-1LAYER Model in Parallel Within LAMMPS?
+## Which LAMMPS `pair_style` Should I Use?
+
+| `pair_style` | Model           | TF required | MPI parallel | Virials/stress |
+|---|-----------------|---|---|---|
+| `grace` | 1-layer/2-layer | yes | single process | needs `pair_forces` |
+| `grace/1layer/chunk` | 1-layer         | yes | yes | always available |
+| `grace/2layer/chunk` | 2-layer         | yes | yes | always available |
+| `grace/2layer/parallel` | 2-layer         | yes | yes | always available |
+| `grace/fs` | FS              | no | yes | always available |
+| `grace/fs/kk` | FS (Kokkos)     | no | yes + GPU/OpenMP | always available |
+
+* Use `grace` for single-process runs for both single-layer and two-layer models.
+* For single-layer models parallization also use `grace` (with CUDA-aware mpirun command)
+* For two-layer models parallization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
+* For memory-reduced version use `grace/1layer/chunk` or `grace/2layer/chunk` - both of them support MPI parallelism.
+* For GRACE/FS models use `grace/fs` (or `grace/fs/kk` for GPU/OpenMP).
+
+---
+
+## How to Run GRACE Models in Parallel in LAMMPS?
+
+**Single-layer models** — use `grace/1layer/chunk` and assign one GPU per MPI rank:
 
 ```bash
-mpirun -np 4 --bind-to none bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
+mpirun -np 4 --bind-to none bash -c \
+  'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
 ```
+
+**Two-layer models** — use `grace/2layer/chunk` or `grace/2layer/parallel` (MPI is handled natively, no shell tricks needed):
+
+```
+pair_style grace/2layer/chunk
+pair_coeff * * /path/to/2layer_saved_model Al Li
+```
+
+**GRACE/FS** — standard MPI with `grace/fs`; for GPU/OpenMP use `grace/fs/kk` (requires `newton on`).
 
 ---
 
@@ -122,9 +153,68 @@ To assign custom weights to each structure, include the following columns in the
 * `force_weight`: A per-atom array with a size equal to the number of atoms in the structure.
 * `virial_weight`: (optional): A six-component array representing the weight for virial terms.
 
-## How to get atomic virials with GRACE models in LAMMPS ?
+## How to Get Atomic Virials/Stress with GRACE Models in LAMMPS?
 
-By default, the GRACE model provides total forces. To have LAMMPS receive pairwise forces - which is necessary for calculations like atomic virials - use the `pair_forces` option:
+With `pair_style grace`, pairwise forces (needed for per-atom virials) are not computed by default. Enable them with:
+
 ```
-pair_style grace ... pair_forces
+pair_style grace pair_forces
+pair_coeff * * /path/to/saved_model Al Li
+```
+
+`pair_forces` is automatically enabled when running with more than one MPI rank.
+
+Alternatively, use `grace/1layer/chunk`, `grace/2layer/chunk`, or `grace/2layer/parallel` — these always support virials without any extra keyword.
+
+## How to extract basis functions from GRACE models?
+
+```python
+from tensorpotential.tensorpot import TensorPotential
+from tensorpotential.calculator import TPCalculator
+from tensorpotential.tpmodel import ExtractBasisFunctions
+from tensorpotential.instructions.base import load_instructions
+
+from ase.build import bulk
+
+def create_calculator_with_basis_functions(
+        model_path,
+        extract_2L_basis=False
+):
+    # path to checkpoint/model.yaml
+    
+    instr = load_instructions(model_path + '/model.yaml')
+    
+    tp = TensorPotential(
+        instr,
+        model_compute_function=ExtractBasisFunctions(
+            extract_2L_basis=extract_2L_basis # set to True if you want to extract 2L basis functions
+            
+            ### optional parameters
+            #reduce_1L_instruction_name='I_out_0', # this name depends on the model
+            #reduce_2L_instruction_name='I_out_1', # this name depends on the model
+        )
+    )
+    tp.load_checkpoint(checkpoint_name=model_path + '/checkpoint', verbose=True)
+    tp.model.decorate_compute_function(jit_compile=True) # compile model
+
+    # these names are fixed
+    extra_properties=['1L_basis']
+    if extract_2L_basis:
+        extra_properties+=['2L_basis']
+    calc = TPCalculator(model=tp.model, 
+                        truncate_extras_by_natoms=True,
+                        extra_properties=extra_properties
+                        )
+    return calc
+
+
+
+calc = create_calculator_with_basis_functions(
+    model_path = "~/.cache/grace/checkpoints/GRACE-2L-UEA-OMAT-medium/",
+)
+at = bulk('Mo')
+at.calc = calc
+at.get_potential_energy()
+projs1 = at.calc.results['1L_basis'] # shape [n_atoms, n_basis_1L]
+# projs2 = at.calc.results['2L_basis'] # shape [n_atoms, n_basis_2L]
 ```

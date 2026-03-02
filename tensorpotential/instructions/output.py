@@ -5,6 +5,8 @@ from typing import Any
 import numpy as np
 import tensorflow as tf
 
+tf.config.experimental.enable_tensor_float_32_execution(False)
+
 from tensorpotential import constants
 from tensorpotential.functions.nn import (
     FullyConnectedMLP,
@@ -41,7 +43,7 @@ class CreateOutputTarget(TPInstruction):
             self.value = tf.reshape(tf.constant(self.value, dtype=float_dtype), [])
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         return self.value
 
 
@@ -63,8 +65,10 @@ class TPOutputInstruction(TPInstruction):
     def build(self, float_dtype):
         pass
 
-    def __call__(self, input_data: dict, training: bool = False) -> dict:
-        output = self.frwrd(input_data, training=training)
+    def __call__(
+        self, input_data: dict, training: bool = False, local: bool = False
+    ) -> dict:
+        output = self.frwrd(input_data, training=training, local=local)
 
         input_data[self.target.name] = output
 
@@ -114,7 +118,7 @@ class LinearOut2Target(TPOutputInstruction):
                     lin.build(float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         origin = 0.0
@@ -164,13 +168,15 @@ class FSOut2ScalarTarget(TPOutputInstruction):
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        self.fs_parameters = [
-            (
-                tf.constant(coeff, dtype=float_dtype),
-                tf.constant(mexp, dtype=float_dtype),
-            )
-            for coeff, mexp in self.fs_parameters
-        ]
+        if not self.is_built:
+            self.fs_parameters = [
+                (
+                    tf.constant(coeff, dtype=float_dtype),
+                    tf.constant(mexp, dtype=float_dtype),
+                )
+                for coeff, mexp in self.fs_parameters
+            ]
+            self.is_built = True
 
     @staticmethod
     def f_exp_shsc(rho, mexp):
@@ -195,7 +201,7 @@ class FSOut2ScalarTarget(TPOutputInstruction):
 
         return func
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         origin = 0.0
@@ -286,7 +292,7 @@ class MLPOut2ScalarTarget(TPOutputInstruction):
 
         return x * self.scale * rms
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         origin = 0.0
@@ -394,7 +400,7 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction, LORAInstructionMixin):
         if self.normalize is not None:
             self.scale._trainable = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         transformed_origin = 0.0
@@ -413,10 +419,6 @@ class LinMLPOut2ScalarTarget(TPOutputInstruction, LORAInstructionMixin):
             transformed_origin = scalar_rms_ln(
                 transformed_origin, self.scale, r_map=r_map
             )
-            # transformed_origin = scalar_LN(
-            #     transformed_origin, scale=self.scale, r_map=r_map
-            # )
-            # transformed_origin = self.rmsln(transformed_origin, input_data)
         transformed_origin = self.mlp(transformed_origin)
         norm_out = transformed_origin + lin_origin
 
@@ -429,10 +431,7 @@ class LinMLPOut2ScalarTarget_v2(TPOutputInstruction):
     Adds origin to target via MLP transformation and a single element without transformation
     """
 
-    input_tensor_spec = {
-        constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
-    }
+    input_tensor_spec = {}
 
     def __init__(
         self,
@@ -485,7 +484,7 @@ class LinMLPOut2ScalarTarget_v2(TPOutputInstruction):
                 layer.build(float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         transformed_origin = 0.0
@@ -504,7 +503,7 @@ class LinMLPOut2ScalarTarget_v2(TPOutputInstruction):
 
 
 @capture_init_args
-class ConstantScaleShiftTarget(TPOutputInstruction):
+class ConstantScaleShiftTarget(TPOutputInstruction, ElementsReduceInstructionMixin):
     """
     Scales and shifts target by a (atom type dependent) constant
     """
@@ -512,7 +511,6 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
     input_tensor_spec = {
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
         constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -545,7 +543,7 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
         else:
             if self.atomic_shift_map is not None or self.chemical_embedding is not None:
                 assert self.constant_shift == 0, (
-                    "If :atomic_shift_map: or :chemical_embedding: is not None"
+                    "If :atomic_shift_map: or :chemical_embedding: is not None "
                     "constant shift must be 0, but is not"
                 )
             self.apply_shift = True
@@ -570,13 +568,17 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
                 tf.cast(self.chemical_embedding.embedding_size, dtype=float_dtype)
             )
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
+        atomic_mu_i = (
+            input_data[constants.ATOMIC_MU_I_LOCAL]
+            if local
+            else input_data[constants.ATOMIC_MU_I]
+        )
+        n_at_b_total = tf.shape(atomic_mu_i)[0]
+        n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
         if self.apply_shift:
-            n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
-            n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
-
             # Updating only real atoms, fake stay at 0.
             r_map = tf.reshape(
                 tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1]
@@ -585,9 +587,7 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
             total_shift = tf.zeros_like(target)
 
             if self.atomic_shift_map is not None:
-                real_shift = tf.gather(
-                    self.atomic_shift_map, input_data[constants.ATOMIC_MU_I], axis=0
-                )
+                real_shift = tf.gather(self.atomic_shift_map, atomic_mu_i, axis=0)
                 real_shift = tf.where(r_map < n_at_b_real, real_shift, zero_shift)
                 total_shift += real_shift
 
@@ -597,7 +597,7 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
                         "ae,eo->ao",
                         tf.gather(
                             input_data[self.chemical_embedding.name],
-                            input_data[constants.ATOMIC_MU_I],
+                            atomic_mu_i,
                             axis=0,
                         ),
                         self.embedding_shift,
@@ -615,6 +615,23 @@ class ConstantScaleShiftTarget(TPOutputInstruction):
             return target * self.scale + total_shift
         else:
             return target * self.scale
+
+    def prepare_variables_for_selected_elements(self, index_to_select):
+        result = {}
+        if self.atomic_shift_map is not None:
+            result["atomic_shift_map"] = tf.gather(
+                self.atomic_shift_map, index_to_select, axis=0
+            )
+        return result
+
+    def upd_init_args_new_elements(self, new_element_map):
+        if self._init_args.get("atomic_shift_map") is not None:
+            # After patching, self.atomic_shift_map has only the selected values
+            # Re-index them as 0..N-1
+            new_map = {}
+            for i in range(len(new_element_map)):
+                new_map[i] = float(self.atomic_shift_map[i].numpy().item())
+            self._init_args["atomic_shift_map"] = new_map
 
 
 @capture_init_args
@@ -669,7 +686,7 @@ class LinearOut2EquivarTarget(TPOutputInstruction):
                     ]
                 ).reshape(5, 6)
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         target = input_data[f"{self.target.name}"]
 
         for ins in self.origin:
@@ -694,7 +711,6 @@ class TrainableShiftTarget(TPOutputInstruction, ElementsReduceInstructionMixin):
     input_tensor_spec = {
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
         constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -716,18 +732,22 @@ class TrainableShiftTarget(TPOutputInstruction, ElementsReduceInstructionMixin):
             )
         self.is_built = True
 
-    def frwrd(self, input_data: dict, training: bool = False):
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         target = input_data[f"{self.target.name}"]
+
+        at_mu_i = (
+            input_data[constants.ATOMIC_MU_I_LOCAL]
+            if local
+            else input_data[constants.ATOMIC_MU_I]
+        )
+        n_at_b_total = tf.shape(at_mu_i)[0]
         n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
-        n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
 
         # Updating only real atoms, fake stay at 0.
         r_map = tf.reshape(
             tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1]
         )
-        real_shift = tf.gather(
-            self.at_shifts, input_data[constants.ATOMIC_MU_I], axis=0
-        )
+        real_shift = tf.gather(self.at_shifts, at_mu_i, axis=0)
         real_shift = tf.where(r_map < n_at_b_real, real_shift, tf.zeros_like(target))
         return target + real_shift
 

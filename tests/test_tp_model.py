@@ -15,9 +15,11 @@ import shutil
 
 from tensorpotential.utils import convert_model_reduce_elements
 from tensorpotential.tensorpot import TensorPotential
-from tensorpotential.tpmodel import TPModel
+from tensorpotential.tpmodel import TPModel, ExtractBasisFunctions
 
-
+# from tensorpotential.potentials.presets import (
+#    GRACE_2LAYER,
+# )
 from tensorpotential.potentials import get_preset
 from tensorpotential.instructions import load_instructions, save_instructions_dict
 from tensorpotential.calculator import TPCalculator
@@ -31,8 +33,10 @@ log = logging.getLogger()
 
 # TODO: maybe parameterise with @pytest.mark.parametrize
 def test_tp_model_repr_verbose_0():
-    GRACE_2LAYER = get_preset("GRACE_2LAYER")
-    list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    list_of_instructions = GRACE_2LAYER(
+        element_map={"Be": 0, "Li": 1}, lmax=2
+    ).get_instructions()
 
     tp = TPModel(list_of_instructions)
     tp.build(tf.float64)
@@ -63,8 +67,10 @@ def test_tp_model_repr_verbose_0():
 
 
 def test_tp_model_repr_verbose_1():
-    GRACE_2LAYER = get_preset("GRACE_2LAYER")
-    list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    list_of_instructions = GRACE_2LAYER(
+        element_map={"Be": 0, "Li": 1}, lmax=2
+    ).get_instructions()
 
     tp = TPModel(list_of_instructions)
     tp.build(tf.float64)
@@ -96,8 +102,10 @@ def test_tp_model_repr_verbose_1():
 
 
 def test_tp_model_repr_verbose_2():
-    GRACE_2LAYER = get_preset("GRACE_2LAYER")
-    list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    list_of_instructions = GRACE_2LAYER(
+        element_map={"Be": 0, "Li": 1}, lmax=2
+    ).get_instructions()
 
     tp = TPModel(list_of_instructions)
     tp.build(tf.float64)
@@ -130,8 +138,10 @@ def test_tp_model_repr_verbose_2():
 
 
 def test_set_trainable_variables():
-    GRACE_2LAYER = get_preset("GRACE_2LAYER")
-    list_of_instructions = GRACE_2LAYER(element_map={"Be": 0, "Li": 1}, lmax=2)
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    list_of_instructions = GRACE_2LAYER(
+        element_map={"Be": 0, "Li": 1}, lmax=2
+    ).get_instructions()
     tp = TPModel(list_of_instructions)
     tp.build(tf.float64)
 
@@ -151,13 +161,13 @@ def test_convert_model_reduce_elements():
 
     float_dtype = tf.float64
     # stage 1: convert_model_reduce_elements
-    GRACE_2LAYER = get_preset("GRACE_2LAYER")
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3},
         lmax=0,
         basis_type="Cheb",
         cutoff_dict={"Mo": 4, "Nb": 5, "Ta": 6, "W": 7},
-    )
+    ).get_instructions()
     tp = TensorPotential(instructions, float_dtype=float_dtype)
 
     potential_file_name = os.path.join(TEST_PATH, "model.MoNbTaW.yaml")
@@ -392,3 +402,64 @@ def test_activate_reduce_additive():
     print("e4=", e4)
 
     assert np.allclose(e4, e2b)
+
+
+def test_extract_basis_functions_GRACE_1LAYER_latest():
+    instr_1L = get_preset("GRACE_1LAYER_latest")(
+        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0
+    ).get_instructions()
+    tp = TensorPotential(
+        instr_1L,
+        model_compute_function=ExtractBasisFunctions(
+            # reduce_1L_instruction_name="rho"
+        ),
+    )
+    # tp.load_checkpoint(checkpoint_name=model_path+'/checkpoint', verbose=True)
+    calc = TPCalculator(
+        model=tp.model, extra_properties=["1L_basis"], truncate_extras_by_natoms=True
+    )
+    at = bulk("Mo") * (1, 1, 3)
+    at.rattle(0.01)
+    at.calc = calc
+    at.get_potential_energy()
+    projs = at.calc.results["1L_basis"]
+    print(f"Shape projs: {projs.shape}")
+    assert len(projs.shape) == 2
+    assert projs.shape[0] == len(at)
+    assert projs.shape[1] == 224
+
+
+def test_extract_basis_functions_GRACE_2LAYER_latest():
+
+    instr_2L = get_preset("GRACE_2LAYER_latest")(
+        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0
+    ).get_instructions()
+    tp = TensorPotential(
+        instr_2L,
+        model_compute_function=ExtractBasisFunctions(
+            # reduce_1L_instruction_name='I_out_0',
+            # reduce_2L_instruction_name='I_out_1',
+            extract_2L_basis=True
+        ),
+    )
+    # tp.load_checkpoint(checkpoint_name=model_path+'/checkpoint', verbose=True)
+    calc = TPCalculator(
+        model=tp.model,
+        extra_properties=["1L_basis", "2L_basis"],
+        truncate_extras_by_natoms=True,
+    )
+    at = bulk("Mo") * (1, 1, 3)
+    at.rattle(0.01)
+    at.calc = calc
+    at.get_potential_energy()
+    projs1 = at.calc.results["1L_basis"]
+    projs2 = at.calc.results["2L_basis"]
+    print(f"Shape projs-1L: {projs1.shape}")
+    print(f"Shape projs-2L: {projs2.shape}")
+    assert len(projs1.shape) == 2
+    assert len(projs2.shape) == 2
+    assert projs1.shape[0] == len(at)
+    assert projs2.shape[0] == len(at)
+
+    assert projs1.shape[1] == 168
+    assert projs2.shape[1] == 256

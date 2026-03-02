@@ -1,0 +1,40 @@
+seed: 42
+cutoff: 6
+
+data:
+  filename: "../data/MoNbTaW_train50_tensor.pkl.gz"
+  train_size: 10
+  test_filename: "../data/MoNbTaW_train50_tensor.pkl.gz"
+  test_size: 10
+  reference_energy: 0.0
+  extra_components:
+    ReferenceTensorDataBuilder: {tensor_rank: 1, per_structure: False}
+
+potential:
+  preset: TENSOR_1L
+  kwargs: {compute_energy: False, tensor_components: [1], lmax: 2,
+           n_rad_base: 4, n_rad_max: 8, embedding_size: 8, n_mlp_dens: 4, max_order: 2}
+  scale: False
+  shift: False
+
+fit:
+  compute_function: ComputeBatchEFTensor
+  train_function: ComputeBatchEFTensor
+  compute_function_config: {tensor_components: [1], per_structure: False,
+                            compute_energy: False, compute_forces: False}
+  loss:
+    extra_components:
+      WeightedTensorLoss: {weight: 10., type: huber, delta: 0.1}
+  optimizer: Adam
+  opt_params: {learning_rate: 0.1}
+  scheduler: cosine_decay
+  scheduler_params: {minimum_learning_rate: 0.001}
+  maxiter: 2
+  batch_size: 10
+  test_batch_size: 10
+  train_max_n_buckets: 1
+  test_max_n_buckets: 1
+  progressbar: False
+  train_shuffle: True
+  jit_compile: False
+  eager: True

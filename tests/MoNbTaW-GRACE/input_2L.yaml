@@ -8,7 +8,7 @@ data:
   test_size: 20
 
 potential:
-  preset: "GRACE_2LAYER"
+  preset: "GRACE_2LAYER_v1_24"
   scale: True
   kwargs: { lmax: [2,3],
             basis_type: "SBessel",

@@ -2,10 +2,16 @@ import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
+import numpy as np
+import tensorflow as tf
+import pytest
+
 from pathlib import Path
 
-from tensorpotential.instructions import load_instructions
+from tensorpotential.instructions import *
+from tensorpotential.utils import Parity
 from tensorpotential.potentials import get_preset
+from tensorpotential import constants
 
 prefix = Path(__file__).parent.resolve()
 
@@ -32,7 +38,9 @@ def test_preset_FS_HEA25_with_simplification():
         simplify_prod=False,
     )
     FS = get_preset("FS")
-    pot = FS(element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, **kwargs)
+    pot = FS(
+        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, **kwargs
+    ).get_instructions()
     print(len(pot))
     assert len(pot) == 14
 
@@ -53,7 +61,9 @@ def test_preset_FS_HEA25_with_simplification():
 
     kwargs["simplify_prod"] = True
 
-    pot2 = FS(element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, **kwargs)
+    pot2 = FS(
+        element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, **kwargs
+    ).get_instructions()
     print(len(pot2))
     assert len(pot2) == 14
 

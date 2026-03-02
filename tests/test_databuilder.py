@@ -82,7 +82,7 @@ def test_construct_batches_multiple_db() -> None:
     from tensorpotential.constants import CELL_VECTORS, ATOMIC_POS
 
     try:
-        from tensorpotential.experimental.gen_tensor.databuilder import (
+        from tensorpotential.extra.gen_tensor.databuilder import (
             PositionsDataBuilder,
             CellDataBuilder,
         )

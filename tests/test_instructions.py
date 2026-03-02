@@ -288,10 +288,10 @@ def test_bond_cut():
 
 def test_zbl(do_plot=False):
     rcut = 4.0
-    r_in = 3
+    r_in = 3.0
     size = 10
     np.random.seed(322)
-    fake_bonds = np.random.uniform(0, rcut + 1, size=(size, 1))
+    fake_bonds = np.random.uniform(0, rcut + 1, size=(size, 1)).astype(np.float64)
     elm = {
         s: i
         for i, s in enumerate(["H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne"])
@@ -574,6 +574,7 @@ def test_fc_func():
         constants.BOND_VECTOR: bond_vector,
         constants.BOND_IND_I: ind_i,
         constants.N_ATOMS_BATCH_TOTAL: len(c),
+        constants.ATOMIC_MU_I: np.zeros(len(c)).astype(np.int32),
     }
     d_ij = BondLength()
     d_ij.build(float64)
@@ -1056,6 +1057,7 @@ def test_LORA_FCRight2Left():
         constants.BOND_VECTOR: bond_vector,
         constants.BOND_IND_I: ind_i,
         constants.N_ATOMS_BATCH_TOTAL: len(c),
+        constants.ATOMIC_MU_I: np.zeros(len(c)).astype(np.int32),
     }
     d_ij = BondLength()
     d_ij.build(float64)
@@ -1579,3 +1581,73 @@ def test_rot_invar_2l(full_par):
     print(out)
     print(out[:3] - out[3:])
     assert np.allclose(out[:3], out[3:])
+
+
+def test_linmlp_normalize_layer():
+    """Test LinMLPOut2ScalarTarget with normalize='layer' vs normalize=None."""
+    n_atoms = 10
+    n_out = 8  # total features per atom (1 linear + 7 MLP input)
+
+    # Mock origin object with required attributes
+    class MockOrigin:
+        def __init__(self, name, n_out):
+            self.name = name
+            self.n_out = n_out
+            self.lmax = 0
+
+    origin = MockOrigin("mock_reduce", n_out)
+    target = CreateOutputTarget(name="energy", initial_value=0.0, l=0)
+    target.build(float64)
+
+    # Build LinMLPOut2ScalarTarget with normalize="layer"
+    linmlp_norm = LinMLPOut2ScalarTarget(
+        origin=[origin],
+        target=target,
+        hidden_layers=[32],
+        normalize="layer",
+        name="linmlp_norm",
+    )
+    linmlp_norm.build(float64)
+
+    # Build LinMLPOut2ScalarTarget without normalize
+    linmlp_no_norm = LinMLPOut2ScalarTarget(
+        origin=[origin],
+        target=target,
+        hidden_layers=[32],
+        normalize=None,
+        name="linmlp_no_norm",
+    )
+    linmlp_no_norm.build(float64)
+
+    # Create mock input data
+    np.random.seed(42)
+    origin_data = np.random.randn(n_atoms, n_out, 1).astype(np.float64)
+    input_data = {
+        "energy": target.frwrd({}),
+        "mock_reduce": tf.constant(origin_data),
+        constants.N_ATOMS_BATCH_REAL: tf.constant(n_atoms, dtype=tf.int32),
+        constants.N_ATOMS_BATCH_TOTAL: tf.constant(n_atoms, dtype=tf.int32),
+    }
+
+    # Verify scale variable exists and is trainable
+    assert hasattr(linmlp_norm, "scale"), "scale variable should exist when normalize='layer'"
+    assert linmlp_norm.scale.trainable, "scale should be trainable"
+    assert linmlp_norm.scale.shape == [1, n_out - 1]
+
+    # Forward pass with normalization
+    out_norm = linmlp_norm.frwrd(input_data)
+    # Forward pass without normalization
+    out_no_norm = linmlp_no_norm.frwrd(input_data)
+
+    # Outputs should differ (normalization changes the MLP input)
+    assert not np.allclose(out_norm.numpy(), out_no_norm.numpy()), (
+        "Normalized and non-normalized outputs should differ"
+    )
+
+    # Verify gradients exist for scale
+    with tf.GradientTape() as tape:
+        out = linmlp_norm.frwrd(input_data)
+        loss = tf.reduce_sum(out)
+    grad = tape.gradient(loss, linmlp_norm.scale)
+    assert grad is not None, "Gradient for scale should exist"
+    assert not np.allclose(grad.numpy(), 0.0), "Gradient for scale should be non-zero"

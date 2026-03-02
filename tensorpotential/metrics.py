@@ -10,6 +10,16 @@ from tensorpotential import constants
 class AbstractMetrics(ABC):
     input_tensor_spec = {}
 
+    @property
+    def normalization_spec(self) -> dict[str, dict]:
+        """
+        Property with normalization values specification, must be implemented in subclasses
+        and return dict:
+                    metric_name (str, same as in __call__)
+                    -> dict {"norm": "n_structures"/"n_atoms", "factor": 1.0},
+        """
+        return {}
+
 
 class EnergyMetrics(AbstractMetrics):
     input_tensor_spec = {
@@ -47,6 +57,16 @@ class EnergyMetrics(AbstractMetrics):
             "nat/per_struct": nat_per_struct,
         }
 
+    @property
+    def normalization_spec(self) -> dict[str, dict]:
+        return {
+            "abs/depa/per_struct": {"norm": "n_structures", "factor": 1.0},
+            "abs/de/per_struct": {"norm": "n_structures", "factor": 1.0},
+            "sqr/depa/per_struct": {"norm": "n_structures", "factor": 1.0},
+            "sqr/de/per_struct": {"norm": "n_structures", "factor": 1.0},
+            # "nat/per_struct": {"norm": "n_structures", "factor": 1.0},
+        }
+
 
 class ForceMetrics(AbstractMetrics):
 
@@ -81,8 +101,15 @@ class ForceMetrics(AbstractMetrics):
         )
 
         return {
-            "abs/df/per_struct": abs_f_reduce,
-            "sqr/df/per_struct": sqr_f_reduce,
+            "abs/f_comp/per_struct": abs_f_reduce,
+            "sqr/f_comp/per_struct": sqr_f_reduce,
+        }
+
+    @property
+    def normalization_spec(self) -> dict[str, dict]:
+        return {
+            "abs/f_comp/per_struct": {"norm": "n_atoms", "factor": 3.0},
+            "sqr/f_comp/per_struct": {"norm": "n_atoms", "factor": 3.0},
         }
 
 
@@ -120,10 +147,19 @@ class VirialMetrics(AbstractMetrics):
         sqr_stress_reduce = tf.reduce_sum(delta_stresses**2, axis=1, keepdims=True)
 
         return {
-            "abs/dv/per_struct": abs_v_reduce,
-            "sqr/dv/per_struct": sqr_v_reduce,
+            "abs/virial/per_struct": abs_v_reduce,
+            "sqr/virial/per_struct": sqr_v_reduce,
             "abs/stress/per_struct": abs_stress_reduce,
             "sqr/stress/per_struct": sqr_stress_reduce,
+        }
+
+    @property
+    def normalization_spec(self) -> dict[str, dict]:
+        return {
+            "abs/virial/per_struct": {"norm": "n_structures", "factor": 6.0},
+            "sqr/virial/per_struct": {"norm": "n_structures", "factor": 6.0},
+            "abs/stress/per_struct": {"norm": "n_structures", "factor": 6.0},
+            "sqr/stress/per_struct": {"norm": "n_structures", "factor": 6.0},
         }
 
 
@@ -144,6 +180,12 @@ class ComputeMetrics:
         for metric in self._metrics:
             self.input_signatures.update(metric.input_tensor_spec)
         return self.input_signatures
+
+    def get_normalization_spec(self) -> dict[str, tuple[str, float]]:
+        spec = {}
+        for metric in self._metrics:
+            spec.update(metric.normalization_spec)
+        return spec
 
     def __call__(
         self, input_data: dict[str, tf.Tensor], predictions: dict[str, tf.Tensor]

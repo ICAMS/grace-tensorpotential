@@ -5,10 +5,18 @@ try:
     import tensorpotential.experimental.presets
 except ImportError:
     pass
-from typing import Any
+
+try:
+    import tensorpotential.extra.gen_tensor.model
+except ImportError:
+    pass
+from typing import Any, Callable
 
 
-def get_preset(name: str):
+def get_preset(name: str) -> Callable:
+    """
+    Returns a function for building an instructions preset
+    """
     try:
         return REGISTERED_PRESETS[name]
     except KeyError:

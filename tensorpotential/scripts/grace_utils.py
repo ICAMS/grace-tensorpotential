@@ -8,10 +8,22 @@ from ase import Atoms
 
 from pathlib import Path
 
+from tensorpotential.instructions import SingleParticleBasisFunctionEquivariantInd
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 logger = logging.getLogger()
+
+
+def load_checkpoint(tp, checkpoint_path):
+    tp.load_checkpoint(
+        checkpoint_name=checkpoint_path,
+        expect_partial=True,
+        verbose=True,
+        raise_errors=True,
+        assert_consumed=False,
+        assert_existing_objects_matched=False,
+    )
 
 
 def preprocess_args(args):
@@ -57,13 +69,7 @@ def update_model(args):
     assert len(instructions_dict) == len(instructions)
 
     tp = TensorPotential(potential=instructions)
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    tp.load_checkpoint(
-        checkpoint_name=checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp, checkpoint_path)
 
     tp.model.instructions = instructions_dict
 
@@ -82,13 +88,7 @@ def update_model(args):
     logger.info(f"Trying to load converted model from {new_model_path}")
     new_instructions = load_instructions(new_model_path)
     tp_new = TensorPotential(potential=new_instructions)
-    logger.info(f"Trying to load checkpoint from {new_checkpoint_path}")
-    tp_new.load_checkpoint(
-        checkpoint_name=new_checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp_new, new_checkpoint_path)
 
     logger.info(f"Finished")
 
@@ -121,13 +121,8 @@ def resave_checkpoint(args):
     instructions = load_instructions(model_path)
 
     tp = TensorPotential(potential=instructions)
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    tp.load_checkpoint(
-        checkpoint_name=checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+
+    load_checkpoint(tp, checkpoint_path)
 
     logger.info(f"Saving converted checkpoint to {new_checkpoint_path}")
     tp.setup_checkpoint(with_optimizer=False)  # will reset al lexcept model's weights
@@ -137,13 +132,7 @@ def resave_checkpoint(args):
     logger.info(f"Trying to load again model from {model_path}")
     new_instructions = load_instructions(model_path)
     tp_new = TensorPotential(potential=new_instructions)
-    logger.info(f"Trying to load checkpoint from {new_checkpoint_path}")
-    tp_new.load_checkpoint(
-        checkpoint_name=new_checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp_new, new_checkpoint_path)
 
     logger.info(f"Finished")
 
@@ -181,13 +170,7 @@ def reduce_elements(args):
         sys.exit(0)
 
     tp = TensorPotential(potential=instructions_dict)
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    tp.load_checkpoint(
-        checkpoint_name=checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp, checkpoint_path)
 
     new_checkpoint_path = checkpoint_path + output_suffix
     new_model_path = model_path
@@ -217,13 +200,7 @@ def reduce_elements(args):
     logger.info(f"Trying to load converted model from {new_model_path}")
     new_instructions = load_instructions(new_model_path)
     tp_new = TensorPotential(potential=new_instructions)
-    logger.info(f"Trying to load checkpoint from {new_checkpoint_path}")
-    tp_new.load_checkpoint(
-        checkpoint_name=new_checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp_new, new_checkpoint_path)
 
     calc_new = TPCalculator(model=tp_new.model)
     for el, info in test_atoms.items():
@@ -301,9 +278,7 @@ def cast_model(args):
 
     pot = load_instructions(model_path)
     tp = TensorPotential(potential=pot, fit_config={}, float_dtype=d_from)
-    tp.load_checkpoint(
-        checkpoint_name=checkpoint_path, expect_partial=True, verbose=True
-    )
+    load_checkpoint(tp, checkpoint_path)
     assert isinstance(
         tp.model.instructions, dict
     ), "Model is not dict format, cannot cast it. Use `update_model` option to convert it to dict format."
@@ -317,7 +292,7 @@ def cast_model(args):
     full_path = current_directory / "casted_model"
     instructions = load_instructions(model_path)
     tp = TensorPotential(potential=instructions, float_dtype=d_to)
-    tp.load_checkpoint(checkpoint_name=checkpoint_path + output_suffix)
+    load_checkpoint(tp, checkpoint_path + output_suffix)
     tp.save_model(exact_path=full_path, jit_compile=True)
     logger.info(f"Saved casted model to {full_path}")
 
@@ -348,12 +323,7 @@ def export_model(args):
     instructions = load_instructions(model_path)
     tp = TensorPotential(potential=instructions)
     logger.info(f"Loading checkpoint from {checkpoint_path}")
-    tp.load_checkpoint(
-        checkpoint_name=checkpoint_path,
-        expect_partial=True,
-        verbose=True,
-        raise_errors=True,
-    )
+    load_checkpoint(tp, checkpoint_path)
 
     if not save_fs:
         saved_model_name = args.saved_model_name
@@ -385,6 +355,100 @@ def model_summary(args):
     tp.build(tf.float64)
     res = tp.summary(verbose=verbose)
     logger.info(f"Summary (verbose={verbose}) is:\n{res}")
+
+
+def aux_model(args):
+    # Add several auxiliary compute functions and saved model to SavedModel format
+
+    from tensorpotential.instructions import load_instructions
+    from tensorpotential.tpmodel import (
+        ComputeEnergy,
+        ComputeStructureEnergyAndForcesAndVirial,
+        TPModel,
+    )
+    from tensorpotential.tensorpot import TensorPotential
+    from tensorpotential.instructions.instruction_graph_utils import (
+        build_split_tpmodel,
+        build_dependency_graph,
+        find_non_local_keys,
+    )
+
+    import tensorflow as tf
+
+    model_path, checkpoint_path, output_path, communicated_keys = (
+        args.potential,
+        args.checkpoint_path,
+        args.output_path,
+        args.communicated_keys,
+    )
+    # aux_options = args.aux
+
+    # clean checkpoint_name from .index suffix if needed
+    if checkpoint_path.endswith(".index"):
+        checkpoint_path = checkpoint_path.replace(".index", "")
+
+    logger.info(f"Upgrading model {model_path} with checkpoint at {checkpoint_path}")
+
+    instr = load_instructions(model_path)
+    float_dtype = tf.float64
+
+    extra_aux_computes = {"compute_energy": ComputeEnergy()}
+
+    #     extra_aux_computes["compute_local"] = ComputeStructureEnergyAndForcesAndVirial(
+    #         local=True
+    #     )
+
+    has_spbfei = False
+    for ins_name, ins in instr.items():
+        if isinstance(ins, SingleParticleBasisFunctionEquivariantInd):
+            has_spbfei = True
+            logger.info(
+                f"GRACE-2L model is identified (SingleParticleBasisFunctionEquivariantInd instruction found)"
+            )
+            break
+    if has_spbfei:
+        dep_graph = build_dependency_graph(instr)
+        non_local_comm_keys = find_non_local_keys(instr, communicated_keys)
+        # pretty print dep_graph
+        for k, v in dep_graph.items():
+            if k in communicated_keys:
+                if k in non_local_comm_keys:
+                    logger.info(f"  [NON-LOCAL COMMUNICATED] {k} : {v}")
+                else:
+                    logger.info(f"  [COMMUNICATED] {k} : {v}")
+            else:
+                logger.info(f"  {k}: {v}")
+
+        logger.info(f"Communicated keys: {communicated_keys}")
+
+        # assert that communicated_keys in dep_graph
+        for ck in communicated_keys:
+            assert ck in dep_graph, f"Key {ck} not found in dependency graph"
+
+        m = build_split_tpmodel(
+            instr,
+            communicated_keys=communicated_keys,
+            float_dtype=float_dtype,
+            jit_compile=True,
+            extra_aux_computes=extra_aux_computes,
+        )
+    else:
+        m = TPModel(instructions=instr, aux_compute=extra_aux_computes)
+        m.build(float_dtype, jit_compile=True)
+        m.decorate_compute_function(float_dtype, jit_compile=True)
+
+    tp = TensorPotential(m.instructions)
+    tp.model = m
+    tp.load_checkpoint(
+        checkpoint_name=checkpoint_path,
+        assert_consumed=False,
+        assert_existing_objects_matched=True,
+    )
+
+    logger.info(f"Saving upgraded model to {output_path}")
+    tp.save_model(exact_path=output_path)
+
+    logger.info("Finished")
 
 
 def main():
@@ -477,6 +541,29 @@ def main():
     )
 
     parser_summary.set_defaults(func=lambda args: model_summary(args))
+
+    # upgrade model
+    parser_aux_model = subparsers.add_parser(
+        "aux_model",
+        help="Upgrade model with different compute functions: parallel, compute energy only, compute local",
+    )
+    parser_aux_model.add_argument(
+        "-o", "--output-path", required=True, help="Path to save the upgraded model"
+    )
+    parser_aux_model.add_argument(
+        "-ck",
+        "--communicated-keys",
+        nargs="+",
+        default=["I_nl_LN", "I"],
+        help="List of communicated keys, used for parallelization of GRACE-2L model.",
+    )
+    # parser_aux_model.add_argument(
+    #     "--aux",
+    #     nargs="+",
+    #     default=["parallel_2L", "energy_only", "compute_local"],
+    #     help="List of aux functions to add: parallel_2L, energy_only, compute_local",
+    # )
+    parser_aux_model.set_defaults(func=lambda args: aux_model(args))
 
     # Parse arguments and execute the corresponding function
     args = parser.parse_args()

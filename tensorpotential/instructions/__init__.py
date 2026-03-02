@@ -29,6 +29,16 @@ from tensorpotential.instructions.compute import (
     BondSpecificRadialBasisFunction,
     MLPRadialFunction_v2,
     InvariantLayerRMSNorm,
+    InvariantPade,
+)
+
+from tensorpotential.instructions.instruction_graph_utils import (
+    get_dependencies,
+    build_dependency_graph,
+    print_dependency_tree,
+    get_communication_keys,
+    split_2layer_instructions,
+    build_split_tpmodel,
 )
 
 from tensorpotential.instructions.output import (
@@ -78,18 +88,31 @@ __all__ = [
     "InvariantLayerRMSNorm",
     "save_instructions_dict",
     "load_instructions",
+    'InvariantPade',
+    "get_dependencies",
+    "build_dependency_graph",
+    "print_dependency_tree",
+    "get_communication_keys",
+    "split_2layer_instructions",
+    "build_split_tpmodel",
 ]
 
 try:
     from tensorpotential.experimental.instructions.aux_compute import (
         InvariantLayerDTNorm,
         EquivariantRMSNorm,
+        MLPRadialFunction_v3,
+        MLPRadialFunction_v4,
+        MLPRadialFunction_v5,
     )
 
     __all__.extend(
         [
             "EquivariantRMSNorm",
             "InvariantLayerDTNorm",
+            "MLPRadialFunction_v3",
+            "MLPRadialFunction_v4",
+            "MLPRadialFunction_v5",
         ]
     )
 except ImportError:
