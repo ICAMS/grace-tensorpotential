@@ -44,28 +44,6 @@ MODELS_REGISTRY_YAML: Final[str] = "models_registry.yaml"
 TMP_TAR_GZ: Final[str] = "tmp.tar.gz"
 
 MODELS_METADATA = {
-    #########################################################
-    #  Dataset: Materials Project relaxation trajectories   #
-    #########################################################
-    "GRACE-1L-MP-r6": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/d92rGQiRlieY6tJ",
-        DESCRIPTION_KEY: "A one-layer local GRACE model parameterized on MPTraj dataset, with fixed 6 A cutoff.",
-        LICENSE_KEY: "Academic Software License",
-        #         "dirname": "MP-GRACE-1L-r6_4Nov2024",
-    },
-    "GRACE-2L-MP-r5": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/nWyVO8xC38DJw4z",
-        DESCRIPTION_KEY: """A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 5 A cutoff."""
-        """ Currently the best among GRACE models on MatBench Discovery leaderboard.""",
-        LICENSE_KEY: "Academic Software License",
-        # "dirname": "MP_GRACE_2L_r5_07Nov2024",
-    },
-    "GRACE-2L-MP-r6": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/42Ivgi3eaLCynwC",
-        DESCRIPTION_KEY: "A two-layer semi-local GRACE model parameterized on MPTraj dataset, with fixed 6 A cutoff. (version: 11 Nov 2024)",
-        LICENSE_KEY: "Academic Software License",
-        #         "dirname": "MP_GRACE_2L_r6_11Nov2024",
-    },
     ########################################################
     ### Pre-fitted on OMat24, fine tuned on sAlex+MPTraj  ##
     ########################################################
@@ -78,7 +56,7 @@ MODELS_METADATA = {
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/oqXlJdlcHs4oHIB",
     },
     "GRACE-1L-OAM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/gFAv8pX2DJbk1kb",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/gtfs5Wd6LA4fLwi",
         # "dirname": "GRACE-1L-OAM_2Feb25",
         DESCRIPTION_KEY: """A single-layer local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, """
         """with fixed 6 A cutoff.""",
@@ -86,7 +64,7 @@ MODELS_METADATA = {
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/6URjfRdV8jRU3xP",
     },
     "GRACE-2L-OAM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/4zVTfzxornWfS4T",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/4zVTfzxornWfS4T",  # WARNING not updated URL (no compute_energy or parallelization)
         # "dirname": "GRACE-2L-OAM_28Jan25",
         DESCRIPTION_KEY: """A two-layer semi-local GRACE model, pre-fitted on the OMat24 and fine-tuned on sAlex+MPTraj datasets, """
         """with fixed 6 A cutoff.""",
@@ -104,7 +82,7 @@ MODELS_METADATA = {
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/TIpxi7gLvbEu4CK",
     },
     "GRACE-1L-OMAT": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/DmRvRQeedKomaFU",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/kDp9w7t23XCwEqA",
         # "dirname": "GRACE-1L-OMAT-30Jan25",
         DESCRIPTION_KEY: """A single-layer local GRACE model, fitted on the OMat24 dataset, with fixed 6 A cutoff.""",
         LICENSE_KEY: "Academic Software License",
@@ -112,7 +90,7 @@ MODELS_METADATA = {
     },
     #######################
     "GRACE-2L-OMAT": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/vbTYV9Pt4ppKSZ8",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/vbTYV9Pt4ppKSZ8",  # WARNING not updated URL (no compute_energy or parallelization)
         # "dirname": "GRACE-2L-OMAT-3Feb25",
         DESCRIPTION_KEY: """A two-layer semi-local GRACE model, fitted on the OMat24 dataset, with fixed 6 A cutoff.""",
         LICENSE_KEY: "Academic Software License",
@@ -120,88 +98,122 @@ MODELS_METADATA = {
     },
     ########### 1L-medium  ############
     "GRACE-1L-OMAT-medium-base": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/SoWS9KoQZ5DQ7pD",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/cENHNKy6295SBbr",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-base.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/MfEiW7GgKiazFem",
     },
     "GRACE-1L-OMAT-medium-ft-E": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/g7pqjLAM3X5gQ35",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/traA58En846qx5n",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-ft-E.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/2ZxJNgxQmkre3J5",
     },
     "GRACE-1L-OMAT-medium-ft-AM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/EMNHjqNR75c9xmH",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/76gwfsWfQfEMknw",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-medium-ft-AM.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/LtANLYLmyP88it7",
     },
     ########### 1L-large  ############
     "GRACE-1L-OMAT-large-base": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/4K3ASNkn3nii4a2",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/JQ3xAWdpCxBCqAg",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-base.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/eyBpGWR5me9WxGb",
     },
     "GRACE-1L-OMAT-large-ft-E": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/pbMELPznrgdRRxk",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/cR38mQDNnwEm7YQ",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-ft-E.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/Jw7B3pjs39JZDd6",
     },
     "GRACE-1L-OMAT-large-ft-AM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/Se2MCSxtDjkD7wC",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/WWQPtDkD4GR5gb8",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-OMAT-large-ft-AM.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/MCMaGmo6bNSLq79",
     },
     ########### 2L-medium  ############
     "GRACE-2L-OMAT-medium-base": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/NRFH35F66rwsryW",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/NZjbqfdtrr52Map",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-base.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/GQLWNQb4weje5RD",
     },
     "GRACE-2L-OMAT-medium-ft-E": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/n9HB7SFxRbNFtSc",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/LGLQrX3FQECspZm",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-ft-E.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/wKppKBBRmQccByj",
     },
     "GRACE-2L-OMAT-medium-ft-AM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/3Y4Jgg67XinajNe",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/sqq5HyXRMFgamJ8",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-medium-ft-AM.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/nfaCfrWcRMdqPfs",
     },
     ########### 2L-large  ############
     "GRACE-2L-OMAT-large-base": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/pKqkYsYWLsB4EGc",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/s6DwjdwmpRiH3NG",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-base.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/W7KtsjrtKJT6iPS",
     },
     "GRACE-2L-OMAT-large-ft-E": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/bp9znKKGb7LxyEs",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/DeoKFCKJ7QB5EEJ",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-ft-E.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/gFzndA8RnpF83ca",
     },
     "GRACE-2L-OMAT-large-ft-AM": {
-        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/s6YrAAk9aTjQBd8",
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/ab7No2YM3kMRdYw",
         DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-OMAT-large-ft-AM.",
         LICENSE_KEY: "Academic Software License",
         CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/22ZqbGLrg25iWQn",
+    },
+    ########### SMAX models ############
+    "GRACE-1L-SMAX-large": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/8Xg77PfXY8MM7Yg",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-SMAX-large.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/wkffqNy8JisZeW8",
+    },
+    "GRACE-1L-SMAX-OMAT-large": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/pbGRr6A7KeQnJE3",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-1L-SMAX-OMAT-large.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/4zZsgASSY8mbEA8",
+    },
+    "GRACE-2L-SMAX-large": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/89qDS7qSHydbX9X",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-SMAX-large.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/tdaP5NPfsYMn9cM",
+    },
+    "GRACE-2L-SMAX-medium": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/qT2nskXkP7R5F2d",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-SMAX-medium.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/fPezxJRsDeLJ5GC",
+    },
+    "GRACE-2L-SMAX-OMAT-large": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/YHG3P3xKHDiHaZ9",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-SMAX-OMAT-large.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/imcBrFMSgJCBGeS",
+    },
+    "GRACE-2L-SMAX-OMAT-medium": {
+        MODEL_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/PEjnW9cqCZi659o",
+        DESCRIPTION_KEY: "A GRACE foundation model: GRACE-2L-SMAX-OMAT-medium.",
+        LICENSE_KEY: "Academic Software License",
+        CHECKPOINT_URL_KEY: "https://ruhr-uni-bochum.sciebo.de/s/EGryJTXTdG5EBK9",
     },
 }
 
 
 # BACKWARD COMPATIBILITY:
 MODELS_ALIASES_DICT = {
-    "MP_GRACE_1L_r6_4Nov2024": "GRACE-1L-MP-r6",
-    "MP_GRACE_2L_r5_4Nov2024": "GRACE-2L-MP-r5",
-    "MP_GRACE_2L_r6_11Nov2024": "GRACE-2L-MP-r6",
     "GRACE-1L-OAM_2Feb25": "GRACE-1L-OAM",
     "GRACE_2L_OAM_28Jan25": "GRACE-2L-OAM",
     # shortname alisases: short name to full name
@@ -249,9 +261,9 @@ def safe_extract(tar_filename, path=".", members=None):
     with tarfile.open(tar_filename, "r:gz") as tar:
         # Get top-level items (first level of paths)
         top_level_items = {
-            member.name.split('/')[0]: member
+            member.name.split("/")[0]: member
             for member in tar.getmembers()
-            if '/' not in member.name.strip('/')
+            if "/" not in member.name.strip("/")
         }
         # Ensure there's exactly one top-level item
         if len(top_level_items) == 1:
@@ -300,7 +312,9 @@ def download_extract_rename(url, model_path):
     if "Content-Type: text/html" in http_msg:
         raise RuntimeError(f"Download failed, please check the URL {url!r}")
     # Unpack the .tar.gz file
-    print(f"Unpacking model from {url!r} (local file: {local_filename}) to {root_folder}")
+    print(
+        f"Unpacking model from {url!r} (local file: {local_filename}) to {root_folder}"
+    )
     top_folder_name = safe_extract(local_filename, path=root_folder)
     os.remove(local_filename)
     extracted_model_path = os.path.join(root_folder, top_folder_name)

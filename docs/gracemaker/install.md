@@ -133,3 +133,17 @@ cmake --build . -- -j 8
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release -D BUILD_MPI=ON -DPKG_ML-PACE=ON -DNO_GRACE_TF=ON ../cmake
 ```
+
+#### KOKKOS build
+There is KOKKOS support for `grace/fs`.
+
+Use following cmake configuration:
+```bash
+cmake ../cmake -DBUILD_MPI=ON -DCMAKE_BUILD_TYPE=Release -DPKG_MC=ON -DPKG_ML-PACE=ON -DPKG_KOKKOS=ON -DKokkos_ENABLE_CUDA=ON -DKokkos_ENABLE_OPENMP=ON -DKokkos_ARCH_NATIVE=ON
+```
+or `-DKokkos_ARCH_HOPPER90=ON` for H100/200 or `-DKokkos_ARCH_AMPERE80=ON` for A100.
+
+Note, that for running LAMMPS with KOKKOS acceleration:
+```bash
+lmp_kk -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.lammps 
+``` 

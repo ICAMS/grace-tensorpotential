@@ -186,70 +186,96 @@ at.calc.results['gamma'] # per-atom extrapolation grades
 _____
 
 ### Usage in LAMMPS
-For big production runs, it is better to use LAMMPS. 
+
+All GRACE pair styles require `units metal`. The right style depends on your model type and parallelization needs:
+
+| `pair_style` | Model | TF required | MPI parallel | Virials/stress |
+|---|---|---|---|---|
+| `grace` | 1-layer | yes | single process | needs `pair_forces` |
+| `grace/1layer/chunk` | 1-layer | yes | yes | always available |
+| `grace/2layer/chunk` | 2-layer | yes | yes | always available |
+| `grace/2layer/parallel` | 2-layer | yes | yes | always available |
+| `grace/fs` | FS | no | yes | always available |
+| `grace/fs/kk` | FS (Kokkos) | no | yes + GPU/OpenMP | always available |
 
 #### LAMMPS: GRACE (TensorFlow)
-Any GRACE model can be run in LAMMPS using _saved_model_ utilizing TensorFlow interface.
 
-To enable GRACE models in LAMMPS, use the following pair_style 
+The TensorFlow-based styles load a `saved_model` directory. For downloaded foundation models the path is `~/.cache/grace/<model_name>/`.
 
+The simplest invocation:
 ```
-pair_style	grace
-pair_coeff	* * /path/to/saved_model Al Li
-```
-If you downloaded foundation models (run `grace_models`), path will be like
-
-* `/path/to/home/.cache/grace/<model_name>/`
-
-
-**Technical Note:** GRACE models are JIT (just-in-time) compiled, meaning the first evaluation will be slower. 
-GRACE uses padding (enabled by default) to reduce the frequency of recompilations if the structure size or number of 
-neighbors changes. However, occasional recompilations may still occur; this is expected behavior.
-
-You can adjust the fraction of neighbors padded with:
-```
-pair_style grace padding 0.05
-```
-If `padding ...` is not specified, the default value is 0.01 (i.e., 1%).
-
-To receive messages when new padding and recompilation occurs, add the `pad_verbose` option:
-```
-pair_style grace ... pad_verbose
+pair_style grace
+pair_coeff * * /path/to/saved_model Al Li
 ```
 
-By default, the GRACE model provides total forces. To have LAMMPS receive pairwise forces - which is necessary for calculations like atomic virials - use the `pair_forces` option:
-```
-pair_style grace ... pair_forces
-```
+**Key options for `grace`:**
 
-**Warning**: While GPU usage is optional, TensorFlow is less efficient when running solely on the CPU.
-
-#### Multi-GPU parallelization 
-Currently, only **1-LAYER** models can be parallelized using MPI with domain decomposition.
-No need to modify LAMMPS input file, but here is an example of shell run command:  
+- `padding <frac>` — fraction of neighbors to pad to reduce JIT recompilations (default: 0.01)
+- `pad_verbose` — print a message whenever recompilation is triggered
+- `pair_forces` — compute pairwise forces; **required for virials/stress** and automatically enabled when running with more than one MPI rank for GRACE-1L models
 
 ```
- TF_CPP_MIN_LOG_LEVEL=1 mpirun -np 4 --bind-to none  bash -c 'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
+pair_style grace padding 0.05 pad_verbose pair_forces
+pair_coeff * * /path/to/saved_model Al Li
+```
+
+**For single-layer models with LARGE structures**, use `grace/1layer/chunk`. It processes atoms in blocks (`chunksize`, default 4096), always supports virials, and does not need `pair_forces`:
+
+```
+pair_style grace/1layer/chunk chunksize 2048 padding 0.05
+pair_coeff * * /path/to/saved_model Al Li
+```
+
+**For two-layer models with LARGE structures and (optionally) MPI**, use `grace/2layer/chunk` or `grace/2layer/parallel`, correspondingly:
+
+```
+pair_style grace/2layer/chunk
+pair_coeff * * /path/to/2layer_saved_model Al Li
+```
+
+> **Note:** GPU usage is optional but strongly recommended — TensorFlow is significantly less efficient on CPU-only runs.
+
+#### Multi-GPU / MPI parallelization
+
+* Use `grace` for single-process runs for both single-layer and two-layer models.
+* For single-layer models parallization also use `grace` (with CUDA-aware mpirun command)
+* For two-layer models parallization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
+* For memory-reduced version use `grace/1layer/chunk` or `grace/2layer/chunk` - both of them support MPI parallelism.
+* For GRACE/FS models use `grace/fs` (or `grace/fs/kk` for GPU/OpenMP).
+
+If you don't have CUDA-aware MPI, use
+```bash
+mpirun -np 4 --bind-to none bash -c \
+  'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
 ```
 
 #### LAMMPS: GRACE/FS
 
-Only the GRACE/FS family of models currently has a native C++ implementation (product evaluator, and no KOKKOS support yet).
-To run this model, use the following pair_style:
+GRACE/FS has a native C++ implementation — no TensorFlow or GPU required, with full MPI support:
+
 ```
-pair_style grace/fs 
-pair_coeff      * * FS_model.yaml  Mo Nb Ta W 
+pair_style grace/fs
+pair_coeff * * FS_model.yaml Mo Nb Ta W
 ```
-or with extrapolation grade:
+
+A Kokkos-accelerated variant (`grace/fs/kk`) adds GPU and OpenMP support (`newton on` required):
+
+```
+pair_style grace/fs/kk
+pair_coeff * * FS_model.yaml Mo Nb Ta W
+```
+
+To monitor extrapolation grade:
+
 ```
 pair_style grace/fs extrapolation
-pair_coeff      * * FS_model.yaml FS_model.asi Mo Nb Ta W 
+pair_coeff * * FS_model.yaml FS_model.asi Mo Nb Ta W
 
 fix grace_gamma all pair 100 grace/fs gamma 1
 compute max_grace_gamma all reduce max f_grace_gamma
+variable max_grace_gamma equal c_max_grace_gamma
+fix extreme_extrapolation all halt 10 v_max_grace_gamma > 25
 ```
-The advantage of this model is that it is lightweight and do not rely on TensorFlow, meaning no GPU is required for efficient computation.
-Moreover, you can parallelize this model with MPI as usual.
 
 
 

@@ -20,7 +20,13 @@ from tensorpotential.cli.data import (
     is_tf_distr_dataset,
     regroup_dataset_to_iterator,
 )
-
+from tensorpotential.cli.metrics import (
+    addup_metrics,
+    aggregate_metrics,
+    process_accumulated_metrics,
+    normalize_group_metrics,
+    concatenate_per_structure_metrics,
+)
 from tensorpotential.cli.train_callbacks import (
     LRSchedulerFactory,
     CustomReduceLROnPlateau,
@@ -78,7 +84,7 @@ def test_one_epoch(
             )
             is_tf_dataset = False
 
-    acc_metrics = {}
+    accumulated_metrics = {}
     data_iter = iter(dataset)
     if cycle or distr_strategy.num_replicas_in_sync > 1:
         if not is_tf_dataset:
@@ -92,34 +98,34 @@ def test_one_epoch(
     agg_concat_per_structure_metrics = defaultdict(list)
     for i in range(steps):
         if is_tf_dataset:
-            b_data = next(data_iter)
+            batch = next(data_iter)
         else:
-            b_data = [
+            batch = [
                 next(data_iter)  # .get_single_element()
                 for _ in range(distr_strategy.num_replicas_in_sync)
             ]  # list of num_replicas_in_sync batch_dicts
         num_processed_batches += distr_strategy.num_replicas_in_sync
-        # TODO: filter out unnecessary data, not to submit to GPU
+        # TODO: filter step_results unnecessary data, not to submit to GPU
         t_start = time.perf_counter()
-        out = tp.distributed_test_step(b_data)
-        # agg metrics from out[".../per_struct"]
-        metrics = aggregate_per_struct_metrics(out)
+        step_results = tp.distributed_test_step(batch)
+        # agg metrics from step_results[".../per_struct"]
+        metrics = aggregate_metrics(step_results)
         total_time += time.perf_counter() - t_start
         #  aggregate "de", "df"
-        acc_metrics = accumulate_metrics(metrics, acc_metrics)
+        accumulated_metrics = addup_metrics(metrics, accumulated_metrics)
         if compute_concat_per_structure_metrics:
-            # append predictions b_data[DATA_STRUCTURE_ID] and out[".../per_struct"] to agg_concat_per_structure_metrics
+            # append predictions batch[DATA_STRUCTURE_ID] and step_results[".../per_struct"] to agg_concat_per_structure_metrics
             concatenate_per_structure_metrics(
-                out, b_data, agg_concat_per_structure_metrics
+                step_results, batch, agg_concat_per_structure_metrics
             )
-        del b_data
+        del batch
     # log.info(f"[TEST]: processed batches/total batches: {num_processed_batches}/{n_batch}")
     del data_iter
-    acc_metrics["total_time/test"] = total_time
+    accumulated_metrics["total_time/test"] = total_time
     if compute_concat_per_structure_metrics:
-        return acc_metrics, agg_concat_per_structure_metrics
+        return accumulated_metrics, agg_concat_per_structure_metrics
     else:
-        return acc_metrics
+        return accumulated_metrics
 
 
 def train_one_epoch(
@@ -137,7 +143,7 @@ def train_one_epoch(
 ):
     is_tf_dataset = is_tf_distr_dataset(train_dataset)
     n_batch = get_dataset_num_batches(train_dataset)
-    acc_metrics = {}
+    accumulated_metrics = {}
     if shuffle or distr_strategy.num_replicas_in_sync > 1:
         if is_tf_dataset:
             # TODO: shuffle train_dataset
@@ -181,9 +187,9 @@ def train_one_epoch(
     agg_concat_per_structure_metrics = defaultdict(list)
     for _ in pbar:
         if is_tf_dataset:
-            b_data = next(data_iter)
+            batch = next(data_iter)
         else:
-            b_data = [
+            batch = [
                 next(data_iter)  # .get_single_element()
                 for _ in range(distr_strategy.num_replicas_in_sync)
             ]
@@ -192,57 +198,28 @@ def train_one_epoch(
         if callback_list is not None:
             callback_list.on_batch_begin(tp.step)
         t_start = time.perf_counter()
-        out = tp.distributed_train_step(b_data)
-        # agg metrics from out[".../per_struct"]
-        metrics = aggregate_per_struct_metrics(out)
+        step_results = tp.distributed_train_step(batch)
+        # agg metrics from step_results[".../per_struct"]
         total_time += time.perf_counter() - t_start
-        acc_metrics = accumulate_metrics(metrics, acc_metrics)
+        metrics = aggregate_metrics(step_results)
+        accumulated_metrics = addup_metrics(metrics, accumulated_metrics)
         if compute_concat_per_structure_metrics:
-            # append predictions b_data[DATA_STRUCTURE_ID] and out[".../per_struct"] to agg_concat_per_structure_metrics
+            # append predictions batch[DATA_STRUCTURE_ID] and step_results[".../per_struct"] to agg_concat_per_structure_metrics
             concatenate_per_structure_metrics(
-                out, b_data, agg_concat_per_structure_metrics
+                step_results, batch, agg_concat_per_structure_metrics
             )
         tp.increment_step()
         # todo: make sure that metrics are passed in the right format
         if callback_list is not None:
             callback_list.on_batch_end(tp.step, metrics)
-        del b_data
+        del batch
     del data_iter
     # log.info(f"[TRAIN]: processed batches/total batches: {num_processed_batches}/{n_batch}")
-    acc_metrics["total_time/train"] = total_time
+    accumulated_metrics["total_time/train"] = total_time
     if compute_concat_per_structure_metrics:
-        return acc_metrics, agg_concat_per_structure_metrics
+        return accumulated_metrics, agg_concat_per_structure_metrics
     else:
-        return acc_metrics
-
-
-def concatenate_per_structure_metrics(out, b_data, agg_concat_per_structure_metrics):
-    if isinstance(b_data, list):  # manual dataset
-        for b in b_data:
-            # cur_structure_ids += list(b[constants.DATA_STRUCTURE_ID])
-            agg_concat_per_structure_metrics[constants.DATA_STRUCTURE_ID] += [
-                ind
-                for ind in b[constants.DATA_STRUCTURE_ID].numpy().reshape(-1)
-                if ind != -1
-            ]
-    elif isinstance(b_data, dict):  # tf.data.Dataset (distributed or not)
-        # convert PerReplica to tensors and loop over
-        try:
-            it = b_data[constants.DATA_STRUCTURE_ID].values  # distributed
-        except AttributeError:
-            it = [b_data[constants.DATA_STRUCTURE_ID]]  # serial
-
-        for structure_ind_tensor in it:
-            agg_concat_per_structure_metrics[constants.DATA_STRUCTURE_ID] += [
-                ind for ind in structure_ind_tensor.numpy().reshape(-1) if ind != -1
-            ]
-
-    # cur_metrics_per_struct_dict = defaultdict(list)
-    for metric_name, metric_values in out.items():
-        if metric_name.endswith("per_struct"):
-            agg_concat_per_structure_metrics[metric_name] += list(
-                metric_values.numpy().reshape(-1)
-            )
+        return accumulated_metrics
 
 
 def train_bfgs_one_epoch(
@@ -254,7 +231,7 @@ def train_bfgs_one_epoch(
     cycle=False,
     compute_concat_per_structure_metrics=False,
 ):
-    acc_metrics = {}
+    accumulated_metrics = {}
     if distr_strategy.num_replicas_in_sync > 1:
         tuple_of_datasets = list(tuple_of_datasets)
         np.random.shuffle(tuple_of_datasets)
@@ -272,27 +249,27 @@ def train_bfgs_one_epoch(
     total_time = 0
     agg_concat_per_structure_metrics = defaultdict(list)
     for i in pbar:
-        b_data = [
+        batch = [
             next(data_iter)  # .get_single_element()
             for _ in range(distr_strategy.num_replicas_in_sync)
         ]
-        # TODO: filter out unnecessary data, not to submit to GPU
+        # TODO: filter step_results unnecessary data, not to submit to GPU
         t_start = time.perf_counter()
-        out = tp.distributed_bfgs_train_step(b_data)
-        # agg metrics from out[".../per_struct"]
-        metrics = aggregate_per_struct_metrics(out)
+        step_results = tp.distributed_bfgs_train_step(batch)
+        # agg metrics from step_results[".../per_struct"]
+        metrics = aggregate_metrics(step_results)
         total_time += time.perf_counter() - t_start
-        acc_metrics = accumulate_metrics(metrics, acc_metrics)
+        accumulated_metrics = addup_metrics(metrics, accumulated_metrics)
         if compute_concat_per_structure_metrics:
-            # append predictions b_data[DATA_STRUCTURE_ID] and out[".../per_struct"] to agg_concat_per_structure_metrics
+            # append predictions batch[DATA_STRUCTURE_ID] and step_results[".../per_struct"] to agg_concat_per_structure_metrics
             concatenate_per_structure_metrics(
-                out, b_data, agg_concat_per_structure_metrics
+                step_results, batch, agg_concat_per_structure_metrics
             )
-    acc_metrics["total_time/train"] = total_time
+    accumulated_metrics["total_time/train"] = total_time
     if compute_concat_per_structure_metrics:
-        return acc_metrics, agg_concat_per_structure_metrics
+        return accumulated_metrics, agg_concat_per_structure_metrics
     else:
-        return acc_metrics
+        return accumulated_metrics
 
 
 def get_dataset_num_batches(dataset):
@@ -377,21 +354,27 @@ def train_adam(
             loss_weights_switch = switch_params.pop("after_iter")
             new_loss_params = switch_params
 
+    metrics_normalization_spec = tp.compute_metrics.get_normalization_spec()
+
     #### INIT STATS ####
     if compute_init_stats:
         epoch = tp.epoch
 
-        train_acc_metrics, train_agg_concat_per_structure_metrics = test_one_epoch(
-            tp,
-            train_ds,
-            strategy,
-            cycle=fit_config.get("train_cycle", False),
-            compute_concat_per_structure_metrics=True,
-            chunk_batches=group_similar_batches,
-            regroup_window_factor=regroup_window_factor,
+        train_accumulated_metrics, train_agg_concat_per_structure_metrics = (
+            test_one_epoch(
+                tp,
+                train_ds,
+                strategy,
+                cycle=fit_config.get("train_cycle", False),
+                compute_concat_per_structure_metrics=True,
+                chunk_batches=group_similar_batches,
+                regroup_window_factor=regroup_window_factor,
+            )
         )
-        initial_train_metrics = process_acc_metrics(
-            train_acc_metrics, n_batches=n_batches
+        initial_train_metrics = process_accumulated_metrics(
+            train_accumulated_metrics,
+            n_batches=n_batches,
+            normalization_spec=metrics_normalization_spec,
         )
         initial_train_metrics["epoch"] = epoch
         if train_grouping_df is not None:
@@ -400,6 +383,7 @@ def train_adam(
                 train_agg_concat_per_structure_metrics,
                 initial_train_metrics,
                 n_batches=n_batches,
+                metrics_normalization_spec=metrics_normalization_spec,
             )
         # replace "test" with "train" for consistency:
         initial_train_metrics = {
@@ -410,19 +394,22 @@ def train_adam(
             metrics=initial_train_metrics,
         )
         if test_ds is not None:
-            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
-                tp,
-                test_ds,
-                strategy,
-                cycle=fit_config.get("test_cycle", False),
-                compute_concat_per_structure_metrics=True,
-                chunk_batches=group_similar_batches,
-                regroup_window_factor=regroup_window_factor,
+            test_accumulated_metrics, test_agg_concat_per_structure_metrics = (
+                test_one_epoch(
+                    tp,
+                    test_ds,
+                    strategy,
+                    cycle=fit_config.get("test_cycle", False),
+                    compute_concat_per_structure_metrics=True,
+                    chunk_batches=group_similar_batches,
+                    regroup_window_factor=regroup_window_factor,
+                )
             )
             # tp.on_test_end()
-            initial_test_metrics = process_acc_metrics(
-                test_acc_metrics,
+            initial_test_metrics = process_accumulated_metrics(
+                test_accumulated_metrics,
                 n_batches=test_n_batches,
+                normalization_spec=metrics_normalization_spec,
             )
             initial_test_metrics["epoch"] = epoch
 
@@ -432,6 +419,7 @@ def train_adam(
                     test_agg_concat_per_structure_metrics,
                     initial_test_metrics,
                     n_batches=test_n_batches,
+                    metrics_normalization_spec=metrics_normalization_spec,
                 )
 
             msg = generate_train_test_message(
@@ -477,24 +465,28 @@ def train_adam(
         epoch_begin_lr = tp.optimizer.learning_rate.numpy()
         # tp.on_epoch_begin()
         # -----------------TRAIN---------------------
-        train_acc_metrics, train_agg_concat_per_structure_metrics = train_one_epoch(
-            tp,
-            train_ds,
-            strategy,
-            progress_bar,
-            desc=f"Iteration #{tp.epoch}/{epochs}",
-            shuffle=fit_config.get("train_shuffle", False),
-            cycle=fit_config.get("train_cycle", False),
-            compute_concat_per_structure_metrics=True,
-            chunk_batches=group_similar_batches,
-            regroup_window_factor=regroup_window_factor,
-            callback_list=callback_list,
+        train_accumulated_metrics, train_agg_concat_per_structure_metrics = (
+            train_one_epoch(
+                tp,
+                train_ds,
+                strategy,
+                progress_bar,
+                desc=f"Iteration #{tp.epoch}/{epochs}",
+                shuffle=fit_config.get("train_shuffle", False),
+                cycle=fit_config.get("train_cycle", False),
+                compute_concat_per_structure_metrics=True,
+                chunk_batches=group_similar_batches,
+                regroup_window_factor=regroup_window_factor,
+                callback_list=callback_list,
+            )
         )
         # manually rewrite values with EMA after each epoch before applying (use_ema is checking inside)
         tp.optimizer.finalize_variable_values(tp.model.variables_to_train)
         # post_process agg_metrics
-        final_train_metrics = process_acc_metrics(
-            train_acc_metrics, n_batches=n_batches
+        final_train_metrics = process_accumulated_metrics(
+            train_accumulated_metrics,
+            n_batches=n_batches,
+            normalization_spec=metrics_normalization_spec,
         )
         final_train_metrics["epoch"] = tp.epoch
         final_train_metrics["step"] = tp.step
@@ -507,6 +499,7 @@ def train_adam(
                 train_agg_concat_per_structure_metrics,
                 final_train_metrics,
                 n_batches=n_batches,
+                metrics_normalization_spec=metrics_normalization_spec,
             )
         dump_metrics(
             filename=os.path.join(tp.output_dir, "train_metrics.yaml"),
@@ -517,19 +510,22 @@ def train_adam(
         # TODO: maybe tune its frequency
         if test_ds is not None:
             # tp.on_test_begin()
-            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
-                tp,
-                test_ds,
-                strategy,
-                cycle=fit_config.get("test_cycle", False),
-                compute_concat_per_structure_metrics=True,
-                chunk_batches=group_similar_batches,
-                regroup_window_factor=regroup_window_factor,
+            test_accumulated_metrics, test_agg_concat_per_structure_metrics = (
+                test_one_epoch(
+                    tp,
+                    test_ds,
+                    strategy,
+                    cycle=fit_config.get("test_cycle", False),
+                    compute_concat_per_structure_metrics=True,
+                    chunk_batches=group_similar_batches,
+                    regroup_window_factor=regroup_window_factor,
+                )
             )
             # tp.on_test_end()
-            final_test_metrics = process_acc_metrics(
-                test_acc_metrics,
+            final_test_metrics = process_accumulated_metrics(
+                test_accumulated_metrics,
                 n_batches=test_n_batches,
+                normalization_spec=metrics_normalization_spec,
             )
             final_test_metrics["epoch"] = tp.epoch
             final_test_metrics["step"] = tp.step
@@ -540,6 +536,7 @@ def train_adam(
                     test_agg_concat_per_structure_metrics,
                     final_test_metrics,
                     n_batches=test_n_batches,
+                    metrics_normalization_spec=metrics_normalization_spec,
                 )
 
             final_test_metrics["lr_epoch_begin"] = float(epoch_begin_lr)
@@ -599,6 +596,7 @@ def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
     log.info(
         f"Switching loss weights to {new_loss_params} after {loss_weights_switch} epochs"
     )
+    lr_reduction_factor = new_loss_params.pop("learning_rate_reduction_factor", None)
     new_lr = new_loss_params.pop("learning_rate", None)
     tp.loss_function.set_loss_component_params(new_loss_params)
     cur_epoch = tp.epoch
@@ -608,7 +606,15 @@ def do_loss_switch(tp, loss_weights_switch, new_loss_params, test_ds):
         # save best test loss for stage1
         tp.save_checkpoint(suffix=".stage1.best_test_loss")
     # set new learning rate
-    if new_lr:
+    if lr_reduction_factor is not None:
+        current_lr = float(tp.optimizer.learning_rate.numpy())
+        new_lr_value = current_lr * lr_reduction_factor
+        log.info(
+            f"Applying learning_rate_reduction_factor={lr_reduction_factor}: "
+            f"{current_lr:.3e} → {new_lr_value:.3e}"
+        )
+        tp.optimizer.learning_rate.assign(new_lr_value)
+    elif new_lr:
         log.info(f"Set new learning rate to {new_lr:.3e}")
         tp.optimizer.learning_rate.assign(new_lr)
     tp.epoch = cur_epoch
@@ -644,14 +650,18 @@ def train_bfgs(
             log.info(f"Regroup similar TEST batches by group of {n_group}")
             test_ds = regroup_similar_batches(test_ds, n_group=n_group)
 
+    metrics_norm_spec = tp.compute_metrics.get_normalization_spec()
     #### INIT STATS ####
     if compute_init_stats:
-        train_acc_metrics, train_agg_concat_per_structure_metrics = test_one_epoch(
-            tp, train_ds, strategy, compute_concat_per_structure_metrics=True
+        train_accumulated_metrics, train_agg_concat_per_structure_metrics = (
+            test_one_epoch(
+                tp, train_ds, strategy, compute_concat_per_structure_metrics=True
+            )
         )
-        initial_train_metrics = process_acc_metrics(
-            train_acc_metrics,
+        initial_train_metrics = process_accumulated_metrics(
+            train_accumulated_metrics,
             n_batches=len(train_ds),
+            normalization_spec=metrics_norm_spec,
         )
         initial_train_metrics["epoch"] = epoch
         initial_train_metrics = {
@@ -662,12 +672,15 @@ def train_bfgs(
             metrics=initial_train_metrics,
         )
         if test_ds is not None:
-            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
-                tp, test_ds, strategy, compute_concat_per_structure_metrics=True
+            test_accumulated_metrics, test_agg_concat_per_structure_metrics = (
+                test_one_epoch(
+                    tp, test_ds, strategy, compute_concat_per_structure_metrics=True
+                )
             )
-            initial_test_metrics = process_acc_metrics(
-                test_acc_metrics,
+            initial_test_metrics = process_accumulated_metrics(
+                test_accumulated_metrics,
                 n_batches=len(test_ds),
+                normalization_spec=metrics_norm_spec,
             )
             initial_test_metrics["epoch"] = epoch
             if test_grouping_df is not None:
@@ -676,6 +689,7 @@ def train_bfgs(
                     test_agg_concat_per_structure_metrics,
                     initial_test_metrics,
                     n_batches=len(test_ds),
+                    metrics_normalization_spec=metrics_norm_spec,
                 )
             dump_metrics(
                 filename=os.path.join(tp.output_dir, "test_metrics.yaml"),
@@ -699,7 +713,7 @@ def train_bfgs(
     def fit_func(x):
         tp.model.set_flat_trainable_variables(x)
         # -----------------TRAIN---------------------
-        train_acc_metrics, train_agg_concat_per_structure_metrics = (
+        train_accumulated_metrics, train_agg_concat_per_structure_metrics = (
             train_bfgs_one_epoch(
                 tp,
                 train_ds,
@@ -708,12 +722,14 @@ def train_bfgs(
                 compute_concat_per_structure_metrics=True,
             )
         )
-        tot_loss = train_acc_metrics["total_loss/train"]
-        tot_jac = train_acc_metrics["total_jac"]
+        tot_loss = train_accumulated_metrics["total_loss/train"]
+        tot_jac = train_accumulated_metrics["total_jac"]
         # post_process agg_metrics
         nonlocal final_train_metrics
-        final_train_metrics = process_acc_metrics(
-            train_acc_metrics, n_batches=len(train_ds)
+        final_train_metrics = process_accumulated_metrics(
+            train_accumulated_metrics,
+            n_batches=len(train_ds),
+            normalization_spec=metrics_norm_spec,
         )
         return tot_loss, tot_jac
 
@@ -735,12 +751,15 @@ def train_bfgs(
         )
         if test_ds is not None:
             tp.model.set_flat_trainable_variables(x)
-            test_acc_metrics, test_agg_concat_per_structure_metrics = test_one_epoch(
-                tp, test_ds, strategy, compute_concat_per_structure_metrics=True
+            test_accumulated_metrics, test_agg_concat_per_structure_metrics = (
+                test_one_epoch(
+                    tp, test_ds, strategy, compute_concat_per_structure_metrics=True
+                )
             )
-            final_test_metrics = process_acc_metrics(
-                test_acc_metrics,
+            final_test_metrics = process_accumulated_metrics(
+                test_accumulated_metrics,
                 n_batches=len(test_ds),
+                normalization_spec=metrics_norm_spec,
             )
             final_test_metrics["epoch"] = epoch
             if test_grouping_df is not None:
@@ -749,6 +768,7 @@ def train_bfgs(
                     test_agg_concat_per_structure_metrics,
                     final_test_metrics,
                     n_batches=len(test_ds),
+                    metrics_normalization_spec=metrics_norm_spec,
                 )
             dump_metrics(
                 filename=os.path.join(tp.output_dir, "test_metrics.yaml"),
@@ -801,89 +821,6 @@ def train_bfgs(
     tp.save_checkpoint()
 
 
-def aggregate_per_struct_metrics(metrics_per_struct):
-    """
-    For one batch, aggregates metrics by summation
-    """
-    # TODO: implement structure_id aggregation, implement generation of per-structure-group metrics
-    assert (
-        "nat/per_struct" in metrics_per_struct
-    ), "Can't aggregate metrics without `nat/per_struct`"
-    nat_per_struct = np.array(metrics_per_struct["nat/per_struct"])
-    out_dict = {}
-    for k, v in metrics_per_struct.items():
-        if k == "nat/per_struct":
-            out_dict["num_atoms"] = np.sum(v)
-        elif k.endswith("/per_struct"):
-            out_dict[k] = np.sum(v)
-        elif "loss" in k or "jac" in k:
-            if np.any(np.isnan(v)):
-                print("NAN found!")
-            out_dict[k] = np.array(v)  # per batch (already reduced over mini batches)
-        else:
-            pass  # raise ValueError(f"Unknown key to proceed: {k}")
-    out_dict["num_struct"] = len(nat_per_struct)
-    out_dict["num_step"] = 1
-    return out_dict
-
-
-def process_acc_metrics(total_metrics, n_batches):
-    """
-    Convert accumulated over batches metrics to total metric (by normalizing to proper number of observations)
-    """
-    num_struct = total_metrics["num_struct"]  # in dataset
-    num_atoms = total_metrics["num_atoms"]  # in dataset
-
-    final_metrics = normalize_group_metrics(
-        total_metrics, num_struct, num_atoms, n_batches
-    )
-    return final_metrics
-
-
-def normalize_group_metrics(total_metrics, num_struct, num_atoms, n_batches):
-    final_metrics = {}
-    for k, v in total_metrics.items():
-        if "abs" in k:
-            # TODO: infer behaviour from key
-            if "depa" in k:
-                final_metrics["mae/depa"] = v / num_struct
-            elif "de" in k:
-                final_metrics["mae/de"] = v / num_struct
-            elif "df" in k:
-                final_metrics["mae/f_comp"] = v / num_atoms / 3
-            elif "dv" in k:
-                final_metrics["mae/virial"] = v / num_struct / 6
-            elif "stress" in k:
-                final_metrics["mae/stress"] = v / num_struct / 6
-        elif "sqr" in k:
-            if "depa" in k:
-                final_metrics["rmse/depa"] = np.sqrt(v / num_struct)
-            elif "de" in k:
-                final_metrics["rmse/de"] = np.sqrt(v / num_struct)
-            elif "df" in k:
-                final_metrics["rmse/f_comp"] = np.sqrt(v / num_atoms / 3)
-            elif "dv" in k:
-                final_metrics["rmse/virial"] = np.sqrt(v / num_struct / 6)
-            elif "stress" in k:
-                final_metrics["rmse/stress"] = np.sqrt(v / num_struct / 6)
-        elif "loss" in k:
-            # overall loss should be normalized by number of structures
-            final_metrics[k] = float(v) / n_batches  # per dataset
-        elif "total_time" in k:
-            final_metrics[k + "/per_atom"] = v / num_atoms
-    return final_metrics
-
-
-def accumulate_metrics(metrics, acc_metrics):
-    """Accumulate metrics over batches"""
-    for k, v in metrics.items():
-        if k in acc_metrics:
-            acc_metrics[k] += v
-        else:
-            acc_metrics[k] = v
-    return acc_metrics
-
-
 def try_load_checkpoint(
     tp,
     restart_best_test=True,
@@ -897,9 +834,9 @@ def try_load_checkpoint(
     if checkpoint_name is not None:
         log.info(f"Trying to load explicit checkpoint {checkpoint_name}")
         tp.load_checkpoint(
+            checkpoint_name=checkpoint_name,
             expect_partial=expect_partial,
             verbose=verbose,
-            checkpoint_name=checkpoint_name,
             assert_consumed=assert_consumed,
         )
     elif restart_latest:
@@ -967,7 +904,11 @@ def generate_train_test_message(final_train_metrics, final_test_metrics, epoch, 
 
 
 def compute_per_group_metrics(
-    grouping_df, agg_concat_per_structure_metrics, final_metrics, n_batches
+    grouping_df,
+    agg_concat_per_structure_metrics,
+    final_metrics,
+    n_batches,
+    metrics_normalization_spec,
 ):
     agg_concat_per_structure_metrics_df = pd.DataFrame(
         agg_concat_per_structure_metrics
@@ -1002,6 +943,7 @@ def compute_per_group_metrics(
             num_struct=num_struct,
             num_atoms=num_atoms,
             n_batches=n_batches,
+            normalization_spec=metrics_normalization_spec,
         )
         norm_cur_metrics["num_struct"] = num_struct
         norm_cur_metrics["num_atoms"] = num_atoms

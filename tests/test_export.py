@@ -17,7 +17,7 @@ def test_export_to_yaml():
         n_rad_max=12,
         embedding_size=8,
         max_order=3,
-    )
+    ).get_instructions()
 
     # BUILD
     for _, ins in fs_ins.items():

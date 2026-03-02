@@ -75,9 +75,7 @@ def load_dataframe(filename: str, compression: str = "infer") -> pd.DataFrame:
 
 
 def load_extxyz(filename: str) -> pd.DataFrame:
-    logging.info(
-        f"Reading extxyz file: {filename} ({sizeof_fmt(filename)})"
-    )
+    logging.info(f"Reading extxyz file: {filename} ({sizeof_fmt(filename)})")
     data = read(filename, format="extxyz", index=":")
     logging.info(f"{len(data)} structures read from {filename}")
     logging.info("Converting to dataframe")
@@ -238,8 +236,9 @@ def limit_dataset_size(current_size, limit_size):
 
 
 class FutureDistributedDataset:
-    def __init__(self, data_config):
+    def __init__(self, data_config, stats=None):
         self.data_config = data_config
+        self.stats = stats
         self.dataset_path = data_config["path"]  # point to stage3 folder
         self.train_size = data_config.get("train_size")
         self.test_dataset_path = data_config.get("test_path")
@@ -267,6 +266,11 @@ class FutureDistributedDataset:
 
         # option to have single-stream dataset
         self.distribute_values = self.data_config.get("distribute_values", False)
+
+    def __len__(self):
+        if self.stats is not None:
+            return self.stats.get("total_num_of_batches", 0)
+        return 0
 
     def generate_dataset(self, strategy, signatures=None):
         def filter_batch_by_signature(batch):
@@ -531,7 +535,7 @@ def load_and_prepare_distributed_datasets(args_yaml, seed=1234, strategy=None):
     }
 
     return (
-        FutureDistributedDataset(data_config),
+        FutureDistributedDataset(data_config, stats=stats),
         test_dataset_path or test_size or test_shards,  # mocking test dataset
         element_map,
         data_stats,
@@ -768,25 +772,27 @@ def load_and_prepare_datasets(
     if extras is not None:
         import importlib
 
-        mod = importlib.import_module(
+        mod_exp = importlib.import_module(
             "tensorpotential.experimental.extra_data_builders"
         )
+        mod_extra = importlib.import_module("tensorpotential.extra.extra_data_builders")
         for db_name, db_config in extras.items():
-            try:
-                db = getattr(mod, db_name)
-                data_builders.append(db(**db_config, float_dtype=float_dtype))
-            except AttributeError as e:
+            db = getattr(mod_exp, db_name, None) or getattr(mod_extra, db_name, None)
+            if db is None:
                 raise NameError(f"Could not find data builder {db_name}")
+            data_builders.append(db(**db_config, float_dtype=float_dtype))
 
     # preprocess data
     log.info("Train set processing")
-    max_n_buckets = fit_config.get("train_max_n_buckets", 5)
+    max_padding_fraction = fit_config.get("auto_bucket_max_padding", 0.3)
+    max_n_buckets = fit_config.get("train_max_n_buckets", "auto")
     log.info(f"Train buckets: {max_n_buckets}")
     train_batches, padding_stats = construct_batches(
         train_df,
         data_builders=data_builders,
         batch_size=batch_size,
         max_n_buckets=max_n_buckets,  # 1
+        max_padding_fraction=max_padding_fraction,
         return_padding_stats=True,
         verbose=True,
         max_workers=data_config.get("max_workers"),
@@ -814,13 +820,14 @@ def load_and_prepare_datasets(
 
     if has_test_set:
         log.info("Test set processing")
-        test_max_n_buckets = fit_config.get("test_max_n_buckets", 1)
+        test_max_n_buckets = fit_config.get("test_max_n_buckets", "auto")
         log.info(f"Test buckets: {test_max_n_buckets}")
         test_batches, test_padding_stats = construct_batches(
             test_df,
             data_builders=data_builders,
             batch_size=test_batch_size if test_batch_size else batch_size,
             max_n_buckets=test_max_n_buckets,  # 1
+            max_padding_fraction=max_padding_fraction,
             return_padding_stats=True,
             verbose=True,
             max_workers=data_config.get("max_workers"),

@@ -9,7 +9,7 @@ data:
   test_size: 20
 
 potential:
-  preset: "GRACE_1LAYER"
+  preset: "GRACE_1LAYER_v1_24"
   scale: True
   kwargs: { lmax: 2,
             basis_type: "Cheb",

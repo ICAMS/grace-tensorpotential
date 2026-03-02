@@ -301,7 +301,10 @@ class TPCalculator(Calculator):
                 if isinstance(modeli, str):
                     modeli = TensorPotential.load_model(modeli)
                     self.models.append(modeli)
-                    i_data_keys = modeli.signatures["serving_default"]._arg_keywords
+                    try:
+                        i_data_keys = modeli.signatures["compute"]._arg_keywords
+                    except KeyError:
+                        i_data_keys = modeli.signatures["serving_default"]._arg_keywords
                 elif hasattr(modeli, "compute"):
                     assert callable(modeli.compute)
                     self.models.append(modeli)
@@ -317,7 +320,10 @@ class TPCalculator(Calculator):
         else:
             if isinstance(model, str):
                 model = TensorPotential.load_model(model)
-                self.data_keys = model.signatures["serving_default"]._arg_keywords
+                try:
+                    self.data_keys = model.signatures["compute"]._arg_keywords
+                except KeyError:
+                    self.data_keys = model.signatures["serving_default"]._arg_keywords
             elif hasattr(model, "compute"):
                 assert callable(model.compute)
                 self.data_keys = [k for k, v in model.compute_specs.items()]
@@ -394,23 +400,23 @@ class TPCalculator(Calculator):
             self.data_builders.append(MagMomDataBuilder())
         if constants.ATOMIC_POS in self.data_keys:
             try:
-                from tensorpotential.experimental.gen_tensor.databuilder import (
+                from tensorpotential.extra.gen_tensor.databuilder import (
                     PositionsDataBuilder,
                 )
             except ModuleNotFoundError:
                 raise ImportError(
-                    "TensorPotential.experimental.gen_tensor.databuilder not found"
+                    "TensorPotential.extra.gen_tensor.databuilder not found"
                 )
 
             self.data_builders.append(PositionsDataBuilder(cutoff=self.cutoff))
         if constants.CELL_VECTORS in self.data_keys:
             try:
-                from tensorpotential.experimental.gen_tensor.databuilder import (
+                from tensorpotential.extra.gen_tensor.databuilder import (
                     CellDataBuilder,
                 )
             except ModuleNotFoundError:
                 raise ImportError(
-                    "TensorPotential.experimental.gen_tensor.databuilder not found"
+                    "TensorPotential.extra.gen_tensor.databuilder not found"
                 )
 
             self.data_builders.append(CellDataBuilder(cutoff=self.cutoff))
@@ -497,7 +503,7 @@ class TPCalculator(Calculator):
                 if e is None:
                     energy_list.append(np.zeros((1, 1)))
                 else:
-                    energy_list.append(e.numpy())
+                    energy_list.append(e.numpy().astype(np.float64))
 
             if "forces" in self.compute_properties:
                 forces = output.get(constants.PREDICT_FORCES, None)

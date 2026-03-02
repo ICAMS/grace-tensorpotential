@@ -241,6 +241,9 @@ from tensorpotential.data.databuilder import (
 from tensorpotential import constants as tc
 
 import tensorflow as tf
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
+
 from tensorpotential.data.process_df import (
     ASE_ATOMS,
     ENERGY_CORRECTED_COL,
@@ -248,9 +251,6 @@ from tensorpotential.data.process_df import (
     STRESS_COL,
 )
 from tensorpotential.utils import NumpyEncoder
-
-
-
 
 
 remap_type_to_tf_dtype = {
@@ -459,6 +459,8 @@ def build_parser():
     parser.add_argument("--forces-col", type=str, default=FORCES_COL)
     parser.add_argument("--stress-col", type=str, default=STRESS_COL)
     parser.add_argument("--is-fit-stress", action="store_true", default=False)
+    parser.add_argument("--precision", type=str, default="float64") # can be float32 or float64
+
     parser.add_argument(
         "-s",
         "--strategy",
@@ -659,12 +661,15 @@ def load_params(output_path):
                 elements_map = params["elements_map"]
                 cutoff = params["cutoff"]
                 cutoff_dict = params.get("cutoff_dict")
-            return elements_map, cutoff, cutoff_dict
+                precision = params["precision"]
+            return elements_map, cutoff, cutoff_dict, precision
         except Exception as e:
             logging.error(f"Can't parse {fname}: {e}")
 
 
-def save_params(output_path, elements_map, cutoff, cutoff_dict=None):
+def save_params(
+    output_path, elements_map, cutoff, precision="float64", cutoff_dict=None
+):
     os.makedirs(output_path, exist_ok=True)
     with open(os.path.join(output_path, "params.json"), "w") as f:
         json.dump(
@@ -672,6 +677,7 @@ def save_params(output_path, elements_map, cutoff, cutoff_dict=None):
                 "elements_map": elements_map,
                 "cutoff": cutoff,
                 "cutoff_dict": cutoff_dict,
+                "precision": precision,
             },
             f,
         )
@@ -681,6 +687,7 @@ def get_databuilders(
     elements_map,
     cutoff,
     args_parse,
+    precision="float64",
     cutoff_dict=None,
 ):
     geom_db = GeometricalDataBuilder(
@@ -688,12 +695,14 @@ def get_databuilders(
         cutoff=cutoff,
         cutoff_dict=cutoff_dict,  # TODO: provide parameter
         is_fit_stress=args_parse.is_fit_stress,
+        float_dtype=precision,
     )
     ref_db = ReferenceEnergyForcesStressesDataBuilder(
         is_fit_stress=args_parse.is_fit_stress,
         energy_col=args_parse.energy_col,
         forces_col=args_parse.forces_col,
         stress_col=args_parse.stress_col,
+        float_dtype=precision,
         # stress_units=stress_units,
     )
     databuilders_list = [geom_db, ref_db]
@@ -720,6 +729,7 @@ def main(args=None):
     max_n_buckets = args_parse.max_n_buckets
     compression = args_parse.compression
     rerun = args_parse.rerun
+    precision = args_parse.precision
 
     total_num_tasks = args_parse.total_task_num
     task_index = args_parse.task_id
@@ -773,11 +783,15 @@ def main(args=None):
     elements_map = None
     if params is not None:
         logging.info(f"Params loaded: {params}")
-        elements_map, cutoff, cutoff_dict = params
+        elements_map, cutoff, cutoff_dict, precision = params
 
         # TODO: provide parameters
         databuilders_list = get_databuilders(
-            elements_map, cutoff, args_parse, cutoff_dict=cutoff_dict
+            elements_map,
+            cutoff,
+            args_parse,
+            precision=precision,
+            cutoff_dict=cutoff_dict,
         )
         batch_dtypes = get_batch_dtypes(databuilders_list)
         batch_dtypes["n_neigh"] = tf.int32
@@ -829,10 +843,14 @@ def main(args=None):
 
             elements_map = {e: i for i, e in enumerate(elements)}
             logging.info(f"Elements map: {elements_map}")
-            save_params(output_path, elements_map, cutoff, cutoff_dict)
+            save_params(output_path, elements_map, cutoff, precision, cutoff_dict)
 
             databuilders_list = get_databuilders(
-                elements_map, cutoff, args_parse, cutoff_dict=cutoff_dict
+                elements_map,
+                cutoff,
+                args_parse,
+                precision=precision,
+                cutoff_dict=cutoff_dict,
             )
 
             logging.info(f"Stage 1: Computing neigh-list dataset")
@@ -950,7 +968,7 @@ def main(args=None):
     elif stage_4:
         if task_index == 0:
             stats_fname = os.path.join(output_path, "stage3", "stats.json")
-            elements_map, cutoff, cutoff_dict = load_params(output_path)
+            elements_map, cutoff, cutoff_dict, precision = load_params(output_path)
 
             datasets_fnames = glob.glob(
                 os.path.join(output_path, "stage3", "shard_*-of-*")
@@ -1000,6 +1018,7 @@ def main(args=None):
                 "cutoff": cutoff,
                 "cutoff_dict": cutoff_dict,
                 "batch_size": batch_size,
+                "precision": precision,
             }
             logging.info(f"Aggregated stats: {stats}")
 

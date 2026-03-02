@@ -52,6 +52,7 @@ nav:
   - Utilities: gracemaker/utilities.md
   - Foundation models: gracemaker/foundation.md
   - Tutorials: gracemaker/tutorials.md
+  - Fitting Generic Tensors: gracemaker/gen_tensor.md
   - FAQs: gracemaker/faq.md
 
 

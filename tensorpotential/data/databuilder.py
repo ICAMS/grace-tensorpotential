@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import itertools
 import logging
+import math
+import random
 import os
 import signal
 import threading
@@ -99,7 +101,35 @@ def get_padding_dims(batch, max_pad_dict):
     return pad_nat, pad_nneigh, pad_nstruct
 
 
-def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
+def estimate_n_buckets(batches_df, max_padding_fraction=0.3):
+    """Estimate optimal number of buckets based on padding overhead.
+
+    Sweeps n_buckets from 1 to 32, returns the smallest fulfilling the threshold.
+    """
+    batches_df = batches_df.sort_values(
+        ["n_neighbours", "n_atoms", "n_structures"], ascending=False
+    ).reset_index(drop=True)
+    num_batches = len(batches_df)
+    if num_batches <= 1:
+        return 1
+
+    total_real_neigh = batches_df["n_neighbours"].sum()
+    if total_real_neigh == 0:
+        return 1
+
+    for n_buckets in range(1, min(num_batches, 32) + 1):
+        buckets = np.array_split(batches_df, n_buckets)
+        total_padded_neigh = sum(b["n_neighbours"].max() * len(b) for b in buckets)
+        overhead = total_padded_neigh / total_real_neigh - 1.0
+        if overhead <= max_padding_fraction:
+            return n_buckets
+
+    return min(num_batches, 32)
+
+
+def bucketing_split(
+    data_dict_list, batch_size, max_n_buckets, verbose=False, max_padding_fraction=0.3
+):
     """Split data into buckets based on number of atoms and number of neighbors."""
     n_atoms = [get_number_of_real_atoms(d) for d in data_dict_list]
     nneighbors = [get_number_of_real_neigh(d) for d in data_dict_list]
@@ -112,6 +142,17 @@ def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
         pass
     # index: bid,   "n_atoms", "n_neighbours", "n_structures", "structure_ind"
     batches_df = generate_batches_df(structures_df, batch_size)
+    batches_df = batches_df.sort_values(
+        ["n_neighbours", "n_atoms", "n_structures"], ascending=False
+    ).reset_index(drop=True)
+
+    if max_n_buckets == "auto":
+        max_n_buckets = estimate_n_buckets(
+            batches_df, max_padding_fraction=max_padding_fraction
+        )
+        if verbose:
+            logging.info(f"Auto-estimated max_n_buckets: {max_n_buckets}")
+
     buckets_list = split_batches_into_buckets(batches_df, max_n_buckets)
 
     data_batches = []
@@ -155,15 +196,7 @@ def bucketing_split(data_dict_list, batch_size, max_n_buckets, verbose=False):
 
 def split_batches_into_buckets(batches_df, max_n_buckets):
     # dynamic bucket splitting, where split boundary is determined based on increase of nneigh
-    batches_df = batches_df.sort_values(
-        ["n_neighbours", "n_atoms", "n_structures"], ascending=False
-    ).reset_index(drop=True)
-    # batches_df["d_neigh"] = batches_df["n_neighbours"].diff()
-    # boundaries_df = batches_df.sort_values("d_neigh").dropna()
-    # split_inds = boundaries_df.iloc[: max_n_buckets - 1].index.sort_values()
-    # batches_df = batches_df.drop(columns=["d_neigh"])
-    # buckets_list = np.array_split(batches_df, split_inds)
-
+    # Assumes batches_df is already sorted
     buckets_list = np.array_split(batches_df, max_n_buckets)  # naive static splitting
     return buckets_list
 
@@ -822,6 +855,7 @@ def construct_batches(
     verbose: bool = True,
     external_max_nneigh: int = None,
     external_max_nat: int = None,
+    max_padding_fraction: float = 0.3,
     gc_collect=True,
     max_workers=None,
 ):
@@ -891,6 +925,7 @@ def construct_batches(
             batch_size=batch_size,
             max_n_buckets=max_n_buckets,
             verbose=verbose,
+            max_padding_fraction=max_padding_fraction,
         )
         del data_dict_list
         if gc_collect:
@@ -1009,26 +1044,26 @@ def parallel_process_dataframe(
 
     data_dict_list = []
     # Use ProcessPoolExecutor to parallelize row processing
-    with (
-        ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=start_thread_to_terminate_when_parent_process_dies,
-            initargs=(os.getpid(),),
-        ) as executor,
-        tqdm(total=len(df_or_ase_atoms_list), mininterval=MININTERVAL) as pbar,
-    ):
-        for chunk in chunks:
-            # Submit tasks for each row in df_or_ase_atoms_list
-            futures = [
-                executor.submit(process_row, row_ind, row, data_builders)
-                for row_ind, row in chunk.iterrows()
-            ]
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=start_thread_to_terminate_when_parent_process_dies,
+        initargs=(os.getpid(),),
+    ) as executor:
+        with tqdm(
+            total=len(df_or_ase_atoms_list), mininterval=MININTERVAL
+        ) as pbar:
+            for chunk in chunks:
+                # Submit tasks for each row in df_or_ase_atoms_list
+                futures = [
+                    executor.submit(process_row, row_ind, row, data_builders)
+                    for row_ind, row in chunk.iterrows()
+                ]
 
-            # Collect results as they are completed
-            for future in futures:
-                data_dict = future.result()
-                data_dict_list.append(data_dict)
-                pbar.update(1)
+                # Collect results as they are completed
+                for future in futures:
+                    data_dict = future.result()
+                    data_dict_list.append(data_dict)
+                    pbar.update(1)
     assert len(data_dict_list) == len(
         df_or_ase_atoms_list
     ), "Data loss during parallel processing"

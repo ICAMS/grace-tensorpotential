@@ -21,6 +21,7 @@ CELL_VECTORS: Final[str] = "cell_vectors"
 ATOMIC_POS: Final[str] = "atomic_positions"
 
 ATOMIC_MU_I: Final[str] = "atomic_mu_i"
+ATOMIC_MU_I_LOCAL: Final[str] = "atomic_mu_i_local"
 ATOMIC_MAGMOM: Final[str] = "atomic_magmom"
 ATOMS_TO_STRUCTURE_MAP: Final[str] = "map_atoms_to_structure"
 BONDS_TO_STRUCTURE_MAP: Final[str] = "map_bonds_to_structure"

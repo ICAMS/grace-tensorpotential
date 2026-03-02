@@ -6,6 +6,11 @@ from typing import Literal, Any
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
+
+
 from ase.data import atomic_numbers
 from ase.units import _eps0, _e
 
@@ -79,7 +84,7 @@ class BondLength(TPInstruction):
     def build(self, float_dtype):
         self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
 
         return tf.sqrt(
             tf.reduce_sum(
@@ -137,7 +142,7 @@ class ScaledBondVector(TPInstruction):
             self.epsilon = tf.constant(1e-10, dtype=float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         r_ij = input_data[self.bonds]
         d_ij = input_data[self.bond_length]
         return r_ij / (d_ij + self.epsilon)
@@ -168,18 +173,18 @@ class SphericalHarmonic(TPEquivariantInstruction):
         else:
             raise ValueError(f"Unknown entry for {vhat=}")
 
-        self.sg = SphericalHarmonics(self.lmax, **kwargs)
+        self.sh = SphericalHarmonics(self.lmax, **kwargs)
         self.coupling_meta_data = self.init_uncoupled_meta_data()
         self.coupling_origin = None
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
-        if not self.sg.is_built:
-            self.sg.build(float_dtype)
+        if not self.sh.is_built:
+            self.sh.build(float_dtype)
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         vhat = input_data[self.vhat]
-        return self.sg(vhat)
+        return self.sh(vhat)
 
 
 @capture_init_args
@@ -227,7 +232,7 @@ class BondAvgSphericalHarmonic(TPEquivariantInstruction):
             self.rcut = tf.constant(self.rcut, dtype=float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         y = input_data[self.sg.name]
         r = input_data[self.bonds.name]
         # cut_func = self.cutoff_func(r / self.rcut, self.p)
@@ -302,7 +307,7 @@ class RadialBasis(TPInstruction):
             # self.norm = tf.cast(np.sqrt(self.basis_function.nfunc), dtype=float_dtype)
 
     @tf.Module.with_name_scope
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         r = input_data[self.input_name]
         basis = self.basis_function(r)  # * self.norm
 
@@ -335,10 +340,8 @@ class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMi
     """
 
     input_tensor_spec = {
-        constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
         constants.BOND_MU_I: {"shape": [None], "dtype": "int"},
         constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -439,12 +442,13 @@ class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMi
         self._init_args["cutoff_dict"] = new_cutoff_dict
         self._init_args["element_map"] = new_element_map
 
-    def frwrd(self, input_data: dict, training: bool = False):
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         d = input_data[self.input_name]
         mu_i = input_data[constants.BOND_MU_I]
         mu_j = input_data[constants.BOND_MU_J]
         mu_ij = mu_j + mu_i * tf.constant(self.nelem, dtype=mu_i.dtype)
         cutoff = tf.gather(self.bond_cutoff_map, mu_ij)
+        cutoff = tf.cast(cutoff, dtype=d.dtype)
         if self.basis_type == "Cheb":
             basis = compute_cheb_radial_basis(
                 d, self.nfunc, cutoff, self.cutoff_function_param
@@ -540,7 +544,7 @@ class LinearRadialFunction(TPInstruction):
                 )
         self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         basis = input_data[self.basis_name]
 
         y = tf.einsum("nlk,ak->anl", self.crad, basis)
@@ -664,7 +668,7 @@ class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
         super().finalize_lora_update()
         self.mlp.finalize_lora_update()
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         basis = input_data[self.basis_name]
 
         if self.chemical_embedding_i is not None:
@@ -702,10 +706,10 @@ class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
         self,
         n_rad_max: int,
         lmax: int,
+        name: str = "MLPRadialFunction",
         basis: RadialBasis | TPInstruction | str = None,
         input_shape: int = None,
         hidden_layers: list[int] = None,
-        name="MLPRadialFunction",
         activation: list[str] | str = None,
         no_weight_decay: bool = True,
         init_type: str = "normal",
@@ -818,15 +822,16 @@ class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
         if self.chem_embedding is not None:
             self.embed_transform.finalize_lora_update()
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         basis = input_data[self.basis_name]
-
         for act, layer in zip(self.activation, self.layers):
             act = ACTIVATION_DICT[act]
             basis = act(layer(basis))
         y = self.layers[-1](basis)
 
         if self.chem_embedding is not None:
+            if local:
+                raise NotImplementedError
             z = self.embed_transform(input_data[self.chem_embedding.name])
             embedding = 1.0
             if self.embed_j:
@@ -923,7 +928,7 @@ class ScalarChemicalEmbedding(
 
             self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         if not self.lora:
             return self.w
         else:
@@ -994,7 +999,6 @@ class SingleParticleBasisFunctionScalarInd(
         constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
         constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -1081,13 +1085,11 @@ class SingleParticleBasisFunctionScalarInd(
             )
             self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         r = input_data[self.radial.name]
         y = input_data[self.angular.name]
         if self.slice_angular is not None:
             y = y[:, : self.slice_angular]
-
-        # y = y[:, tf.newaxis, :]
 
         a_nl = tf.einsum("jnl,jl->jnl", r, y)
         if self.indicator is not None:
@@ -1106,12 +1108,18 @@ class SingleParticleBasisFunctionScalarInd(
 
         if self.sum_neighbors:
             ind_i = input_data[constants.BOND_IND_I]
-            batch_tot_nat = input_data[constants.N_ATOMS_BATCH_TOTAL]
+            batch_tot_nat = (
+                tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+                if local
+                else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+            )
             a_nl = tf.math.unsorted_segment_sum(
                 a_nl, segment_ids=ind_i, num_segments=batch_tot_nat
             )
             if self.inv_avg_n_neigh is not None:
                 if self.per_specie_n_neigh:
+                    if local:
+                        raise NotImplementedError()
                     nneigh_norm = tf.gather(
                         self.inv_avg_n_neigh,
                         input_data[constants.ATOMIC_MU_I],
@@ -1144,7 +1152,6 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
     input_tensor_spec = {
         constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
         constants.BOND_IND_J: {"shape": [None], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -1154,62 +1161,38 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         name: str,
         lmax: int,
         Lmax: int,
-        radial: TPInstruction = None,
-        radial_basis: RadialBasis | TPInstruction = None,
-        hidden_layers: list[int] = None,
+        radial: TPInstruction,
         keep_parity: list[list] = None,
         history_drop_list: list = None,
         l_max_ind: int = None,
         max_sum_l: int = None,
         sum_neighbors: bool = True,
-        avg_n_neigh: float | dict = 1.0,
+        avg_n_neigh: float = 1.0,
         normalize: bool = False,
+        radial_basis: RadialBasis | TPInstruction = None,
+        hidden_layers: list[int] = None,
         **kwargs,
     ):
         super().__init__(name=name, lmax=Lmax)
         self.angular = angular
         self.indicator = indicator
-
         self.radial = radial
-        self.internal_radial = False
-        if self.radial is None:
-            assert (
-                radial_basis is not None
-            ), f"{self.__class__.__name__}_{self.name}: If :radial: is None, :radial_basis: should be provided"
-            if hidden_layers is None:
-                self.hidden_layers = [64, 64]
-            else:
-                self.hidden_layers = hidden_layers
-            self.radial_basis = radial_basis
-            self.internal_radial = True
 
-        if self.internal_radial:
-            self.n_out = self.indicator.n_out
-        else:
-            self.n_out = self.radial.n_rad_max
+        self.n_out = self.radial.n_rad_max
 
         self.sum_neighbors = sum_neighbors
-        if isinstance(avg_n_neigh, float):
-            self.per_specie_n_neigh = False
-            self.inv_avg_n_neigh = 1.0 / avg_n_neigh
-        elif isinstance(avg_n_neigh, dict):
-            self.per_specie_n_neigh = True
-            self.inv_avg_n_neigh = np.zeros((len(avg_n_neigh), 1))
-            for k, v in avg_n_neigh.items():
-                val = v if v > 0 else 1.0
-                self.inv_avg_n_neigh[k] = 1.0 / val
-        else:
-            raise TypeError("avg_n_neigh must be float or dict")
+
+        self.per_specie_n_neigh = False
+        self.inv_avg_n_neigh = 1.0 / avg_n_neigh
 
         assert self.angular.coupling_meta_data is not None
         assert self.indicator.coupling_meta_data is not None
 
         if self.angular.lmax > lmax:
-            if self.radial is not None:
-                assert self.radial.lmax == lmax, (
-                    f"Radial function is prepared for lmax={self.radial.lmax},"
-                    f" while currently specified value is {lmax=}"
-                )
+            assert self.radial.lmax == lmax, (
+                f"Radial function is prepared for lmax={self.radial.lmax},"
+                f" while currently specified value is {lmax=}"
+            )
             self.slice_angular = (lmax + 1) ** 2
         else:
             self.slice_angular = None
@@ -1238,31 +1221,19 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             normalize=normalize,
         )
         self.coupling_origin = [self.angular.name, self.indicator.name]
-        if self.internal_radial:
-            left = np.concatenate(self.coupling_meta_data["left_inds"]).reshape(-1, 1)
-            right = np.concatenate(self.coupling_meta_data["right_inds"]).reshape(-1, 1)
-            il = []
-            for i, row in self.coupling_meta_data.iterrows():
-                il.append([row["l"]] * len(row["left_inds"]))
-            il = np.concatenate(il).reshape(-1, 1)
-            self.lr_inds = tf.constant(
-                np.concatenate([il, left, right], axis=1), dtype=tf.int32
-            )
-        else:
-            self.lr_inds = tf.constant(
-                np.concatenate(
-                    [
-                        np.concatenate(self.coupling_meta_data["left_inds"]).reshape(
-                            -1, 1
-                        ),
-                        np.concatenate(self.coupling_meta_data["right_inds"]).reshape(
-                            -1, 1
-                        ),
-                    ],
-                    axis=1,
-                ),
-                dtype=tf.int32,
-            )
+
+        self.lr_inds = tf.constant(
+            np.concatenate(
+                [
+                    np.concatenate(self.coupling_meta_data["left_inds"]).reshape(-1, 1),
+                    np.concatenate(self.coupling_meta_data["right_inds"]).reshape(
+                        -1, 1
+                    ),
+                ],
+                axis=1,
+            ),
+            dtype=tf.int32,
+        )
 
         cgs = self.coupling_meta_data["cg_list"]
         sum_ind = []
@@ -1274,33 +1245,12 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         self.nfunc = tf.constant(nfunc, dtype=tf.int32)
 
         self.cg = np.concatenate(cgs).reshape(-1, 1, 1)
-        if self.internal_radial:
-            self.mlp = FullyConnectedMLP(
-                input_size=radial_basis.nfunc,
-                hidden_layers=self.hidden_layers,
-                output_size=self.indicator.n_out
-                * (self.angular.lmax + 1)
-                * (self.lmax + 1),
-                name=self.name + "_MLP",
-            )
-            self.l_tile = tf.cast(
-                tf.concat(
-                    [tf.ones((2 * l + 1)) * l for l in range(self.angular.lmax + 1)],
-                    axis=0,
-                ),
-                tf.int32,
-            )
-        else:
-            self.mlp = None
 
         init_coupling_symbols(self)
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
-            if self.mlp is not None and not self.mlp.is_built:
-                self.mlp.build(float_dtype)
-
             self.inv_avg_n_neigh = tf.constant(
                 self.inv_avg_n_neigh,
                 dtype=float_dtype,
@@ -1309,31 +1259,26 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             self.cg = tf.constant(self.cg, dtype=float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
         ind_i = input_data[constants.BOND_IND_I]
         ind_j = input_data[constants.BOND_IND_J]
-        batch_tot_nat = input_data[constants.N_ATOMS_BATCH_TOTAL]
+        y = input_data[self.angular.name]
 
         I = input_data[self.indicator.name]
-        y = input_data[self.angular.name]
         bond_I = tf.gather(I, ind_j, axis=0)
 
-        if self.internal_radial:
-            rbasis = input_data[self.radial_basis.name]
-            r = self.mlp(rbasis)
-            r = tf.reshape(r, [-1, self.n_out, self.lmax + 1, self.angular.lmax + 1])
-            r = tf.gather(r, self.l_tile, axis=-1)
-
-            prod = tf.einsum("jl,jnol->jnol", y, r)
-            prod = tf.einsum("jnol,jnr->jnolr", prod, bond_I)
-        else:
-            r = input_data[self.radial.name]
-            if self.slice_angular is not None:
-                y = y[:, : self.slice_angular]
-            bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
-            prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
+        r = input_data[self.radial.name]
+        if self.slice_angular is not None:
+            y = y[:, : self.slice_angular]
+        bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
+        prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
 
         if self.sum_neighbors:
+            batch_tot_nat = (
+                tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+                if local
+                else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+            )
             prod = tf.math.unsorted_segment_sum(
                 prod,
                 segment_ids=ind_i,
@@ -1341,19 +1286,9 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                 name=f"sum_nei_{self.name}",
             )
             if self.inv_avg_n_neigh is not None:
-                if self.per_specie_n_neigh:
-                    nneigh_norm = tf.gather(
-                        self.inv_avg_n_neigh,
-                        input_data[constants.ATOMIC_MU_I],
-                        axis=0,
-                    )
-                    prod *= nneigh_norm[:, :, tf.newaxis]
-                else:
-                    prod *= self.inv_avg_n_neigh
-        if self.internal_radial:
-            tnsr = tf.transpose(prod, [2, 3, 4, 0, 1])  # tf.roll
-        else:
-            tnsr = tf.transpose(prod, [2, 3, 0, 1])  # tf.roll
+                prod *= self.inv_avg_n_neigh
+
+        tnsr = tf.transpose(prod, [2, 3, 0, 1])  # tf.roll
 
         prod_g = tf.gather_nd(params=tnsr, indices=self.lr_inds)
         prod_g = prod_g * self.cg
@@ -1423,33 +1358,34 @@ class ProductFunction(TPEquivariantInstruction):
         self.max_sum_l = max_sum_l
 
         # TODO: This must not be done
-        self.lmax = lmax
-
+        # self.lmax = lmax
+        input_lmax = lmax
+        output_Lmax = Lmax
         self.lmax_A = lmax_left
         self.lmax_B = lmax_right
         self.lmax_hist = lmax_hist
         self.lmax_hist_A = lmax_hist_left
         self.lmax_hist_B = lmax_hist_right
-        self.Lmax = Lmax
+        # self.Lmax = Lmax
         self.coupling_origin = [self.left.name, self.right.name]
         # to be able to re-write it later, otherwise checkpoint will fail
         # if history_drop_list == "DEFAULT":
         #     history_drop_list = EXCLUSION_HIST_LIST
         # self.history_drop_list = NoDependency(history_drop_list or [])
         self.history_drop_list = history_drop_list
-        self.init_coupling()
+        self.init_coupling(input_lmax, output_Lmax)
 
-    def init_coupling(self):
+    def init_coupling(self, input_lmax, output_Lmax):
         self.coupling_meta_data = real_coupling_metainformation(
             A=self.left.coupling_meta_data,
             B=self.right.coupling_meta_data,
-            lmax=self.lmax,
+            lmax=input_lmax,
             lmax_A=self.lmax_A,
             lmax_B=self.lmax_B,
             lmax_hist=self.lmax_hist,
             lmax_hist_A=self.lmax_hist_A,
             lmax_hist_B=self.lmax_hist_B,
-            Lmax=self.Lmax,
+            Lmax=output_Lmax,
             is_A_B_equal=self.is_left_right_equal,
             history_drop_list=self.history_drop_list,
             max_sum_l=self.max_sum_l,
@@ -1485,7 +1421,7 @@ class ProductFunction(TPEquivariantInstruction):
             self.cg = tf.constant(self.cg, dtype=float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         left = input_data[self.left.name]
         right = input_data[self.right.name]
 
@@ -1622,7 +1558,7 @@ class CropProductFunction(TPEquivariantInstruction):
             self.cg = tf.constant(self.cg, dtype=float_dtype)
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         left = input_data[self.left.name]
         left = left[:, : self.n_out, :]
 
@@ -1839,7 +1775,7 @@ class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
             total_l2_regularization += tf.reduce_sum(tf.square(var))
         return total_l2_regularization
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         if self.init_collection == "zeros":
             init_func = tf.zeros
         else:
@@ -1901,7 +1837,6 @@ class FunctionReduceN(
     TPEquivariantInstruction, ElementsReduceInstructionMixin, LORAInstructionMixin
 ):
     input_tensor_spec = {
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
     }
 
@@ -2157,15 +2092,14 @@ class FunctionReduceN(
             total_l2_regularization += tf.reduce_sum(tf.square(var))
         return total_l2_regularization
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         init_func = tf.zeros if self.init_collection == "zeros" else tf.ones
-        collection = init_func(
-            [
-                self.coupling_meta_data.shape[0],
-                input_data[constants.N_ATOMS_BATCH_TOTAL],
-                self.n_out,
-            ],
-            dtype=self.float_dtype,
+        collection = None
+
+        atomic_mu_i = (
+            input_data[constants.ATOMIC_MU_I_LOCAL]
+            if local
+            else input_data[constants.ATOMIC_MU_I]
         )
         for instr in self.instructions:
             instruction_collection = self.collector[instr.name]
@@ -2174,19 +2108,28 @@ class FunctionReduceN(
                 instruction_collection["func_collect_ind"],
                 axis=2,
             )
+            if collection is None:
+                collection = init_func(
+                    [
+                        self.coupling_meta_data.shape[0],
+                        tf.shape(atomic_mu_i)[0],
+                        self.n_out,
+                    ],
+                    dtype=self.float_dtype,
+                )
             w = getattr(self, f"reducing_{instr.name}")
             # lora
             if self.lora:
                 lora_tensors = getattr(self, f"reducing_{instr.name}_lora_tensors")
                 w = w + lora_reconstruction(*lora_tensors, lora_config=self.lora_config)
+
+            w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             if self.is_central_atom_type_dependent:
                 eq = "aknw,anw->wak"
+                w = tf.gather(w, atomic_mu_i, axis=0)
+                A_r = A_r[: tf.shape(atomic_mu_i)[0]]
             else:
                 eq = "knw,anw->wak"
-            w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
-            # For performance
-            if self.is_central_atom_type_dependent:
-                w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
 
             norm = getattr(self, f"norm_{instr.name}")
             pr = tf.einsum(eq, w, A_r, name=f"ein_{instr.name}") * norm
@@ -2348,7 +2291,7 @@ class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin
             self.float_dtype = float_dtype
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         collection = []
         for instr in self.instructions:
             instruction_collection = self.collector[instr.name]
@@ -2388,7 +2331,6 @@ class FCRight2Left(
     TPEquivariantInstruction, ElementsReduceInstructionMixin, LORAInstructionMixin
 ):
     input_tensor_spec = {
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
     }
 
@@ -2575,7 +2517,6 @@ class FCRight2Left(
                     name=f"w_right_FC",
                 )
             elif self.init_vars == "zeros":
-                # TODO: split left right initializers
                 self.w_right = tf.Variable(
                     tf.random.normal(
                         c_shape_right, stddev=init_value, dtype=float_dtype
@@ -2637,8 +2578,14 @@ class FCRight2Left(
             total_l2_regularization += tf.reduce_sum(tf.square(var))
         return total_l2_regularization
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         left = input_data[self.left.name]
+
+        atomic_mu_i = (
+            input_data[constants.ATOMIC_MU_I_LOCAL]
+            if local
+            else input_data[constants.ATOMIC_MU_I]
+        )
         if self.left_coefs:
             w_left = self.w_left
             # LORA
@@ -2648,7 +2595,7 @@ class FCRight2Left(
                 )
             w_left = tf.gather(w_left, self.w_tile_left, axis=-1)
             if self.is_central_atom_type_dependent[0]:
-                w_left = tf.gather(w_left, input_data[constants.ATOMIC_MU_I], axis=0)
+                w_left = tf.gather(w_left, atomic_mu_i, axis=0)
                 left = (
                     tf.einsum(self.eq_elem, w_left, left, name=f"ein_left")
                     * self.norm_left
@@ -2669,12 +2616,14 @@ class FCRight2Left(
             )
         w_right = tf.gather(w_right, self.w_tile_right, axis=-1)
         if self.is_central_atom_type_dependent[1]:
-            w_right = tf.gather(w_right, input_data[constants.ATOMIC_MU_I], axis=0)
+            w_right = tf.gather(w_right, atomic_mu_i, axis=0)
+            # w_right = tf.cast(w_right, dtype=right.dtype)
             right = (
                 tf.einsum(self.eq_elem, w_right, right, name=f"ein_right")
                 * self.norm_right
             )
         else:
+            # w_right = tf.cast(w_right, dtype=right.dtype)
             right = (
                 tf.einsum(self.eq, w_right, right, name=f"ein_right") * self.norm_right
             )
@@ -2700,7 +2649,6 @@ class FCRight2Left(
 class InvariantLayerRMSNorm(TPInstruction):
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
-        constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
@@ -2709,6 +2657,7 @@ class InvariantLayerRMSNorm(TPInstruction):
         name: str,
         type: str = "only_nonlin",
         init: str = "zeros",
+        **kwargs,
     ):
         super().__init__(name=name)
         self.input = inpt
@@ -2757,10 +2706,16 @@ class InvariantLayerRMSNorm(TPInstruction):
             self.epsilon = tf.constant(1e-10, dtype=float_dtype)
         self.is_built = True
 
-    def frwrd(self, input_data: dict, training: bool = False):
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         x = input_data[self.input.name]
+
+        n_at_b_total = (
+            tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+            if local
+            else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+        )
         n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
-        n_at_b_total = input_data[constants.N_ATOMS_BATCH_TOTAL]
+
         r_map = tf.reshape(
             tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1, 1]
         )
@@ -2782,6 +2737,36 @@ class InvariantLayerRMSNorm(TPInstruction):
             r_map < n_at_b_real, nonlin * nl_rms * self.scale, tf.zeros_like(nl_rms)
         )
         return tf.concat([lin[:, tf.newaxis, :], nl_rms], axis=1)
+
+
+@capture_init_args
+class InvariantPade(TPInstruction):
+    input_tensor_spec = {
+        constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        num: TPInstruction,
+        denum: TPInstruction,
+        name: str,
+        **kwargs,
+    ):
+        super().__init__(name=name)
+        self.num = num.name
+        self.denum = denum.name
+        self.n_out = num.n_out
+
+    def build(self, float_dtype):
+        if not self.is_built:
+            pass
+        self.is_built = True
+
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
+        num = input_data[self.num]
+        denum = input_data[self.denum]
+
+        return num / denum
 
 
 @capture_init_args
@@ -2880,7 +2865,7 @@ class FunctionReduceParticular(
             self.float_dtype = float_dtype
             self.is_built = True
 
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data, training=False, local=False):
         collection = tf.zeros(
             [
                 self.coupling_meta_data.shape[0],
@@ -2896,7 +2881,6 @@ class FunctionReduceParticular(
                 instruction_collection["func_collect_ind"],
                 axis=2,
             )
-
             w = tf.gather(
                 getattr(self, f"reducing_{instr.name}"),
                 instruction_collection["w_l_tile"],
@@ -3077,22 +3061,9 @@ class ZBLPotential(TPInstruction, ElementsReduceInstructionMixin):
             + (1 / (nl_dist + self.eps)) * self.d2phi(nl_dist / a) / (a**2)
         )
 
-    # def remap_bond_index(self, mu_i, mu_j):
-    #     mu_ij = tf.cast(
-    #         tf.concat([tf.expand_dims(mu_i, 1), tf.expand_dims(mu_j, 1)], axis=1),
-    #         dtype=tf.float32,
-    #     )
-    #     s = self.nelem * (self.nelem - 1) / 2
-    #     mu_ij = (
-    #         s
-    #         - (self.nelem - tf.reduce_min(mu_ij, axis=1))
-    #         * (self.nelem - tf.reduce_min(mu_ij, axis=1) - 1)
-    #         / 2
-    #         + tf.reduce_max(mu_ij, axis=1)
-    #     )
-    #     return tf.cast(mu_ij, dtype=tf.int32)
-
-    def frwrd(self, input_data: dict, training=False):
+    def frwrd(self, input_data: dict, training=False, local=False):
+        if local:
+            raise NotImplementedError
         d = input_data[self.input_name]
         mu_i = input_data[constants.BOND_MU_I]
         mu_j = input_data[constants.BOND_MU_J]

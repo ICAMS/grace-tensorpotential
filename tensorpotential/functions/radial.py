@@ -46,12 +46,14 @@ class RadialBasisFunction(tf.Module, ABC):
         self.is_build = False
 
     def build(self, float_dtype):
-        self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
-        self.rc = tf.Variable(
-            self.rcut, dtype=float_dtype, name="cutoff", trainable=False
-        )
-        self.epsilon = tf.constant(1e-8, dtype=float_dtype, name="small_epsilon")
-        self.is_build = True
+
+        if not self.is_build:
+            self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
+            self.rc = tf.Variable(
+                self.rcut, dtype=float_dtype, name="cutoff", trainable=False
+            )
+            self.epsilon = tf.constant(1e-10, dtype=float_dtype, name="small_epsilon")
+            self.is_build = True
 
     @abstractmethod
     def compute_basis(self, r):
@@ -82,7 +84,11 @@ class GaussianRadialBasisFunction(RadialBasisFunction):
         normalized: bool = False,
         **kwargs,
     ):
-        super().__init__(nfunc, rcut, name="GaussianRadialBasisFunction")
+        super().__init__(
+            nfunc,
+            rcut,
+            name="GaussianRadialBasisFunction",
+        )
         self.pcut = p
         self.rmin = rmin
         self.grid = np.linspace(self.rmin, self.rcut, self.nfunc).reshape(1, -1)
@@ -137,7 +143,11 @@ class ChebSqrRadialBasisFunction(RadialBasisFunction):
         reversed: bool = False,
         **kwargs,
     ):
-        super().__init__(nfunc, rcut, name="ChebSqrRadialBasisFunction")
+        super().__init__(
+            nfunc,
+            rcut,
+            name="ChebSqrRadialBasisFunction",
+        )
         self.normalized = normalized
         self.lmbda = 1
         self.kind = kind
@@ -181,9 +191,18 @@ class SinBesselRadialBasisFunction(RadialBasisFunction):
     __doc__ = RadialBasisFunction.__doc__ + __doc__
 
     def __init__(
-        self, nfunc: int, rcut: float, p: int, normalized: bool = False, **kwargs
+        self,
+        nfunc: int,
+        rcut: float,
+        p: int,
+        normalized: bool = False,
+        **kwargs,
     ):
-        super().__init__(nfunc, rcut, name="SinBesselRadialBasisFunction")
+        super().__init__(
+            nfunc,
+            rcut,
+            name="SinBesselRadialBasisFunction",
+        )
         self.pcut = p
         self.normalized = normalized
         if self.normalized:
@@ -201,16 +220,21 @@ class SinBesselRadialBasisFunction(RadialBasisFunction):
             self.sigma = np.sqrt(sigma2)
 
     def build(self, float_dtype):
-        self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
-        self.rc = tf.Variable(
-            self.rcut, dtype=float_dtype, name="cutoff", trainable=False
-        )
-        self.epsilon = tf.constant(1e-8, dtype=float_dtype, name="small_epsilon")
-        if self.normalized:
-            self.urc = tf.constant(1.0, dtype=float_dtype, name="urc")
-            self.mu = tf.constant(self.mu, dtype=float_dtype, name="nbessmu")
-            self.sigma = tf.constant(self.sigma, dtype=float_dtype, name="nbesssigma")
-        self.is_build = True
+        enforced_float_dtype = float_dtype
+
+        if not self.is_build:
+            self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
+            self.rc = tf.Variable(
+                self.rcut, dtype=enforced_float_dtype, name="cutoff", trainable=False
+            )
+            self.epsilon = tf.constant(1e-8, dtype=float_dtype, name="small_epsilon")
+            if self.normalized:
+                self.urc = tf.constant(1.0, dtype=float_dtype, name="urc")
+                self.mu = tf.constant(self.mu, dtype=float_dtype, name="nbessmu")
+                self.sigma = tf.constant(
+                    self.sigma, dtype=float_dtype, name="nbesssigma"
+                )
+            self.is_build = True
 
     def compute_basis(self, r):
         n = tf.range(1, 1 + self.nfunc, delta=1, dtype=r.dtype, name="range_sinb")
@@ -240,7 +264,11 @@ class SimplifiedBesselRadialBasisFunction(RadialBasisFunction):
     __doc__ = RadialBasisFunction.__doc__ + __doc__
 
     def __init__(self, nfunc: int, rcut: float, **kwargs):
-        super().__init__(nfunc, rcut, name="SimplifiedBesselRadialBasisFunction")
+        super().__init__(
+            nfunc,
+            rcut,
+            name="SimplifiedBesselRadialBasisFunction",
+        )
 
     def fn(self, r, rc, n):
         return (

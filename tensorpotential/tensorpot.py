@@ -5,6 +5,10 @@ import os
 
 import tensorflow as tf
 
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
+
+
 from tensorpotential.loss import LossFunction
 from tensorpotential.metrics import ComputeMetrics
 from tensorpotential.tpmodel import (
@@ -24,7 +28,6 @@ def get_output_dir(seed=42):
     return path
 
 
-# TODO: this is fit class, should be renamed?
 class TensorPotential:
     """
     Class for fitting tp models
@@ -90,6 +93,8 @@ class TensorPotential:
 
             if not eager_mode:
                 self.decorate_tf_function(jit_compile=jit_compile)
+                # TODO:
+                # self.model.decorate_compute_function(float_dtype = self.float_dtype, jit_compile = jit_compile)
 
             opt = self.fit_config.get("optimizer")
             if opt == "Adam":
@@ -221,23 +226,15 @@ class TensorPotential:
     def __repr__(self):
         return f"{self.__class__.__name__}"
 
-    def save_checkpoint(self, suffix="", checkpoint_name=None, verbose=False):
-        """save checkpoint to checkpoint_dir, overwrite if exists"""
-        checkpoint_name = checkpoint_name or (self.checkpoint_prefix + suffix)
-        if verbose:
-            logging.info(f"Writing checkpoint to {checkpoint_name}.*")
-        if os.path.dirname(checkpoint_name):
-            os.makedirs(os.path.dirname(checkpoint_name), exist_ok=True)
-        self.checkpoint.write(checkpoint_name)
-
     def load_checkpoint(
         self,
+        checkpoint_name=None,
         suffix="",
         expect_partial: bool = False,
         verbose=False,
-        checkpoint_name=None,
-        raise_errors=False,
+        raise_errors=True,
         assert_consumed=False,
+        assert_existing_objects_matched=False,
     ):
         """load checkpoint from checkpoint_dir if exists"""
         if checkpoint_name is None:
@@ -249,6 +246,8 @@ class TensorPotential:
                     status.expect_partial()
             if assert_consumed:
                 status.assert_consumed()
+            elif assert_existing_objects_matched:
+                status.assert_existing_objects_matched()
             if verbose:
                 logging.info(f"Loaded checkpoint from {checkpoint_name}")
         else:
@@ -261,6 +260,15 @@ class TensorPotential:
                     f"No checkpoint index found at {checkpoint_name}.index"
                 )
 
+    def save_checkpoint(self, suffix="", checkpoint_name=None, verbose=False):
+        """save checkpoint to checkpoint_dir, overwrite if exists"""
+        checkpoint_name = checkpoint_name or (self.checkpoint_prefix + suffix)
+        if verbose:
+            logging.info(f"Writing checkpoint to {checkpoint_name}.*")
+        if os.path.dirname(checkpoint_name):
+            os.makedirs(os.path.dirname(checkpoint_name), exist_ok=True)
+        self.checkpoint.write(checkpoint_name)
+
     def save_model(self, model_name=None, jit_compile=True, exact_path=None):
         """Saves model for serving"""
         exact_path = exact_path or os.path.join(self.output_dir, model_name)
@@ -271,6 +279,118 @@ class TensorPotential:
             jit_compile=jit_compile,
             float_dtype=self.float_dtype,
         )
+
+    def save_model_with_aux_computes(
+        self,
+        model_name=None,
+        jit_compile=True,
+        exact_path=None,
+        communicated_keys=None,
+    ):
+        """Saves model with all auxiliary compute functions"""
+        exact_path = exact_path or os.path.join(self.output_dir, model_name)
+        if os.path.dirname(exact_path):
+            os.makedirs(os.path.dirname(exact_path), exist_ok=True)
+
+        try:
+            from tensorpotential.tpmodel import ComputeEnergy
+            from tensorpotential.instructions.output import CreateOutputTarget
+            from tensorpotential import constants as _tc
+
+            # Decide whether to use 2L parallel split
+            from tensorpotential.instructions.compute import (
+                SingleParticleBasisFunctionEquivariantInd,
+            )
+
+            use_2l_parallel = False
+            has_custom_compute = not isinstance(
+                self.model.compute_function, ComputeStructureEnergyAndForcesAndVirial
+            )
+            has_2layer = any(
+                isinstance(ins, SingleParticleBasisFunctionEquivariantInd)
+                for ins in self.model.instructions.values()
+            )
+            model_type = "2L" if has_2layer else "1L"
+
+            extra_aux_computes = {}
+            if not has_custom_compute:
+                has_energy_output = any(
+                    isinstance(ins, CreateOutputTarget)
+                    and ins.name == _tc.PREDICT_ATOMIC_ENERGY
+                    for ins in self.model.instructions.values()
+                )
+                if has_energy_output:
+                    extra_aux_computes["compute_energy"] = ComputeEnergy()
+
+            if not has_custom_compute and has_2layer and communicated_keys is None:
+                # Auto-detect communicated_keys for 2L models
+                try:
+                    from tensorpotential.instructions.instruction_graph_utils import (
+                        infer_communicated_keys,
+                    )
+
+                    communicated_keys = infer_communicated_keys(self.model.instructions)
+                    logging.info(f"Auto-detected communicated_keys={communicated_keys}")
+                except Exception as e:
+                    logging.warning(f"Could not auto-detect communicated_keys: {e}")
+
+            if has_custom_compute:
+                logging.info(
+                    f"Custom compute_function detected for {model_type} model, skipping extra aux functions."
+                )
+            elif communicated_keys and len(communicated_keys) >= 2:
+                use_2l_parallel = True
+            elif communicated_keys:
+                logging.warning(
+                    f"communicated_keys={communicated_keys} has fewer than 2 keys, "
+                    "skipping 2L parallel aux functions."
+                )
+
+            if use_2l_parallel:
+                from tensorpotential.instructions.instruction_graph_utils import (
+                    build_split_tpmodel,
+                )
+
+                logging.info(
+                    f"Saving 2L model with parallel aux functions. Communicated keys: {communicated_keys}"
+                )
+                with self.strategy.scope():
+                    m_aux = build_split_tpmodel(
+                        self.model.instructions,
+                        communicated_keys=communicated_keys,
+                        float_dtype=self.float_dtype,
+                        jit_compile=jit_compile,
+                        extra_aux_computes=extra_aux_computes,
+                    )
+                    m_aux.save_model(
+                        exact_path,
+                        jit_compile=jit_compile,
+                        float_dtype=self.float_dtype,
+                    )
+            else:
+                with self.strategy.scope():
+                    m_aux = TPModel(
+                        instructions=self.model.instructions,
+                        compute_function=self.model.compute_function,
+                        train_function=self.model.train_function,
+                        aux_compute=extra_aux_computes,
+                    )
+                    m_aux.build(self.float_dtype, jit_compile=jit_compile)
+                    m_aux.save_model(
+                        exact_path,
+                        jit_compile=jit_compile,
+                        float_dtype=self.float_dtype,
+                    )
+        except Exception as e:
+            logging.error(f"Failed to save model with auxiliary compute functions: {e}")
+            logging.warning(
+                "Falling back to standard save_model without auxiliary functions."
+            )
+            self.save_model(
+                model_name=model_name,
+                jit_compile=jit_compile,
+                exact_path=exact_path,
+            )
 
     def export_to_yaml(self, model_name=None, exact_filename=None):
         """Export FS-model to YAML file"""

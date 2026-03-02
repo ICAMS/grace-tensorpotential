@@ -3,6 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import tensorflow as tf
+tf.config.experimental.enable_tensor_float_32_execution(False)
+tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 from tensorpotential import constants
 from tensorpotential.tpmodel import TPModel

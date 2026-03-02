@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect
 import logging
 import warnings
+import contextlib
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from enum import Enum
 from typing import Iterable, Literal, Set, Callable, List, Optional, Tuple, Dict, Any
 
@@ -13,6 +15,8 @@ import tensorflow as tf
 import yaml
 from tensorflow.python.trackable.data_structures import ListWrapper
 
+
+tf.config.experimental.enable_tensor_float_32_execution(False)
 # arg-type for TPInstruction.summary()
 summary_verbose_type = Literal[0, 1, 2]
 
@@ -20,6 +24,9 @@ summary_verbose_type = Literal[0, 1, 2]
 class InstructionManager:
     def __init__(self):
         self.instruction_dict: dict = {}
+        self.blocks: dict = defaultdict(dict)
+        self._current_block_stack = []
+        self.communicated_keys: list[str] | None = None
 
     def __enter__(self):
         global _instruction_manager
@@ -30,8 +37,35 @@ class InstructionManager:
         global _instruction_manager
         _instruction_manager = None
 
+    def register(self, instruction: TPInstruction):
+        if instruction.name in self.instruction_dict:
+            raise RuntimeError(
+                f"Instruction name {instruction.name} already used by {self.instruction_dict[instruction.name]}"
+            )
+        self.instruction_dict[instruction.name] = instruction
+
+        # If blocks are active, register this instruction to ALL active blocks
+        # This supports syntax like: with record_block("L1"), record_block("L2"):
+        if self._current_block_stack:
+            for block_name in self._current_block_stack:
+                self.blocks[block_name][instruction.name] = instruction
+
     def get_instructions(self) -> dict[str, TPInstruction]:
         return self.instruction_dict
+
+    def get_block(self, name: str) -> dict[str, TPInstruction]:
+        return self.blocks.get(name, {})
+
+    def get_recorded_blocks(self) -> Any:
+        return self.blocks.keys()
+
+    @contextlib.contextmanager
+    def record_block(self, name: str):
+        self._current_block_stack.append(name)
+        try:
+            yield
+        finally:
+            self._current_block_stack.pop()
 
 
 class NoInstructionManager:
@@ -265,21 +299,15 @@ class TPInstruction(tf.Module, ABC):
         self.is_built = False
         self.training = False
         self._register_instruction_in_context()
-        # TODO: KOSTYL'!!!
         self.n_out = None
 
     def _register_instruction_in_context(self):
         global _instruction_manager
         if _instruction_manager is not None:
-            # check for unique name
-            if self.name in _instruction_manager.instruction_dict:
-                raise RuntimeError(
-                    f"Instruction name {self.name} already used by {_instruction_manager.instruction_dict[self.name]}"
-                )
-            _instruction_manager.instruction_dict[self.name] = self
+            _instruction_manager.register(self)
 
     @abstractmethod
-    def frwrd(self, input_data: dict, training: bool = False):
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         pass
 
     @abstractmethod
@@ -293,21 +321,15 @@ class TPInstruction(tf.Module, ABC):
             info[var.name] = var.get_shape().as_list()
         return info
 
-    # @abstractmethod
-    # def from_dict(self, *args, **kwargs):
-    #     pass
-    #
-    # @abstractmethod
-    # def to_dict(self, *args, **kwargs):
-    #     pass
-
     @classmethod
     def get_instruction_type(cls) -> str:
         return cls._INSTRUCTION_TYPE
 
     @tf.Module.with_name_scope
-    def __call__(self, input_data: dict, training: bool = False) -> dict:
-        output = self.frwrd(input_data, training=training)
+    def __call__(
+        self, input_data: dict, training: bool = False, local: bool = False
+    ) -> dict:
+        output = self.frwrd(input_data, training=training, local=local)
         assert self.name not in input_data, f"{self.name} already exists in input"
 
         input_data[self.name] = output
@@ -379,7 +401,7 @@ class TPEquivariantInstruction(TPInstruction):
         pass
 
     @abstractmethod
-    def frwrd(self, input_data, training=False):
+    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         pass
 
     def init_uncoupled_meta_data(self, l_p_init_list: list[list] = None):

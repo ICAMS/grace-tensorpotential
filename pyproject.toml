@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.7.2"
+version = "0.5.8"
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
@@ -35,6 +35,8 @@ dependencies = [
     "ase",
     "pyyaml>=6.0.2",
     "tqdm",
+    "questionary>=2.0",
+    "rich>=13.0",
 ]
 [project.urls]
 "Homepage" = "https://github.com/ICAMS/grace-tensorpotential"
