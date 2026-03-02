@@ -191,7 +191,8 @@ All GRACE pair styles require `units metal`. The right style depends on your mod
 
 | `pair_style` | Model | TF required | MPI parallel | Virials/stress |
 |---|---|---|---|---|
-| `grace` | 1-layer | yes | single process | needs `pair_forces` |
+| `grace` | 1-layer | yes | yes | needs `pair_forces` |
+| `grace` | 2-layer | yes | single process | needs `pair_forces` |
 | `grace/1layer/chunk` | 1-layer | yes | yes | always available |
 | `grace/2layer/chunk` | 2-layer | yes | yes | always available |
 | `grace/2layer/parallel` | 2-layer | yes | yes | always available |
