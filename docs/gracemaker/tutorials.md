@@ -113,9 +113,6 @@ gracemaker -t
 ```
 
 This will produce `input.yaml` file, which you can further check and tune.
-Please uncomment and set the line in order to reduce training time for this tutorial:
-
-
 
 #### 1.2.2. Run gracemaker
 
