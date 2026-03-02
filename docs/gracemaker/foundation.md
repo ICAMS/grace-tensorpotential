@@ -1,14 +1,50 @@
-# Pretrained GRACE Foundation Models
+# **Pretrained GRACE Foundation Models**
 
-Several GRACE models are pre-trained on large datasets. All models listed use a fixed **6 Å cutoff**.
+Several GRACE models are pre-trained on large datasets.
 
-**NOTE!** You should use the "Full Name" column to refer to the model in LAMMPS and ASE.
+**NOTE\!** You should use the "Full Name" column to refer to the model in LAMMPS and ASE.
 
-***
+## **SMAX models**
+Reference: [arXiv](https://arxiv.org/abs/2602.23489)
+
+The **SMAX** (**Maximum Entropy**) models are trained on a chemistry-agnostic dataset generated via a multicomponent 
+maximum information entropy structure generation protocol.
+
+Unlike traditional datasets that focus on low-energy equilibrium structures, SMAX is constructed to deliberately sample
+broad and diverse regions of configurational space. This provides a robust physical prior for atomic interactions across the entire periodic table, enabling accurate modeling of large-strain phase transformations, defects in complex alloys, and reaction barriers in catalytic systems.
+
+**Custom Cutoffs & Interaction Ranges:** SMAX models utilize a **custom element-dependent cutoff radius** ranging from 
+**5.0 Å to 7.5 Å**.
+
+**Recommendation:** For most general-purpose applications, we recommend using the **SMAX-OMAT** models.
+They offer the best balance of structural robustness (from SMAX) and high-precision energy/force accuracy (from OMat24).
+
+
+
+
+#### **Single-layer, local models**
+
+| Model Name | Full Name | Size | κSRME​ | Description |
+| :---- | :---- | :---- | :---- | :---- |
+| GRACE-1L-SMAX-L | GRACE-1L-SMAX-large | large | 0.696 | Single-layer local (SMAX) |
+| **GRACE-1L-SMAX-OMAT-L** | **GRACE-1L-SMAX-OMAT-large** | **large** | 0.338 | **Single-layer local (SMAX \+ OMat24)** |
+
+#### **Two-layer, semilocal models**
+
+| Model Name | Full Name | Size | κSRME​ | Description |
+| :---- | :---- | :---- | :---- | :---- |
+| GRACE-2L-SMAX-M | GRACE-2L-SMAX-medium | medium | 0.469 | Two-layer semi-local (SMAX) |
+| GRACE-2L-SMAX-L | GRACE-2L-SMAX-large | large | 0.444 | Two-layer semi-local (SMAX) |
+| **GRACE-2L-SMAX-OMAT-M** | **GRACE-2L-SMAX-OMAT-medium** | **medium** | 0.197 | **Two-layer semi-local (SMAX \+ OMat24)** |
+| **GRACE-2L-SMAX-OMAT-L** | **GRACE-2L-SMAX-OMAT-large** | **large** | 0.191 | **Two-layer semi-local (SMAX \+ OMat24)** |
 
 ## OMAT models
 
-The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset. The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by fine-tuning with more emphasis on energies.
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
+
+The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset. 
+The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by fine-tuning with more emphasis on energies.
+ All models listed use a fixed **6 Å cutoff**.
 
 #### Single-layer, local models
 
@@ -33,6 +69,7 @@ The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/d
 ***
 
 ## OAM models
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
 
 These models are first pre-trained on **OMat24** and then fine-tuned on a combination of the [sAlex](https://huggingface.co/datasets/fairchem/OMAT24#salex-dataset) dataset (10.4M structures) and the [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375) dataset (1.58M structures).
 
@@ -51,16 +88,6 @@ These models are first pre-trained on **OMat24** and then fine-tuned on a combin
 | GRACE-2L-OAM | GRACE-2L-OAM | small | 0.880 | 0.294 | Two-layer semi-local |
 | GRACE-2L-OAM-M| GRACE-2L-OMAT-medium-ft-AM | medium | 0.881 | 0.200 | Two-layer semi-local |
 | GRACE-2L-OAM-L| GRACE-2L-OMAT-large-ft-AM | large | 0.889 | **0.168** | Two-layer semi-local |
-
-## MPtraj (deprecated)
-
-Dataset: [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375)  (1.58M structures for 146k materials)
-
-  - `GRACE-1L-MP-r6`:  (old `MP_GRACE_1L_r6_4Nov2024`) single-layer GRACE with a cutoff radius of 6 Å.  
-  - `GRACE-2L-MP-r5`: (old `MP_GRACE_2L_r5_4Nov2024`): two-layer GRACE with a cutoff radius of 5 Å.  
-  - `GRACE-2L-MP-r6`: (old `MP_GRACE_2L_r6_11Nov2024`) two-layer GRACE with a cutoff radius of 6 Å. This model is currently featured on [Matbench Discovery](https://matbench-discovery.materialsproject.org/) and demonstrates high accuracy in predicting thermal conductivity.
- 
-
 
 ---
 
