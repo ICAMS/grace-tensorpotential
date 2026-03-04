@@ -214,8 +214,16 @@ def add_loaded_model_parameter(potential_file_name, args_yaml):
                             + f"differs from that read from model ({element_map})"
                         )
             # otherwise skip until load_and_prepare_datasets
-        if "rcut" in ins_dict:
-            args_yaml[tc.INPUT_CUTOFF] = ins_dict["rcut"]
+        model_cutoff = ins_dict.get("rcut", ins_dict.get("cutoff"))
+        if model_cutoff is not None:
+            user_cutoff = args_yaml.get(tc.INPUT_CUTOFF)
+            if isinstance(user_cutoff, (int, float)) and user_cutoff != model_cutoff:
+                log.warning(
+                    f"User-provided cutoff ({user_cutoff}) differs from "
+                    f"foundation model cutoff ({model_cutoff}). "
+                    f"Using model cutoff={model_cutoff}."
+                )
+            args_yaml[tc.INPUT_CUTOFF] = model_cutoff
             log.info(f"Setting data::{tc.INPUT_CUTOFF} to {args_yaml[tc.INPUT_CUTOFF]}")
         if tc.INPUT_CUTOFF_DICT in ins_dict:
             args_yaml[tc.INPUT_CUTOFF_DICT] = ins_dict[tc.INPUT_CUTOFF_DICT]
