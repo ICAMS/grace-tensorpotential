@@ -28,6 +28,7 @@ data:
   save_dataset: {{SAVE_DATASET}}
 potential:
   {{POTENTIAL_SETTINGS}}
+  {{TRAINABLE_VARIABLE_NAMES}}
 fit:
   loss: {
     energy: { weight: {{ENERGY_LOSS_WEIGHT}}, type: {{LOSS_TYPE}} {{EXTRA_E_ARGS}} },
@@ -370,3 +371,82 @@ def test_e2e_adam_has_scheduler(monkeypatch, tmp_path):
     assert "optimizer: Adam" in content
     assert "scheduler:" in content
     assert "learning_rate:" in content
+
+
+# ---------------------------------------------------------------------------
+# SMAX-OMAT model tree + selection tests
+# ---------------------------------------------------------------------------
+
+
+_SMAX_OMAT_MODELS = [
+    "GRACE-1L-SMAX-OMAT-large",
+    "GRACE-2L-SMAX-OMAT-large",
+    "GRACE-2L-SMAX-OMAT-medium",
+]
+
+
+def test_smax_omat_models_in_tree():
+    """All three SMAX-OMAT models must appear in _FOUNDATION_MODEL_TREE."""
+    from tensorpotential.cli.wizard import _FOUNDATION_MODEL_TREE
+
+    all_names = []
+    for tier_data in _FOUNDATION_MODEL_TREE.values():
+        for ds_data in tier_data.values():
+            for size_list in ds_data.values():
+                all_names.extend(size_list)
+
+    for model in _SMAX_OMAT_MODELS:
+        assert model in all_names, f"{model!r} missing from _FOUNDATION_MODEL_TREE"
+
+
+def test_pure_smax_models_not_in_tree():
+    """Pure SMAX (non-OMAT) models must NOT appear in the wizard tree."""
+    from tensorpotential.cli.wizard import _FOUNDATION_MODEL_TREE
+
+    all_names = []
+    for tier_data in _FOUNDATION_MODEL_TREE.values():
+        for ds_data in tier_data.values():
+            for size_list in ds_data.values():
+                all_names.extend(size_list)
+
+    for name in all_names:
+        assert "SMAX" not in name or "SMAX-OMAT" in name, (
+            f"Pure SMAX model {name!r} should not be in the wizard tree"
+        )
+
+
+def test_ask_foundation_model_smax_1l(monkeypatch, silence_output):
+    """Selecting 1L → SMAX-OMAT → large returns the expected model."""
+    selections = iter(["1L", "SMAX-OMAT", "large"])
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: next(selections),
+    )
+    result = wizard._ask_foundation_model()
+    assert result == "GRACE-1L-SMAX-OMAT-large"
+
+
+def test_ask_foundation_model_smax_2l_medium(monkeypatch, silence_output):
+    """Selecting 2L → SMAX-OMAT → medium returns GRACE-2L-SMAX-OMAT-medium."""
+    selections = iter(["2L", "SMAX-OMAT", "medium"])
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: next(selections),
+    )
+    result = wizard._ask_foundation_model()
+    assert result == "GRACE-2L-SMAX-OMAT-medium"
+
+
+def test_apply_state_frozen_smax_2l():
+    """Frozen finetuning of a 2L-SMAX-OMAT model uses the 2L trainable-variable pattern."""
+    s = _make_state(
+        finetune_model=True,
+        fit_type="finetune foundation model",
+        foundation_model_name="GRACE-2L-SMAX-OMAT-large",
+        finetune_mode="frozen",
+    )
+    result = _apply_state(s, _MINIMAL_TEMPLATE)
+    assert "I2/reducing_" in result, "Expected 2L frozen-weight pattern in output"
+    assert "rho/reducing_" in result

@@ -315,6 +315,9 @@ _FOUNDATION_MODEL_TREE = {
             "medium": ["GRACE-1L-OMAT-medium-base", "GRACE-1L-OMAT-medium-ft-E"],
             "large": ["GRACE-1L-OMAT-large-base", "GRACE-1L-OMAT-large-ft-E"],
         },
+        "SMAX-OMAT": {
+            "large": ["GRACE-1L-SMAX-OMAT-large"],
+        },
     },
     "2L": {
         "OAM": {
@@ -327,6 +330,10 @@ _FOUNDATION_MODEL_TREE = {
             "medium": ["GRACE-2L-OMAT-medium-base", "GRACE-2L-OMAT-medium-ft-E"],
             "large": ["GRACE-2L-OMAT-large-base", "GRACE-2L-OMAT-large-ft-E"],
         },
+        "SMAX-OMAT": {
+            "large": ["GRACE-2L-SMAX-OMAT-large"],
+            "medium": ["GRACE-2L-SMAX-OMAT-medium"],
+        },
     },
 }
 
@@ -336,8 +343,9 @@ _TIER_DESC = {
     "2L": "2L  — two message-passing layers (most accurate)",
 }
 _DS_DESC = {
-    "OAM": "OAM   — OMat24 + sAlex + MPTraj (fine-tuned on AM data)",
-    "OMAT": "OMAT  — OMat24 only (base / ft-E variants)",
+    "OAM": "OAM       — OMat24 + sAlex + MPTraj (fine-tuned on AM data)",
+    "OMAT": "OMAT      — OMat24 only (base / ft-E variants)",
+    "SMAX-OMAT": "SMAX-OMAT — MaxEntropy (SMAX) and OMat24 variants",
 }
 _SIZE_DESC = {
     "standard": "standard  — original model",
@@ -347,9 +355,10 @@ _SIZE_DESC = {
     "r6": "r6  — cutoff 6 Å",
 }
 _VARIANT_DESC = {
-    "base": "base   — pre-trained only",
-    "ft-E": "ft-E   — fine-tuned on energies",
-    "ft-AM": "ft-AM  — fine-tuned on energies + forces",
+    "base": "base      — pre-trained only",
+    "ft-E": "ft-E      — fine-tuned on energies",
+    "ft-AM": "ft-AM     — fine-tuned on energies + forces",
+    "SMAX-OMAT": "SMAX-OMAT — trained on MaxEntropy (SMAX) + OMat24",
 }
 
 
@@ -398,6 +407,9 @@ def _ask_foundation_model() -> str:
         for v in ("ft-AM", "ft-E", "base"):
             if name.endswith("-" + v):
                 return v
+        # SMAX-OMAT family: dataset variant embedded in the name
+        if "-SMAX-OMAT-" in name:
+            return "SMAX-OMAT"
         return name
 
     return _ask_select(
