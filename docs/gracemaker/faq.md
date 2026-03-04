@@ -5,6 +5,7 @@ To prevent this behavior and ensure memory is only allocated as needed, set the 
 ```bash
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 ```
+---
 
 ## Resolving the `TypeError: 'NoneType' object is not callable` in TensorFlow Callbacks
 
@@ -139,6 +140,7 @@ calc.results['stress_std']  # Standard deviation of stress predictions
 
 If you have a node with multiple GPUs, use the `gracemaker ... -m` option to enable data-parallel fitting. In this case, increase the batch size (global batch size).  
 Sometimes you need to use following env variable: `export TF_USE_LEGACY_KERAS=1`
+
 ---
 
 ## How to Reduce TensorFlow Verbosity Level?
@@ -153,6 +155,7 @@ or
 ```bash
 export TF_CPP_MIN_LOG_LEVEL=3
 ```  
+---
 
 ## How to Provide Custom Weights
 
@@ -161,6 +164,8 @@ To assign custom weights to each structure, include the following columns in the
 * `energy_weight`: A single value representing the weight for each structure.
 * `force_weight`: A per-atom array with a size equal to the number of atoms in the structure.
 * `virial_weight`: (optional): A six-component array representing the weight for virial terms.
+
+---
 
 ## How to Get Atomic Virials/Stress with GRACE Models in LAMMPS?
 
@@ -174,6 +179,8 @@ pair_coeff * * /path/to/saved_model Al Li
 `pair_forces` is automatically enabled when running with more than one MPI rank.
 
 Alternatively, use `grace/1layer/chunk`, `grace/2layer/chunk`, or `grace/2layer/parallel` — these always support virials without any extra keyword.
+
+---
 
 ## How to extract basis functions from GRACE models?
 
