@@ -586,6 +586,24 @@ def load_and_prepare_datasets(
                 train_df["energy_corrected"] = train_df["energy"]
                 if test_df is not None:
                     test_df["energy_corrected"] = test_df["energy"]
+            elif reference_energy == "auto":
+                log.info(
+                    "reference_energy=auto: computing per-element E0 offsets by least-squares on train set"
+                )
+                elements = compute_compositions(train_df)
+                n_elements_cols = ["n_" + e for e in elements]
+                n_elements_mat = train_df[n_elements_cols].values
+                total_energy = train_df["energy"].values
+                e0_list, _, _, _ = np.linalg.lstsq(
+                    n_elements_mat, total_energy, rcond=None
+                )
+                auto_esa_dict = {e: float(e0) for e, e0 in zip(elements, e0_list)}
+                log.info(
+                    f"reference_energy=auto: computed single-atom energies (eV): {auto_esa_dict}"
+                )
+                compute_corrected_energy(train_df, esa_dict=auto_esa_dict)
+                if test_df is not None:
+                    compute_corrected_energy(test_df, esa_dict=auto_esa_dict)
             elif isinstance(reference_energy, dict):
                 log.info(
                     f"Construct 'energy_corrected' from 'energy', using single-atom reference {reference_energy=}"
@@ -596,13 +614,13 @@ def load_and_prepare_datasets(
             else:
                 raise RuntimeError(
                     f"'input::data::reference_energy'={reference_energy} is not supported. "
-                    "Only 0 or dict are supported."
+                    "Only 0, 'auto', or a dict are supported."
                 )
         if "energy_corrected" not in train_df.columns or (
             test_df is not None and "energy_corrected" not in test_df.columns
         ):
             raise RuntimeError(
-                "'energy_corrected' column is not in dataset, either provide input::data::reference_energy: 0 or dict "
+                "'energy_corrected' column is not in dataset, either provide input::data::reference_energy: 0, 'auto', or dict "
                 "or generate column externally"
             )
 

@@ -5,6 +5,7 @@ data:
   filename: {{TRAIN_FILENAME}}
   {{TEST_DATA}}
   reference_energy: 0
+  # reference_energy: auto         # auto: least-squares fit of per-element E0 from train set (recommended when abs. energies differ between calculators, e.g. CP2K vs VASP)
   # reference_energy: {Al: -1.23, Li: -3.56}
   save_dataset: {{SAVE_DATASET}}
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar

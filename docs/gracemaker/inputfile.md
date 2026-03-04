@@ -19,6 +19,7 @@ data:
   test_filename: /path/to/test.pckl.gzip
   #  test_size: 0.05 # 
   reference_energy: 0 
+  # reference_energy: auto          # auto: least-squares fit of per-element E0 from train set
   # reference_energy: {Al: -1.23, Li: -3.56}
   # save_dataset: False # default is True
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
