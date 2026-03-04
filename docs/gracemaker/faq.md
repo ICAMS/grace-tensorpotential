@@ -1,3 +1,11 @@
+## How to prevent TensorFlow from reserving all GPU memory
+
+By default, TensorFlow maps nearly all of the available GPU memory (typically around 90%) to the process. 
+To prevent this behavior and ensure memory is only allocated as needed, set the following environment variable:
+```bash
+export TF_FORCE_GPU_ALLOW_GROWTH=true
+```
+
 ## Resolving the `TypeError: 'NoneType' object is not callable` in TensorFlow Callbacks
 
 If you encounter a `TypeError: 'NoneType' object is not callable` error, typically after the first epoch, the traceback will look similar to this:
@@ -60,7 +68,8 @@ Here, the padding for neighbors is only +1.74%. It is recommended to keep this v
 
 | `pair_style` | Model           | TF required | MPI parallel | Virials/stress |
 |---|-----------------|---|---|---|
-| `grace` | 1-layer/2-layer | yes | single process | needs `pair_forces` |
+| `grace` | 1-layer  | yes | yes | needs `pair_forces` |
+| `grace` | 2-layer | yes | no| needs `pair_forces` |
 | `grace/1layer/chunk` | 1-layer         | yes | yes | always available |
 | `grace/2layer/chunk` | 2-layer         | yes | yes | always available |
 | `grace/2layer/parallel` | 2-layer         | yes | yes | always available |
