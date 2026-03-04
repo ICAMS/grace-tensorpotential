@@ -5,22 +5,20 @@ Several GRACE models are pre-trained on large datasets.
 **NOTE\!** You should use the "Full Name" column to refer to the model in LAMMPS and ASE.
 
 ## **SMAX models**
+
 Reference: [arXiv](https://arxiv.org/abs/2602.23489)
 
-The **SMAX** (**Maximum Entropy**) models are trained on a chemistry-agnostic dataset generated via a multicomponent 
+The **SMAX** (**Maximum Entropy**) models are trained on a chemistry-agnostic dataset generated via a multicomponent
 maximum information entropy structure generation protocol.
 
 Unlike traditional datasets that focus on low-energy equilibrium structures, SMAX is constructed to deliberately sample
 broad and diverse regions of configurational space. This provides a robust physical prior for atomic interactions across the entire periodic table, enabling accurate modeling of large-strain phase transformations, defects in complex alloys, and reaction barriers in catalytic systems.
 
-**Custom Cutoffs & Interaction Ranges:** SMAX models utilize a **custom element-dependent cutoff radius** ranging from 
+**Custom Cutoffs & Interaction Ranges:** SMAX models utilize a **custom element-dependent cutoff radius** ranging from
 **5.0 Å to 7.5 Å**.
 
 **Recommendation:** For most general-purpose applications, we recommend using the **SMAX-OMAT** models.
 They offer the best balance of structural robustness (from SMAX) and high-precision energy/force accuracy (from OMat24).
-
-
-
 
 #### **Single-layer, local models**
 
@@ -42,7 +40,7 @@ They offer the best balance of structural robustness (from SMAX) and high-precis
 
 Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
 
-The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset. 
+The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset.
 The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by fine-tuning with more emphasis on energies.
  All models listed use a fixed **6 Å cutoff**.
 
@@ -69,6 +67,7 @@ The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by f
 ***
 
 ## OAM models
+
 Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
 
 These models are first pre-trained on **OMat24** and then fine-tuned on a combination of the [sAlex](https://huggingface.co/datasets/fairchem/OMAT24#salex-dataset) dataset (10.4M structures) and the [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375) dataset (1.58M structures).
@@ -100,8 +99,8 @@ You can use the `grace_models` utility to download pre-trained GRACE models:
 
 These models can be used for simulations within [ASE](../quickstart/#usage-in-ase) and [LAMMPS](../quickstart/#usage-in-lammps).  
 
-By default, all foundational models are stored into `$HOME/.cache/grace`, 
-but you can overwrite it with `GRACE_CACHE` environment variable. 
+By default, all foundational models are stored into `$HOME/.cache/grace`,
+but you can overwrite it with `GRACE_CACHE` environment variable.
 
 ---
 
@@ -112,6 +111,7 @@ Run `grace_models list` to view the list of available models with a `CHECKPOINT:
 You can either download this checkpoint by `grace_models checkpoint <MODEL-NAME>` or it will be done automatically when needed.
 
 In order to fine-tune foundation model, write in `input.yaml::potential` section:
+
 ```yaml
 potential:
   finetune_foundation_model: GRACE-1L-OAM
@@ -119,6 +119,7 @@ potential:
 ```
 
 Also, it is recommended to set small `learning_rate` (i.e. 1e-3 or 1e-4) and evaluate initial metrics `eval_init_stats: True`:
+
 ```yaml
 fit:
 
@@ -128,12 +129,45 @@ fit:
   # evaluate initial metrics
   eval_init_stats: True  
 
-  ### specify trainable variables name pattern (depends on the model config)
-  # trainable_variable_names: ["rho/reducing_", "Z/ChemicalEmbedding"] 
-
 ```
 
-Also, you can generate `input.yaml` for fine-tuning foundation model by running `gracemaker -t` 
+Also, you can generate `input.yaml` for fine-tuning foundation model by running `gracemaker -t`
+
+NOTE! This is naive finetuning approach, since all model parameters will be updated.
+In some cases, this can lead to catastrophic forgetting of the pre-trained knowledge.
+In order to mitigate this issue, we recommend to use frozen weights finetuning approach.
+
+### Frozen weights finetuning
+
+For frozen weights finetuning, you need to specify `trainable_variable_names` parameter in `input.yaml::fit` section.
+Varaible names you can find by running model summary:
+
+```bash
+grace_utils -p ~/.cache/grace/checkpoints/SOME_FOUNDATIONAL_MODEL_NAME/model.yaml  summary -v 1
+```
+
+Few name pattern examples (for GRACE-2L type of models):
+
+- `LinMLPOut2ScalarTarget_` - typical name for linear+MLP energy readout function
+- `I2/reducing_` - ACE expansion coefficients in second layer
+- `rho/reducing_` - ACE expansion coefficients in first layer
+- `I1/reducing_` - ACE expansion coefficients for message being sent from first layer to second layer
+
+Recommended trainable variables that will preserve the pre-trained knowledge of non-affected chemical elements:
+
+- for GRACE-2L models
+
+```yaml
+fit:
+  trainable_variable_names: ["I2/reducing_" ,"rho/reducing_","I1/reducing_"]
+```
+
+- for GRACE-1L models
+
+```yaml
+fit:
+  trainable_variable_names: ["rho/reducing_"]
+```
 
 ---
 
@@ -141,6 +175,7 @@ Also, you can generate `input.yaml` for fine-tuning foundation model by running 
 
 You can add user-defined models to the local registry of foundation models.
 You need to create a `$HOME/.cache/grace/models_registry.yaml` file with a content:
+
 ```yaml
 FULL-MODEL-NAME:
   path: /path/to/saved_mode

@@ -247,6 +247,7 @@ class _WizardState:
     fit_type: str = "finetune"
     finetune_model: bool = False
     foundation_model_name: str = ""
+    finetune_mode: str = "naive"  # "naive" or "frozen"
     preset_name: str = ""
     preset_complexity: str = "medium"
     cutoff: float = 6.0
@@ -527,6 +528,24 @@ def _section_model(s: _WizardState) -> _WizardState:
         _success(f"{label}: {s.foundation_model_name}")
         if s.checkpoint_name:
             _success(f"Checkpoint: {s.checkpoint_name}")
+
+        # Finetuning mode selection
+        if s.fit_type == "finetune foundation model":
+            s.finetune_mode = _ask_select(
+                "Finetuning mode:",
+                choices=[
+                    "naive finetuning (all model parameters will be updated)",
+                    "frozen weights (only some parameters will be updated)",
+                ],
+                default="naive finetuning (all model parameters will be updated)",
+            )
+            # Normalise to short key
+            if s.finetune_mode.startswith("frozen"):
+                s.finetune_mode = "frozen"
+            else:
+                s.finetune_mode = "naive"
+            _success(f"Finetuning mode: {s.finetune_mode}")
+
         s.learning_rate = 0.001
         s.eval_init_stats = True
         if s.fit_type == "continue fit":
@@ -721,6 +740,8 @@ def _show_review(s: _WizardState):
                 "Model",
                 f"{s.preset_name} / {s.preset_complexity}  cutoff={s.cutoff} Å",
             )
+        if s.finetune_model and s.fit_type == "finetune foundation model":
+            t.add_row("Finetuning mode", s.finetune_mode)
         t.add_row("Eval initial stats", str(s.eval_init_stats))
         t.add_row("Reset epoch/step", str(s.reset_epoch_and_step))
         t.add_row("Optimizer", s.optimizer)
@@ -763,6 +784,8 @@ def _show_review(s: _WizardState):
             print(
                 f"  Model:       {s.preset_name}/{s.preset_complexity}  cutoff={s.cutoff}"
             )
+        if s.finetune_model and s.fit_type == "finetune foundation model":
+            print(f"  Finetune:    {s.finetune_mode}")
         print(f"  Eval init:   {s.eval_init_stats}")
         print(f"  Reset epoch: {s.reset_epoch_and_step}")
         print(f"  Optimizer:   {s.optimizer}")
@@ -819,6 +842,17 @@ def _apply_state(s: _WizardState, template: str) -> str:
     template = template.replace("{{POTENTIAL_SETTINGS}}", potential_block)
     template = template.replace("{{eval_init_stats}}", str(s.eval_init_stats))
     template = template.replace("{{RESET_EPOCH}}", str(s.reset_epoch_and_step))
+
+    # Frozen weights finetuning
+    trainable_var_str = ""
+    if s.finetune_mode == "frozen":
+        if "2L" in s.foundation_model_name:
+            trainable_var_str = (
+                'trainable_variable_names: ["I2/reducing_", "rho/reducing_", "I1/reducing_"]'
+            )
+        else:
+            trainable_var_str = 'trainable_variable_names: ["rho/reducing_"]'
+    template = template.replace("{{TRAINABLE_VARIABLE_NAMES}}", trainable_var_str)
 
     # Optimizer block
     if s.optimizer in ("L-BFGS-B", "BFGS"):

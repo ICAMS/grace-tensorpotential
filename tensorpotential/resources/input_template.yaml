@@ -36,6 +36,7 @@ fit:
   jit_compile: True
   eval_init_stats: {{eval_init_stats}} # to evaluate initial metrics
   reset_epoch_and_step: {{RESET_EPOCH}}
+  {{TRAINABLE_VARIABLE_NAMES}}
 
   train_max_n_buckets: auto # max number of buckets (group of batches of same shape) in train set
   test_max_n_buckets: auto # same for test
