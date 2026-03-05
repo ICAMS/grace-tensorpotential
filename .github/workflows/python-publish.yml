@@ -11,6 +11,7 @@ name: Publish Python package
 on:
   release:
     types: [published]
+  workflow_dispatch: # Adds a manual "Run workflow" button
 
 permissions:
   contents: read
