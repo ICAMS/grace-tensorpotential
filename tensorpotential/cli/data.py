@@ -544,6 +544,187 @@ def load_and_prepare_distributed_datasets(args_yaml, seed=1234, strategy=None):
     )
 
 
+def select_representative_structures(
+    train_df: pd.DataFrame,
+    max_structures: int = 50,
+    seed: int = 42,
+) -> tuple[list, np.ndarray]:
+    """Select diverse structures from train_df covering all element combinations.
+
+    Stratified sampling by composition signature. If more structures than
+    max_structures are selected, a warning is issued but all are kept.
+    """
+    np.random.seed(seed)
+
+    def get_comp_sig(at):
+        return tuple(sorted(set(at.get_chemical_symbols())))
+
+    df = train_df.copy()
+    df["_comp_sig"] = df[tc.COLUMN_ASE_ATOMS].map(get_comp_sig)
+    df["_n_atoms"] = df[tc.COLUMN_ASE_ATOMS].map(len)
+
+    groups = df.groupby("_comp_sig")
+    samples_per_group = max(1, max_structures // len(groups))
+
+    selected_idx = []
+    for _comp_sig, group_df in groups:
+        # prefer moderate-sized structures (10-100 atoms)
+        subset = group_df[(group_df["_n_atoms"] >= 10) & (group_df["_n_atoms"] <= 100)]
+        if len(subset) == 0:
+            subset = group_df
+        n_sample = min(samples_per_group, len(subset))
+        sampled = subset.sample(n=n_sample, random_state=seed)
+        selected_idx.extend(sampled.index.tolist())
+
+    if len(selected_idx) > max_structures:
+        log.warning(
+            f"select_representative_structures: selected {len(selected_idx)} structures "
+            f"(requested max: {max_structures}). Using all for better element coverage."
+        )
+
+    selected_idx = np.array(selected_idx)
+    selected_atoms = [train_df.loc[i, tc.COLUMN_ASE_ATOMS] for i in selected_idx]
+    return selected_atoms, selected_idx
+
+
+def build_composition_matrix(atoms_list: list, elements: list) -> np.ndarray:
+    """Build composition matrix: rows=structures, cols=elements (alphabetical order)."""
+    n_structures = len(atoms_list)
+    n_elements = len(elements)
+    composition_matrix = np.zeros((n_structures, n_elements))
+    for i, at in enumerate(atoms_list):
+        syms = at.get_chemical_symbols()
+        for j, el in enumerate(elements):
+            composition_matrix[i, j] = syms.count(el)
+    return composition_matrix
+
+
+def compute_fm_energy_shift_auto(
+    train_df: pd.DataFrame,
+    checkpoint_folder: str,
+    max_structures: int = 50,
+    seed: int = 42,
+) -> dict:
+    """Compute per-element energy shifts between FM predictions and DFT reference.
+
+    Solves: A @ x = (E_DFT - E_FM), where A is composition matrix.
+    Returns {element_symbol: shift_eV}.
+    """
+    from tensorpotential.calculator.asecalculator import TPCalculator
+    from tensorpotential.tensorpot import TensorPotential
+    from tensorpotential.instructions.base import load_instructions
+
+    log.info(f"FM shift auto: selecting up to {max_structures} representative structures")
+    selected_atoms, selected_idx = select_representative_structures(
+        train_df, max_structures=max_structures, seed=seed
+    )
+    log.info(f"FM shift auto: selected {len(selected_atoms)} structures")
+
+    model_path = os.path.join(checkpoint_folder, "model.yaml")
+    ckpt_prefix = os.path.join(checkpoint_folder, "checkpoint")
+    log.info(f"FM shift auto: loading FM from {model_path}")
+
+    with tf.device("/cpu:0"):
+        instructions = load_instructions(model_path)
+        tp = TensorPotential(potential=instructions)
+        tp.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
+        calc = TPCalculator(tp.model)
+        e_fm = np.array([calc.get_potential_energy(at.copy()) for at in selected_atoms])
+
+    e_dft = train_df.loc[selected_idx, "energy_corrected"].values
+
+    # Extract elements from selected structures (sorted, consistent ordering)
+    all_syms = set()
+    for at in selected_atoms:
+        all_syms.update(at.get_chemical_symbols())
+    elements = sorted(all_syms)
+
+    composition_matrix = build_composition_matrix(selected_atoms, elements)
+    energy_diff = e_dft - e_fm
+
+    log.info(f"FM shift auto: solving least-squares for {len(elements)} elements")
+    shifts, residuals, rank, _ = np.linalg.lstsq(composition_matrix, energy_diff, rcond=None)
+
+    shift_dict = {el: float(shifts[i]) for i, el in enumerate(elements)}
+    log.info(f"FM shift auto: per-element shifts (eV): {shift_dict}")
+    if len(residuals) > 0:
+        log.info(f"FM shift auto: residual norm = {np.sqrt(residuals[0]):.3e} eV")
+
+    return shift_dict
+
+
+def inject_or_update_atomic_shift_in_model(
+    instructions_dict: dict,
+    fm_shift_dict: dict,
+    element_map: dict,
+) -> None:
+    """Model surgery: add FM-based per-element energy shifts to the model.
+
+    Finds the existing ConstantScaleShiftTarget and ADDS the FM shifts to any
+    existing atomic_shift_map. Creates a new instruction if none exists.
+    Modifies instructions_dict in-place.
+    """
+    from tensorpotential.instructions.output import ConstantScaleShiftTarget, CreateOutputTarget
+    import tensorpotential.constants as _tc
+
+    # {element: shift} -> {mu_index: shift}
+    mu_shift_map = {element_map[el]: shift for el, shift in fm_shift_dict.items() if el in element_map}
+    log.info(f"FM model surgery: mu_index shift map = {mu_shift_map}")
+
+    # Find existing ConstantScaleShiftTarget
+    const_shift_inst = None
+    for name, ins in instructions_dict.items():
+        if isinstance(ins, ConstantScaleShiftTarget):
+            const_shift_inst = ins
+            log.info(f"FM model surgery: found existing ConstantScaleShiftTarget '{name}'")
+            break
+
+    if const_shift_inst is not None:
+        # Merge: add FM shifts to existing atomic_shift_map
+        existing_map = const_shift_inst._init_args.get("atomic_shift_map") or {}
+        merged = dict(existing_map)
+        for mu, fm_shift in mu_shift_map.items():
+            old_val = merged.get(mu, 0.0)
+            merged[mu] = old_val + fm_shift
+            log.info(f"  mu={mu}: {old_val:.6f} + {fm_shift:.6f} = {merged[mu]:.6f}")
+
+        # Update _init_args (used by save_instructions_dict)
+        const_shift_inst._init_args["atomic_shift_map"] = merged
+        # Update numpy array (used by TensorPotential.build())
+        n_elements = len(element_map)
+        new_array = np.zeros(n_elements)
+        for mu, val in merged.items():
+            new_array[mu] = val
+        const_shift_inst.atomic_shift_map = new_array
+        const_shift_inst.apply_shift = True
+        log.info("FM model surgery: updated existing ConstantScaleShiftTarget")
+
+    else:
+        # Create new ConstantScaleShiftTarget wrapping CreateOutputTarget for atomic energy
+        log.info("FM model surgery: no existing ConstantScaleShiftTarget, creating new one")
+        output_target = None
+        for name, ins in instructions_dict.items():
+            if isinstance(ins, CreateOutputTarget) and ins.name == _tc.PREDICT_ATOMIC_ENERGY:
+                output_target = ins
+                log.info(f"FM model surgery: wrapping CreateOutputTarget '{name}'")
+                break
+
+        if output_target is None:
+            raise ValueError(
+                f"FM model surgery: could not find CreateOutputTarget for '{_tc.PREDICT_ATOMIC_ENERGY}'"
+            )
+
+        new_inst = ConstantScaleShiftTarget(
+            target=output_target,
+            scale=1.0,
+            shift=0.0,
+            atomic_shift_map=mu_shift_map,
+            name="ConstantScaleShiftTarget_FM_auto",
+        )
+        instructions_dict[new_inst.name] = new_inst
+        log.info(f"FM model surgery: created new ConstantScaleShiftTarget '{new_inst.name}'")
+
+
 def load_and_prepare_datasets(
     args_yaml,
     batch_size,
@@ -656,16 +837,23 @@ def load_and_prepare_datasets(
     shift = 0
     scale = 1.0
     esa_dict = None
-    if potential_config.get("shift", False):
-        # train_df["energy_corrected_orig"] = train_df["energy_corrected"]
-        elements = compute_compositions(train_df)
-        n_elements_cols = ["n_" + e for e in elements]
-        n_elements = train_df[n_elements_cols]
-        total_energy = train_df["energy_corrected"]
-        res = np.linalg.lstsq(n_elements, total_energy, rcond=None)
-        e0_list = res[0]
-        esa_dict = {e: e0 for e, e0 in zip(elements, e0_list)}
-        log.info(f"Single-atom energy shift (computed on train set): {esa_dict}")
+    shift_option = potential_config.get("shift", False)
+    if shift_option:
+        is_finetuning = potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+        if shift_option == "auto" and is_finetuning:
+            # FM-based shift: computed after element_map is available (deferred below)
+            pass
+        else:
+            # Standard path: lstsq on energy_corrected
+            # train_df["energy_corrected_orig"] = train_df["energy_corrected"]
+            elements = compute_compositions(train_df)
+            n_elements_cols = ["n_" + e for e in elements]
+            n_elements = train_df[n_elements_cols]
+            total_energy = train_df["energy_corrected"]
+            res = np.linalg.lstsq(n_elements, total_energy, rcond=None)
+            e0_list = res[0]
+            esa_dict = {e: e0 for e, e0 in zip(elements, e0_list)}
+            log.info(f"Single-atom energy shift (computed on train set): {esa_dict}")
 
     if potential_config.get("scale", False):
         scale_opt = potential_config["scale"]
@@ -740,6 +928,22 @@ def load_and_prepare_datasets(
         log.info("Elements are provided as dict")
         element_map = elements
     log.info(f"Elements mapping: {element_map}")
+
+    # Deferred FM-based shift computation (needs element_map)
+    if shift_option == "auto" and potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL):
+        checkpoint_name = potential_config.get(tc.INPUT_POTENTIAL_CHECKPOINT_NAME, "")
+        checkpoint_folder = os.path.dirname(checkpoint_name) if checkpoint_name else ""
+        if not checkpoint_folder:
+            raise ValueError(
+                "potential::shift=auto requires a foundation model checkpoint to be set, "
+                "but INPUT_POTENTIAL_CHECKPOINT_NAME is not available"
+            )
+        esa_dict = compute_fm_energy_shift_auto(
+            train_df=train_df,
+            checkpoint_folder=checkpoint_folder,
+            seed=seed,
+        )
+        log.info(f"FM-based per-element shifts (will be applied via model surgery): {esa_dict}")
 
     # apply E,F weights (i.e. energy-based weights)
     if fit_config.get("weighting") is not None:
@@ -876,11 +1080,25 @@ def load_and_prepare_datasets(
     # element_map: el -> mu
     # atomic_shift_map :  mu -> e0
     # convert atomic_shift_map from esa_dict
-    atomic_shift_map = (
-        {element_map[el]: e0 for el, e0 in esa_dict.items()}
-        if esa_dict is not None
-        else None
+    # For shift=auto + finetuning: esa_dict holds FM-based shifts to be applied via model surgery
+    # (not via construct_model), so we keep them separate from the normal atomic_shift_map path
+    _is_fm_auto_shift = (
+        shift_option == "auto"
+        and potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+        and esa_dict is not None
     )
+    if _is_fm_auto_shift:
+        # FM shifts stored by element symbol for model surgery in gracemaker.py
+        # Don't pass to construct_model (model is loaded, not built during finetuning)
+        fm_shift_dict = esa_dict
+        atomic_shift_map = None
+    else:
+        fm_shift_dict = None
+        atomic_shift_map = (
+            {element_map[el]: e0 for el, e0 in esa_dict.items()}
+            if esa_dict is not None
+            else None
+        )
     # use_per_specie_n_nei = args_yaml.get(tc.INPUT_USE_PER_SPECIE_N_NEI, False)
     data_stats = {
         "avg_n_neigh": (
@@ -889,6 +1107,7 @@ def load_and_prepare_datasets(
         "constant_out_shift": shift,
         "constant_out_scale": scale,
         "atomic_shift_map": atomic_shift_map,
+        "fm_shift_dict": fm_shift_dict,
     }
     # label train and test dataframes with low-energy(<=1 eV/atom above conv.hull) and rest
     test_grouping_df = None

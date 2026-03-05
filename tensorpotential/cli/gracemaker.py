@@ -13,7 +13,7 @@ from ase.data import chemical_symbols
 import tensorpotential
 from tensorpotential import constants as tc
 from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
-from tensorpotential.cli.data import load_and_prepare_datasets
+from tensorpotential.cli.data import load_and_prepare_datasets, inject_or_update_atomic_shift_in_model
 from tensorpotential.cli.prepare import (
     construct_model,
     convert_to_tensors_for_model,
@@ -516,6 +516,16 @@ def main(argv=None, strategy=None, strategy_desc=""):
     else:  # save model, but initialized from scratch
         # TODO: should be possible
         raise ValueError("Cannot save just-initialized model")
+
+    # Model surgery: inject FM-based atomic energy shifts before saving
+    fm_shift_dict = data_stats.get("fm_shift_dict") if data_stats else None
+    if fm_shift_dict is not None:
+        log.info("Applying FM energy shift correction via model surgery")
+        inject_or_update_atomic_shift_in_model(
+            instructions_dict=pot,
+            fm_shift_dict=fm_shift_dict,
+            element_map=element_map,
+        )
 
     log.info(f"Saving model config to {target_potential_file_name}")
     save_instructions_dict(target_potential_file_name, pot)

@@ -115,8 +115,31 @@ In order to fine-tune foundation model, write in `input.yaml::potential` section
 ```yaml
 potential:
   finetune_foundation_model: GRACE-1L-OAM
+  shift: auto  # automatically align FM energies with your DFT reference data
 #  reduce_elements: True # if True - select from original models only elements presented in the CURRENT dataset
 ```
+
+### Automatic energy shift correction (`shift: auto`)
+
+When `shift: auto` is set together with `finetune_foundation_model`, GRACEmaker automatically
+computes optimal per-element energy shifts that minimize the difference between foundation model
+predictions and your reference DFT data. The shifts are injected directly into the model
+(via `ConstantScaleShiftTarget`) before training begins.
+
+**How it works:**
+
+1. Selects ~50 diverse structures from the training set covering all element combinations
+2. Predicts their energies with the foundation model (before any training)
+3. Solves a least-squares problem: `A @ x = (E_DFT - E_FM)`, where `A` is the composition matrix and `x` are per-element shifts
+4. Injects the computed shifts into the model's `ConstantScaleShiftTarget` instruction
+
+This is particularly useful when your DFT reference data uses different pseudopotentials or
+settings than the foundation model's training data, resulting in a systematic energy offset.
+The correction minimizes the initial energy mismatch and leads to faster convergence.
+
+**Note:** `shift: auto` is independent of `data::reference_energy`. Typical usage:
+- `reference_energy: 0` (or dict) — set your DFT reference frame
+- `shift: auto` — align the FM output to your DFT reference frame
 
 Also, it is recommended to set small `learning_rate` (i.e. 1e-3 or 1e-4) and evaluate initial metrics `eval_init_stats: True`:
 

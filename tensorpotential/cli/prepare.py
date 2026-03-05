@@ -56,6 +56,7 @@ def construct_model(
     constant_out_shift: float = 0.0,
     constant_out_scale: float = 1.0,
     atomic_shift_map=None,
+    fm_shift_dict=None,  # accepted from data_stats but unused here (applied via model surgery)
 ) -> tuple[dict[str, TPInstruction], list[str] | None]:
     """
     Construct a model as a dict of TPInstructions.

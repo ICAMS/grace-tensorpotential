@@ -59,8 +59,11 @@ potential:
   # lora: {all: {rank: 16, alpha: 1}, Z: {rank: 8, alpha: 1}, I: {rank: 4, alpha: 1, keep_dims: 1} }
   ## reduce_lora: True # reduce LORA model
   
-  ## Other parameters: 
-  # shift: False # True/False - automatic shift by energy
+  ## Other parameters:
+  # shift: False # True/False/"auto" - automatic shift by energy
+  #   True  — least-squares per-element shift on training energies (for training from scratch)
+  #   "auto" — when finetuning a foundation model, computes per-element shifts by comparing
+  #            FM predictions with reference DFT data and injects them into the model
   # scale: False # False/True or float  - automatic scale data by force RMSE
   # avg_n_neigh: 40 # Average number of neighbours. By default - automatically determined
   # float_dtype: float64 # float64, float32

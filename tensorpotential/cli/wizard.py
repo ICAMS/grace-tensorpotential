@@ -835,7 +835,8 @@ def _apply_state(s: _WizardState, template: str) -> str:
             potential_block += "  # model will be restored from checkpoint"
         else:
             potential_block += (
-                "  reduce_elements: True  # reduce to elements present in dataset"
+                "  reduce_elements: True  # reduce to elements present in dataset\n"
+                "  shift: auto  # align FM energies with your DFT reference data"
             )
 
         template = template.replace("{{CUTOFF}}", "n/a")
