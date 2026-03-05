@@ -790,10 +790,18 @@ def load_and_prepare_datasets(
     if extras is not None:
         import importlib
 
-        mod_exp = importlib.import_module(
-            "tensorpotential.experimental.extra_data_builders"
-        )
-        mod_extra = importlib.import_module("tensorpotential.extra.extra_data_builders")
+        try:
+            mod_exp = importlib.import_module(
+                "tensorpotential.experimental.extra_data_builders"
+            )
+        except ImportError:
+            mod_exp = None
+
+        try:
+            mod_extra = importlib.import_module("tensorpotential.extra.extra_data_builders")
+        except ImportError:
+            mod_extra = None
+
         for db_name, db_config in extras.items():
             db = getattr(mod_exp, db_name, None) or getattr(mod_extra, db_name, None)
             if db is None:

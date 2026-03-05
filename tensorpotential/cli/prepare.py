@@ -280,9 +280,15 @@ def build_loss_function(fit_config):
     if extra_loss_componens is not None:
         extras = []
         # mod = importlib.import_module("tensorpotential.experimental.extra_losses")
-        from tensorpotential.experimental import extra_losses
+        try:
+            from tensorpotential.experimental import extra_losses
+        except ModuleNotFoundError:
+            extra_losses = None
 
-        from tensorpotential.extra import extra_losses as extra_losses_extra
+        try:
+            from tensorpotential.extra import extra_losses as extra_losses_extra
+        except ModuleNotFoundError:
+            extra_losses_extra = None
 
         for loss_comp_name, loss_config in extra_loss_componens.items():
             loss_func = getattr(extra_losses, loss_comp_name, None) or getattr(
