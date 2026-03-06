@@ -106,90 +106,96 @@ but you can overwrite it with `GRACE_CACHE` environment variable.
 
 ## Fine-tuning foundation models
 
-Fine-tuning of foundation GRACE models can only be performed using checkpoints and not saved models.
-Run `grace_models list` to view the list of available models with a `CHECKPOINT:` field.
-You can either download this checkpoint by `grace_models checkpoint <MODEL-NAME>` or it will be done automatically when needed.
+### Automatic input file generation
 
-In order to fine-tune foundation model, write in `input.yaml::potential` section:
+You can generate an `input.yaml` file for fine-tuning a foundation model by running `gracemaker -t`.
+
+### Manual setup
+
+Fine-tuning foundation GRACE models can only be performed using checkpoints, not saved models.
+Run `grace_models list` to view the available models that include a `CHECKPOINT:` field.
+You can either download this checkpoint manually using `grace_models checkpoint <MODEL-NAME>`, or it will be downloaded automatically when needed.
+
+To fine-tune a foundation model, add the following to the `potential` section of your `input.yaml`:
 
 ```yaml
 potential:
   finetune_foundation_model: GRACE-1L-OAM
   shift: auto  # automatically align FM energies with your DFT reference data
-#  reduce_elements: True # if True - select from original models only elements presented in the CURRENT dataset
+# reduce_elements: True # if True - select from original models only elements present in the CURRENT dataset
+
 ```
 
 ### Automatic energy shift correction (`shift: auto`)
 
-When `shift: auto` is set together with `finetune_foundation_model`, GRACEmaker automatically
-computes optimal per-element energy shifts that minimize the difference between foundation model
-predictions and your reference DFT data. The shifts are injected directly into the model
-(via `ConstantScaleShiftTarget`) before training begins.
+When `shift: auto` is set alongside `finetune_foundation_model`, GRACEmaker automatically computes optimal per-element energy shifts that minimize the difference between the foundation model's predictions and your reference DFT data. These shifts are injected directly into the model (via `ConstantScaleShiftTarget`) before training begins.
 
 **How it works:**
 
-1. Selects ~50 diverse structures from the training set covering all element combinations
-2. Predicts their energies with the foundation model (before any training)
-3. Solves a least-squares problem: `A @ x = (E_DFT - E_FM)`, where `A` is the composition matrix and `x` are per-element shifts
-4. Injects the computed shifts into the model's `ConstantScaleShiftTarget` instruction
+1. Selects ~50 diverse structures from the training set covering all element combinations.
+2. Predicts their energies with the foundation model (prior to training).
+3. Solves a least-squares problem: `A @ x = (E_DFT - E_FM)`, where `A` is the composition matrix and `x` represents per-element shifts.
+4. Injects the computed shifts into the model's `ConstantScaleShiftTarget` instruction.
 
-This is particularly useful when your DFT reference data uses different pseudopotentials or
-settings than the foundation model's training data, resulting in a systematic energy offset.
-The correction minimizes the initial energy mismatch and leads to faster convergence.
+This is particularly useful when your DFT reference data uses different pseudopotentials or settings than the foundation model's training data, which usually results in a systematic energy offset. The correction minimizes the initial energy mismatch and leads to faster convergence.
 
-**Note:** `shift: auto` is independent of `data::reference_energy`. Typical usage:
-- `reference_energy: 0` (or dict) — set your DFT reference frame
-- `shift: auto` — align the FM output to your DFT reference frame
+**Note:** `shift: auto` is independent of `data::reference_energy`. Here is a typical usage example:
 
-Also, it is recommended to set small `learning_rate` (i.e. 1e-3 or 1e-4) and evaluate initial metrics `eval_init_stats: True`:
+* `reference_energy: 0` (or dict) — set your DFT reference frame
+* `shift: auto` — align the FM output to your DFT reference frame
+
+### Learning rate reduction
+
+Additionally, it is recommended to set a small `learning_rate` (e.g., 1e-3 or 1e-4) and evaluate the initial metrics by setting `eval_init_stats: True`:
 
 ```yaml
 fit:
 
-  # set small learning rate
+  # set a small learning rate
   opt_params: {learning_rate: 0.001,  ... }
   
   # evaluate initial metrics
   eval_init_stats: True  
 
+
 ```
 
-Also, you can generate `input.yaml` for fine-tuning foundation model by running `gracemaker -t`
+### Frozen-weights fine-tuning
 
-NOTE! This is naive finetuning approach, since all model parameters will be updated.
-In some cases, this can lead to catastrophic forgetting of the pre-trained knowledge.
-In order to mitigate this issue, we recommend to use frozen weights finetuning approach.
+By default, a naive fine-tuning approach is used, where all model parameters are updated. In some cases, this can lead to catastrophic forgetting of pre-trained knowledge. To mitigate this issue, we recommend using a frozen-weights fine-tuning approach.
 
-### Frozen weights finetuning
+For frozen-weights fine-tuning, you must specify the `trainable_variable_names` parameter in the `fit` section of your `input.yaml`.
 
-For frozen weights finetuning, you need to specify `trainable_variable_names` parameter in `input.yaml::fit` section.
-Varaible names you can find by running model summary:
+Here are a few name pattern examples (for GRACE-2L models):
 
-```bash
-grace_utils -p ~/.cache/grace/checkpoints/SOME_FOUNDATIONAL_MODEL_NAME/model.yaml  summary -v 1
-```
+* `LinMLPOut2ScalarTarget_`: Typical name for a linear+MLP energy readout function.
+* `I2/reducing_`: ACE expansion coefficients in the second layer.
+* `rho/reducing_`: ACE expansion coefficients in the first layer.
+* `I1/reducing_`: ACE expansion coefficients for the message being sent from the first layer to the second layer.
 
-Few name pattern examples (for GRACE-2L type of models):
+Here are the recommended trainable variables to preserve the pre-trained knowledge of unaffected chemical elements:
 
-- `LinMLPOut2ScalarTarget_` - typical name for linear+MLP energy readout function
-- `I2/reducing_` - ACE expansion coefficients in second layer
-- `rho/reducing_` - ACE expansion coefficients in first layer
-- `I1/reducing_` - ACE expansion coefficients for message being sent from first layer to second layer
-
-Recommended trainable variables that will preserve the pre-trained knowledge of non-affected chemical elements:
-
-- for GRACE-2L models
+* For GRACE-2L models:
 
 ```yaml
 fit:
   trainable_variable_names: ["I2/reducing_" ,"rho/reducing_","I1/reducing_"]
+
 ```
 
-- for GRACE-1L models
+* For GRACE-1L models:
 
 ```yaml
 fit:
   trainable_variable_names: ["rho/reducing_"]
+
+```
+
+You can find more variable names by running a model summary:
+
+```bash
+grace_utils -p ~/.cache/grace/checkpoints/SOME_FOUNDATIONAL_MODEL_NAME/model.yaml  summary -v 1
+
 ```
 
 ---
