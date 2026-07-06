@@ -301,3 +301,45 @@ options:
   --stage-4             Run stage 4, compute statistics
   --remove_stage1       If True - during stage 3, remove corresponding shard from stage1 folder
 ```
+
+## `grace_uq`
+
+Utility to build GMM-based uncertainty-quantification (UQ) artifacts for trained
+GRACE models, calibrate the per-atom extrapolation grade `gamma`, and stamp the
+artifacts into checkpoints / exports.
+
+See the dedicated [Uncertainty Quantification](../uq/) page for the full
+`grace_uq build` usage, the Python API, and how to bake UQ into `.npz` /
+saved-model exports.
+
+## `grace_dashboard`
+
+Interactive [Flask](https://flask.palletsprojects.com/) dashboard for browsing
+and comparing GRACE fit results. It recursively scans a base directory for
+*fit folders* — any directory containing `seed/<N>/test_metrics.yaml` — and
+serves three panels in the browser:
+
+1. **Training curves** — metric vs. epoch, per experiment.
+2. **Scatter / Pareto plot** — with selectable X/Y axes.
+3. **Overview table** — all metrics at the best-test-loss epoch.
+
+Multiple seeds of the same fit appear as separate rows by default; a checkbox
+averages them.
+
+```
+usage: grace_dashboard [-h] [--base BASE] [--host HOST] [--port PORT] [--target-epochs TARGET_EPOCHS] [--debug]
+
+options:
+  -h, --help            show this help message and exit
+  --base BASE           directory to scan for fit folders (default: current directory)
+  --host HOST           bind host (default: 0.0.0.0)
+  --port PORT           bind port (default: 5000)
+  --target-epochs TARGET_EPOCHS
+                        target epochs used for extrapolation of incomplete runs (default: 160)
+  --debug               run Flask in debug mode
+```
+
+Example — scan the current directory and open the dashboard at `http://localhost:5000/`:
+```bash
+grace_dashboard
+```
