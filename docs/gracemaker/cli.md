@@ -1,7 +1,7 @@
 ## Gracemaker
 
 ```
-gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [-t] [-cn CHECKPOINT_NAME] [--reset-epoch-and-step] [input]
+gracemaker [-h] [-l LOG] [-m] [-rl] [-r] [-rs RESTART_SUFFIX] [--no-intra-epoch-redo] [-p POTENTIAL] [-s] [-sf] [-e] [-nj] [--seed SEED] [-cm] [-t] [-cn CHECKPOINT_NAME] [--reset-epoch-and-step] [input]
 
 Fitting utility for (graph) atomic cluster expansion potentials.
 
@@ -18,6 +18,16 @@ options:
                         Restart from latest best test checkpoint (use separately from -rs/-rl)
   -rs RESTART_SUFFIX, --restart-suffix RESTART_SUFFIX
                         Suffix of checkpoint to restart from, i.e. .epoch_10 (use separately from -r/-rl)
+  --no-intra-epoch-redo
+                        When resuming from a mid-epoch checkpoint
+                        (intra_epoch_save=True), skip the interrupted epoch's
+                        remaining batches entirely and bump the step counter
+                        to the nominal end of that epoch. This keeps the LR
+                        scheduler aligned with the original maxiter budget at
+                        the cost of under-training by (nominal_end -
+                        saved_step) gradient updates. Default is to
+                        fast-forward the iterator and train only the unseen
+                        tail.
   -p POTENTIAL, --potential POTENTIAL
                         Potential configuration to load, model.yaml file
   -s, --save-model      Export model as TF saved model

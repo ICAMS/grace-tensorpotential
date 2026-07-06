@@ -13,6 +13,7 @@ data:
 
 potential:
   # elements: [Cu, Al] # If elements not provided - determined automatically from data
+  param_dtype: {{PARAM_DTYPE}}  # float32 = mixed FP32/64 (params in FP32, geometry in FP64); float64 = full double
   {{POTENTIAL_SETTINGS}}
 fit:
   loss: {
@@ -42,6 +43,21 @@ fit:
   train_max_n_buckets: auto # max number of buckets (group of batches of same shape) in train set
   test_max_n_buckets: auto # same for test
   auto_bucket_max_padding: 0.3 # max allowed padding overhead for neighbours when using 'auto' buckets
+
+  ## Dense (reshape) aggregation batching (only used when potential::dense_nbr: True)
+  # auto_bucket_max_padding: 0.15 # in DENSE mode this is the UNIFIED net neighbor-padding target:
+  #                               # it drives BOTH the max_neigh (width) and nat (fake-atom) bucketing
+  #                               # so the combined net padding lands here (atom/neighbor axes are bound
+  #                               # in dense). Default 0.15 for dense (the seg path keeps its 0.3 default).
+  # dense_slot_budget: auto       # max nat*max_neigh per batch; auto = batch_size*mean(nat)*mean(max_neigh)
+  # dense_max_shapes: 64          # HARD cap on distinct (max_nat,max_neigh) shapes == XLA recompiles
+  #                               # (the compile budget). The adaptive split meets the padding target
+  #                               # with the fewest shapes; if the target needs more than this cap, the
+  #                               # cap wins (padding rises) and a warning is logged.
+  # dense_n_neigh_buckets: auto   # explicit #max_neigh width buckets (override the adaptive search)
+  # dense_max_neigh_cap:          # drop structures whose per-atom max_neigh exceeds this (broken cells); default off
+  # NOTE: a larger batch_size reduces BOTH fake-atom padding and distinct shapes -- the cheapest lever
+  # to hit the target with few XLA compiles. The irreducible floor is intra-structure max/avg spread.
 
   checkpoint_freq: 2 # frequency for **REGULAR** checkpoints.
   # save_all_regular_checkpoints: True # to store ALL regular checkpoints

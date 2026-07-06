@@ -11,7 +11,7 @@ potential:
   #  elements: ["C", "H", "O"]
   preset: "LINEAR"
 #  scale: False
-  float_dtype: float32
+  param_dtype: float32
 
 fit:
   #  strategy: mirrored

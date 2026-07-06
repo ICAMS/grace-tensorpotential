@@ -19,6 +19,7 @@ potential:
             embedding_size: 5,
             n_mlp_dens: 1,
             max_order: 2 }
+  param_dtype: float64
 
 fit:
   #  strategy: mirrored

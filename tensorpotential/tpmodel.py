@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import yaml
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Dict
@@ -9,16 +11,84 @@ from typing import Dict
 import numpy as np
 import tensorflow as tf
 
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
-
-import yaml
-import json
-
 from tensorpotential import constants
 from tensorpotential.export import export_to_yaml
-from tensorpotential.instructions.base import summary_verbose_type, LORAInstructionMixin
-from tensorpotential.instructions.compute import TPInstruction, FunctionReduceN
+from tensorpotential.instructions.base import (
+    LORAInstructionMixin,
+    summary_verbose_type,
+)
+from tensorpotential.instructions.compute import FunctionReduceN, TPInstruction
+from tensorpotential.utils import suppress_tf_logging
+
+
+def _make_dtype_map(float_dtype):
+    return {
+        "int": tf.int32,
+        "int32": tf.int32,
+        "int64": tf.int64,
+        "float": float_dtype,
+        "float32": tf.float32,
+        "float64": tf.float64,
+    }
+
+
+def _build_input_signature(specs, dtypes):
+    return {
+        k: tf.TensorSpec(shape=v["shape"], dtype=dtypes[v["dtype"]], name=k)
+        for k, v in specs.items()
+    }
+
+def _get_cutoff(instruction) -> float | None:
+    """Get cutoff from an instruction, with fallback for deserialized SavedModel objects."""
+    get_cutoff = getattr(instruction, "get_cutoff", None)
+    if callable(get_cutoff):
+        return get_cutoff()
+    # Fallback for tf.saved_model.load objects (which lose Python class methods).
+    # Standard attribute name (all current instructions set self.rc at build time)
+    if hasattr(instruction, "rc"):
+        return float(instruction.rc.numpy())
+    # Legacy: older RadialBasis stored cutoff nested inside basis_function
+    if hasattr(instruction, "basis_function") and hasattr(
+        instruction.basis_function, "rc"
+    ):
+        return float(instruction.basis_function.rc.numpy())
+    return None
+
+
+def _get_element_map(instruction) -> tuple[np.ndarray, np.ndarray] | None:
+    """Get element map from an instruction, with fallback for deserialized SavedModel objects."""
+    get_element_map = getattr(instruction, "get_element_map", None)
+    if callable(get_element_map):
+        return get_element_map()
+    # Fallback for tf.saved_model.load objects
+    if hasattr(instruction, "element_map_symbols"):
+        return (
+            instruction.element_map_symbols.numpy().astype(str),
+            instruction.element_map_index.numpy(),
+        )
+    return None
+
+
+def _get_bond_cutoff_map(instruction) -> np.ndarray | None:
+    """Get bond cutoff map from an instruction, with fallback for deserialized SavedModel objects."""
+    get_bond_cutoff_map = getattr(instruction, "get_bond_cutoff_map", None)
+    if callable(get_bond_cutoff_map):
+        return get_bond_cutoff_map()
+    # Fallback for tf.saved_model.load objects
+    if hasattr(instruction, "bond_cutoff_map"):
+        return instruction.bond_cutoff_map.numpy()
+    return None
+
+
+def load_model_metadata(model_path: str) -> dict | None:
+    """Load metadata.yaml from a saved model directory, if available."""
+    if not isinstance(model_path, str):
+        return None
+    metadata_path = os.path.join(model_path, "metadata.yaml")
+    if os.path.exists(metadata_path):
+        with open(metadata_path) as f:
+            return yaml.safe_load(f)
+    return None
 
 
 def extract_cutoff_and_elements(instructions):
@@ -29,11 +99,12 @@ def extract_cutoff_and_elements(instructions):
     if isinstance(instructions, dict):
         instructions = list(instructions.values())
     for instruction in instructions:
-        if hasattr(instruction, "basis_function"):
-            cuts.append(instruction.basis_function.rc.numpy())
-        if hasattr(instruction, "element_map_symbols"):
-            element_map_symbols = instruction.element_map_symbols.numpy().astype(str)
-            element_map_index = instruction.element_map_index.numpy()
+        cut = _get_cutoff(instruction)
+        if cut is not None:
+            cuts.append(cut)
+        emap = _get_element_map(instruction)
+        if emap is not None:
+            element_map_symbols, element_map_index = emap
 
     cutoff = np.max(cuts)
     return cutoff, element_map_symbols, element_map_index
@@ -48,24 +119,36 @@ def extract_cutoff_matrix(instructions) -> np.array:
     if isinstance(instructions, dict):
         instructions = list(instructions.values())
     for instruction in instructions:
-        if hasattr(instruction, "bond_cutoff_map"):
+        bcm = _get_bond_cutoff_map(instruction)
+        if bcm is not None:
             if cutoff_matrix is None:
-                # init
-                cutoff_matrix = instruction.bond_cutoff_map.numpy()
+                cutoff_matrix = bcm
             else:
-                # cumulative max
-                current_cutoff_matrix = instruction.bond_cutoff_map.numpy()
-                for i in range(current_cutoff_matrix.shape[0]):
-                    for j in range(current_cutoff_matrix.shape[1]):
-                        cutoff_matrix[i, j] = np.max(
-                            current_cutoff_matrix[i, j], cutoff_matrix[i, j]
-                        )
+                cutoff_matrix = np.maximum(cutoff_matrix, bcm)
 
     if cutoff_matrix is not None:
         # infer number of elements
         nels = int(np.round(np.sqrt(len(cutoff_matrix))))
         assert nels**2 == len(cutoff_matrix)
         return np.array(cutoff_matrix).reshape(nels, nels)
+
+
+def extract_cutoff_dict(instructions):
+    """
+    Extract cutoff_dict from instructions.
+    Returns: dict[tuple[str, str], float]
+    """
+    cutoff_matrix = extract_cutoff_matrix(instructions)
+    if cutoff_matrix is None:
+        return None
+    _, symbols, _ = extract_cutoff_and_elements(instructions)
+    if symbols is None:
+        return None
+    cutoff_dict = {}
+    for i, s1 in enumerate(symbols):
+        for j, s2 in enumerate(symbols):
+            cutoff_dict[(str(s1), str(s2))] = float(cutoff_matrix[i, j])
+    return cutoff_dict
 
 
 def compute_batch_virials_from_pair_forces(pair_f, input_data):
@@ -195,6 +278,10 @@ class ComputeBatchEnergyAndForces(TrainFunction):
         constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
 
+    def __init__(self, extra_return_keys: list[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_return_keys = extra_return_keys
+
     # @staticmethod
     def __call__(
         self,
@@ -208,6 +295,7 @@ class ComputeBatchEnergyAndForces(TrainFunction):
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
 
+        e_atomic = tf.cast(e_atomic, dtype=pair_f.dtype)
         total_energy = tf.math.unsorted_segment_sum(
             e_atomic,
             input_data[constants.ATOMS_TO_STRUCTURE_MAP],
@@ -221,11 +309,16 @@ class ComputeBatchEnergyAndForces(TrainFunction):
             pair_f, input_data[constants.BOND_IND_I], num_segments=nat
         )
 
-        return {
+        res = {
             constants.PREDICT_TOTAL_ENERGY: total_energy,
             constants.PREDICT_FORCES: total_f,
             constants.PREDICT_ATOMIC_ENERGY: e_atomic,
         }
+        if self.extra_return_keys:
+            for k in self.extra_return_keys:
+                if k in input_data:
+                    res[k] = input_data[k]
+        return res
 
 
 class ComputeBatchEnergyForcesVirials(TrainFunction):
@@ -238,6 +331,10 @@ class ComputeBatchEnergyForcesVirials(TrainFunction):
         constants.BOND_VECTOR: {"shape": [None, 3], "dtype": "float"},
         # constants.N_ATOMS_BATCH_TOTAL: {"shape": [], "dtype": "int"},
     }
+
+    def __init__(self, extra_return_keys: list[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_return_keys = extra_return_keys
 
     # @staticmethod
     def __call__(
@@ -252,6 +349,7 @@ class ComputeBatchEnergyForcesVirials(TrainFunction):
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
 
+        e_atomic = tf.cast(e_atomic, dtype=pair_f.dtype)
         total_energy = tf.math.unsorted_segment_sum(
             e_atomic,
             input_data[constants.ATOMS_TO_STRUCTURE_MAP],
@@ -267,12 +365,17 @@ class ComputeBatchEnergyForcesVirials(TrainFunction):
         )
         virial = compute_batch_virials_from_pair_forces(pair_f, input_data)
 
-        return {
+        res = {
             constants.PREDICT_TOTAL_ENERGY: total_energy,
             constants.PREDICT_FORCES: total_f,
             constants.PREDICT_ATOMIC_ENERGY: e_atomic,
             constants.PREDICT_VIRIAL: virial,
         }
+        if self.extra_return_keys:
+            for k in self.extra_return_keys:
+                if k in input_data:
+                    res[k] = input_data[k]
+        return res
 
 
 class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
@@ -283,9 +386,10 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
     }
 
-    def __init__(self, local=False, **kwargs):
+    def __init__(self, local=False, extra_return_keys: list[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.local = local
+        self.extra_return_keys = extra_return_keys
         if self.local:
             self.specs[constants.ATOMIC_MU_I_LOCAL] = {"shape": [None], "dtype": "int"}
 
@@ -301,6 +405,7 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
             e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
         pair_f = tf.negative(tape.gradient(e_atomic, input_data[constants.BOND_VECTOR]))
 
+        e_atomic = tf.cast(e_atomic, dtype=pair_f.dtype)
         total_energy = tf.reduce_sum(e_atomic, axis=0, keepdims=True)
 
         # nat = tf.reshape(input_data[constants.N_ATOMS_BATCH_TOTAL], [])
@@ -312,7 +417,7 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
         )
         virial = compute_structure_virials_from_pair_forces(pair_f, input_data)
 
-        return {
+        res = {
             constants.PREDICT_TOTAL_ENERGY: total_energy,
             constants.PREDICT_FORCES: total_f,
             constants.PREDICT_VIRIAL: virial,
@@ -320,6 +425,11 @@ class ComputeStructureEnergyAndForcesAndVirial(ComputeFunction):
             # just quick hack to have it at last position, since all outputs are **alphabetically** sorted
             "z_" + constants.PREDICT_PAIR_FORCES: pair_f,
         }
+        if self.extra_return_keys:
+            for k in self.extra_return_keys:
+                if k in input_data:
+                    res[k] = input_data[k]
+        return res
 
 
 class ComputeEnergy(ComputeFunction):
@@ -330,9 +440,10 @@ class ComputeEnergy(ComputeFunction):
         constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
     }
 
-    def __init__(self, local=False, **kwargs):
+    def __init__(self, local=False, extra_return_keys: list[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.local = local
+        self.extra_return_keys = extra_return_keys
         if self.local:
             self.specs[constants.ATOMIC_MU_I_LOCAL] = {"shape": [None], "dtype": "int"}
 
@@ -345,10 +456,16 @@ class ComputeEnergy(ComputeFunction):
 
         execute_instructions(input_data, instructions, training, local=self.local)
         e_atomic = tf.reshape(input_data[constants.PREDICT_ATOMIC_ENERGY], [-1, 1])
+        e_atomic = tf.cast(e_atomic, dtype=input_data[constants.BOND_VECTOR].dtype)
 
-        return {
+        res = {
             constants.PREDICT_ATOMIC_ENERGY: e_atomic,
         }
+        if self.extra_return_keys:
+            for k in self.extra_return_keys:
+                if k in input_data:
+                    res[k] = input_data[k]
+        return res
 
 
 class ComputeEquivariantForces(ComputeFunction):
@@ -362,6 +479,7 @@ class ComputeEquivariantForces(ComputeFunction):
     ):
         execute_instructions(input_data, instructions, training)
         atomic_f = tf.reshape(input_data[constants.PREDICT_FORCES], [-1, 3])
+        atomic_f = tf.cast(atomic_f, input_data[constants.BOND_VECTOR].dtype)
 
         return {
             constants.PREDICT_TOTAL_ENERGY: tf.constant([[0.0]], dtype=atomic_f.dtype),
@@ -427,7 +545,7 @@ class ExtractBasisFunctions(ComputeFunction):
         for name, ins in instructions.items():
             if isinstance(ins, FunctionReduceN):
                 ls_max = ins.ls_max
-                if all(l == 0 for l in ls_max):
+                if all(l_val == 0 for l_val in ls_max):
                     function_reduce_ins_names.append(name)
         return function_reduce_ins_names
 
@@ -547,11 +665,13 @@ class ComputeBlockInputGradient(ComputeFunction):
                 converted_grads.append(g)
         grads = converted_grads
 
+        float_dtype = input_data[constants.BOND_VECTOR].dtype
         res = {f"grad_{k}": g for k, g in zip(self.wrt_keys, grads)}
-        res[self.target_key] = target
+        res[self.target_key] = tf.cast(target, dtype=float_dtype)
         if self.output_keys:
             for k in self.output_keys:
-                res[k] = input_data[k]
+                if k != self.target_key:
+                    res[k] = input_data[k]
         return res
 
 
@@ -625,22 +745,13 @@ class TPModel(tf.Module):
         self._train_specs = {}
         self.instructions_specs = {}
 
+        self.param_dtype = tf.float32
         self._variables_to_train = None
         self._aux_compute_sigs = {}
         self._aux_tf_funcs = {}
 
-    def _decorate_aux_computes(self, float_dtype, jit_compile=True, input_dtype=None):
-        if input_dtype is None:
-            input_dtype = float_dtype
-
-        dtypes = {
-            "int": tf.int32,
-            "int32": tf.int32,
-            "int64": tf.int64,
-            "float": input_dtype,
-            "float32": tf.float32,
-            "float64": tf.float64,
-        }
+    def _decorate_aux_computes(self, input_signature_float_dtype, jit_compile=True):
+        dtypes = _make_dtype_map(input_signature_float_dtype)
         input_signature = {}
         for k, v in self.instructions_specs.items():
             input_signature[k] = tf.TensorSpec(
@@ -712,17 +823,22 @@ class TPModel(tf.Module):
         self._compute_specs.update(self.compute_function.specs.copy())
         return self._compute_specs
 
-    def build(self, float_dtype, jit_compile=True, input_dtype=None):
-        self.float_dtype = float_dtype
+    def build(
+        self,
+        param_dtype: tf.dtypes.DType,
+        input_signature_float_dtype: tf.dtypes.DType = tf.float64,
+        jit_compile: bool = True,
+    ):
+        self.param_dtype = param_dtype
         for sm in self.submodules:
             if hasattr(sm, "build"):
                 if not hasattr(sm, "is_built") or not sm.is_built:
-                    sm.build(float_dtype)
+                    sm.build(param_dtype)
             if hasattr(sm, "input_tensor_spec"):
                 self.instructions_specs.update(sm.input_tensor_spec.copy())
 
         self._decorate_aux_computes(
-            float_dtype, jit_compile=jit_compile, input_dtype=input_dtype
+            input_signature_float_dtype, jit_compile=jit_compile
         )
 
     def get_flat_trainable_variables(self):
@@ -743,26 +859,17 @@ class TPModel(tf.Module):
         for i, var in enumerate(self.variables_to_train):
             new_values = flat_vars[self.slices[i] : self.slices[i + 1]]
             new_values = tf.reshape(new_values, tf.shape(var))
-            if new_values.dtype != self.float_dtype:
-                new_values = tf.cast(new_values, self.float_dtype)
+            if new_values.dtype != self.param_dtype:
+                new_values = tf.cast(new_values, self.param_dtype)
             var.assign(new_values)
 
-    def decorate_compute_function(self, float_dtype, jit_compile, input_dtype=None):
-        if input_dtype is None:
-            input_dtype = float_dtype
-        dtypes = {
-            "int": tf.int32,
-            "int32": tf.int32,
-            "int64": tf.int64,
-            "float": input_dtype,
-            "float32": tf.float32,
-            "float64": tf.float64,
-        }
-        input_signature = {}
-        for k, v in self.compute_specs.items():
-            input_signature[k] = tf.TensorSpec(
-                shape=v["shape"], dtype=dtypes[v["dtype"]], name=k
-            )
+    def decorate_compute_function(
+        self,
+        input_signature_float_dtype: tf.dtypes.DType = tf.float64,
+        jit_compile: bool = True,
+    ):
+        dtypes = _make_dtype_map(input_signature_float_dtype)
+        input_signature = _build_input_signature(self.compute_specs, dtypes)
         self.compute = tf.function(
             self.compute, input_signature=[input_signature], jit_compile=jit_compile
         )
@@ -771,22 +878,133 @@ class TPModel(tf.Module):
         self,
         path: str,
         jit_compile: bool = True,
-        float_dtype=tf.float64,
-        input_dtype=None,
+        input_signature_float_dtype=tf.float64,
+        gmm_uq_model=None,
     ):
-        self.decorate_compute_function(
-            float_dtype, jit_compile, input_dtype=input_dtype
+        if gmm_uq_model is not None:
+            if gmm_uq_model.interp_thresholds is None:
+                raise ValueError(
+                    "gmm_uq_model.interp_thresholds must be set before exporting to "
+                    "SavedModel. Compute thresholds first (e.g. via "
+                    "GMMUQArtifactBuilder) and reload the artifact."
+                )
+            # Attach as tracked attribute so TF includes GMM variables in variables/
+            self._gmm_uq_model = gmm_uq_model
+            # Bake the basis-RP feature into the exported graph: append the
+            # projection instruction with R recovered verbatim from the artifact
+            # (stored as a tf.constant) so the exported compute_uq signature
+            # reproduces the exact feature. The retired hidden-layer feature is
+            # unsupported.
+            from tensorpotential.uq.factories import (
+                patch_instructions_for_basis_rp_features,
+                _basis_rp_spec_from_artifact,
+            )
+
+            spec = _basis_rp_spec_from_artifact(gmm_uq_model)
+            if spec is None or spec.get("matrix") is None:
+                raise ValueError(
+                    "SavedModel export requires a basis-RP UQ artifact (missing "
+                    "uq_rp_matrix); rebuild with `grace_uq build`."
+                )
+            rp = patch_instructions_for_basis_rp_features(
+                self.instructions,
+                out_dim=spec["out_dim"],
+                seed=spec["seed"],
+                projection_matrix=spec["matrix"],
+                feature_transform=spec.get("transform"),
+                normalize=spec.get("normalize", False),
+                add_density_channel=spec.get("add_density_channel", False),
+                density_scale=spec.get("density_scale", 1.0),
+            )
+            # Model is already built; build the appended projection so its R
+            # constant is traced into the SavedModel.
+            rp.build(self.param_dtype)
+
+        # Dense-capable model (has an equivariant SPBF): export BOTH a universal
+        # `compute` (segment_sum) and a fast `compute_dense` (the reshape dense
+        # aggregation) from the SAME weights. The two computes have the IDENTICAL
+        # input signature (reshape declares no extra input) and agree up to
+        # summation-reorder round-off; they differ only in the graph and in the bond
+        # LAYOUT the caller must supply (flat for `compute`, per-atom-uniform
+        # [n_atoms*max_neigh] for `compute_dense` — see tensorpotential.data.dense_nbr).
+        # Pick the mode by signature name. Non-dense models export only `compute`.
+        _instr_iter = (
+            self.instructions.values()
+            if hasattr(self.instructions, "values")
+            else self.instructions
         )
-        # TODO: rename to "compute"
-        signatures = {
-            "serving_default": self.compute,
-        }
+        dense_instr = [it for it in _instr_iter if getattr(it, "dense_capable", False)]
+        if dense_instr:
+            dtypes = _make_dtype_map(input_signature_float_dtype)
+            sig = [_build_input_signature(self.compute_specs, dtypes)]
+
+            def _trace_compute(use_dense):
+                # The frwrd branch reads each instruction's `dense_nbr`, but tracing
+                # is deferred to save time (and may re-trace), so set the flag at the
+                # TOP of the traced fn — the correct branch is selected on every trace.
+                # Restore it to False once the graph is built so the shared instructions
+                # don't leak `dense_nbr=True` into later traces (e.g. the compute_uq
+                # signatures, which run segment_sum). The branch is resolved during
+                # tracing, so this reset does not affect the already-built graph.
+                def _compute(input_data):
+                    for it in dense_instr:
+                        it.dense_nbr = use_dense
+                    try:
+                        return TPModel.compute(self, input_data)
+                    finally:
+                        for it in dense_instr:
+                            it.dense_nbr = False
+
+                return tf.function(_compute, input_signature=sig, jit_compile=jit_compile)
+
+            self.compute = _trace_compute(False)
+            self.compute_dense = _trace_compute(True)
+            signatures = {"compute": self.compute, "compute_dense": self.compute_dense}
+        else:
+            self.decorate_compute_function(input_signature_float_dtype, jit_compile)
+            signatures = {
+                "compute": self.compute,
+            }
         if self.aux_compute is not None:
             signatures.update(
                 # Use the underlying tf.functions, not the python wrappers
                 {name: self._aux_tf_funcs[name] for name in self.aux_compute.keys()}
             )
-        tf.saved_model.save(self, path, signatures=signatures)
+
+        if gmm_uq_model is not None:
+            from tensorpotential.uq import constants as uq_constants
+            from tensorpotential.uq.compute import gmm_uq_compute_class
+
+            dtypes = _make_dtype_map(input_signature_float_dtype)
+
+            def _wrap(uq_fn):
+                sig = _build_input_signature(self.compute_specs, dtypes)
+                for k, spec in _build_input_signature(uq_fn.specs, dtypes).items():
+                    sig.setdefault(k, spec)
+
+                def compute_uq(input_data):
+                    return uq_fn(self.instructions, input_data.copy(), training=False)
+
+                return tf.function(
+                    compute_uq, input_signature=[sig], jit_compile=jit_compile,
+                )
+
+            for mode, sig_name in uq_constants.UQ_MODE_TO_SIGNATURE.items():
+                uq_fn = gmm_uq_compute_class(mode == uq_constants.UQ_MODE_FULL)(gmm_uq_model)
+                wrapped = _wrap(uq_fn)
+                # Stash on the module so SavedModel includes the GMM variables
+                setattr(self, sig_name, wrapped)
+                signatures[sig_name] = wrapped
+
+        # Pin the export-time base state: at rest during save, dense_nbr is False so
+        # any co-traced signature that reads it (aux computes, compute_uq*) takes the
+        # segment_sum branch regardless of TF's trace order. Only `compute_dense`'s own
+        # trace flips it to True (and resets it). No-op for non-dense models (empty list).
+        for it in dense_instr:
+            it.dense_nbr = False
+
+        with suppress_tf_logging(logging.ERROR):
+            tf.saved_model.save(self, path, signatures=signatures)
 
         cutoff, element_map_symbols, element_map_index = extract_cutoff_and_elements(
             self.instructions
@@ -823,6 +1041,9 @@ class TPModel(tf.Module):
                 }
 
             metadata["parallel_communication"] = parallel_comm
+
+        if gmm_uq_model is not None:
+            metadata["has_uq"] = True
 
         with open(os.path.join(path, "metadata.yaml"), "w") as f:
             yaml.dump(metadata, f)
@@ -941,7 +1162,7 @@ class TPModel(tf.Module):
                     ins.enable_lora_adaptation(ins_lora_config)
 
     def finalize_lora_update(self):
-        logging.info(f"Reducing LoRA")
+        logging.info("Reducing LoRA")
         for ins_name, ins in self.instructions.items():
             if isinstance(ins, LORAInstructionMixin) and ins.lora:
                 logging.info(f" - reducing LoRA for {ins_name}")
@@ -952,3 +1173,22 @@ class TPModel(tf.Module):
             if isinstance(ins, LORAInstructionMixin) and ins.lora:
                 return True
         return False
+
+
+def __getattr__(name):
+    """Backward-compat shim for symbols that moved to ``tensorpotential.uq.instructions``.
+
+    ``RandomProjectedBasisFeatures`` and ``generate_rp_matrix`` used to be
+    defined here; artifacts serialized before the move stored the old class
+    path ``tensorpotential.tpmodel.RandomProjectedBasisFeatures``, so
+    deserialization (``str_to_class``) does ``from tensorpotential.tpmodel
+    import RandomProjectedBasisFeatures``. Resolving lazily via PEP 562
+    ``__getattr__`` keeps that path working without importing the (heavy) uq
+    package at tpmodel import time — tpmodel is imported very early in package
+    init, and an eager import of uq here would create a circular import.
+    """
+    if name in ("RandomProjectedBasisFeatures", "generate_rp_matrix"):
+        from tensorpotential.uq import instructions as _uq_instructions
+
+        return getattr(_uq_instructions, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

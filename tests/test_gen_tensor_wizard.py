@@ -852,14 +852,14 @@ class TestApplyStateTensor:
         yaml = _apply_state_tensor(s)
         # WeightedTensorLoss line should not contain delta
         tensor_loss_line = [
-            l for l in yaml.splitlines() if "WeightedTensorLoss" in l
+            line for line in yaml.splitlines() if "WeightedTensorLoss" in line
         ][0]
         assert "delta" not in tensor_loss_line
 
     def test_square_loss_energy_no_delta(self):
         s = self._base_state(loss_type="square", compute_energy=True)
         yaml = _apply_state_tensor(s)
-        energy_line = [l for l in yaml.splitlines() if "energy:" in l and "weight" in l][0]
+        energy_line = [line for line in yaml.splitlines() if "energy:" in line and "weight" in line][0]
         assert "delta" not in energy_line
 
     def test_separate_test_file(self):

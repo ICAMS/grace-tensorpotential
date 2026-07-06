@@ -3,30 +3,42 @@ from __future__ import annotations
 import inspect
 import logging
 import warnings
-import contextlib
-from abc import ABC, abstractmethod
-from collections import defaultdict
-from enum import Enum
-from typing import Iterable, Literal, Set, Callable, List, Optional, Tuple, Dict, Any
 
+from abc import ABC, abstractmethod
+
+from enum import Enum
+from typing import (
+    Iterable,
+    Literal,
+    Set,
+    List,
+    Optional,
+    Tuple,
+    Dict,
+    Any,
+)  # noqa: F401
+import datetime
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 import yaml
+import tensorflow as tf
 from tensorflow.python.trackable.data_structures import ListWrapper
 
+from tensorpotential import __version__
 
-tf.config.experimental.enable_tensor_float_32_execution(False)
+
 # arg-type for TPInstruction.summary()
 summary_verbose_type = Literal[0, 1, 2]
 
 
 class InstructionManager:
-    def __init__(self):
+    def __init__(self, dense_nbr: bool = False):
         self.instruction_dict: dict = {}
-        self.blocks: dict = defaultdict(dict)
-        self._current_block_stack = []
         self.communicated_keys: list[str] | None = None
+        # Broadcast config: instructions that support it read this default during
+        # __init__ (e.g. the equivariant SPBF reads `dense_nbr`); instructions
+        # that don't simply ignore it.
+        self.dense_nbr: bool = dense_nbr
 
     def __enter__(self):
         global _instruction_manager
@@ -44,28 +56,8 @@ class InstructionManager:
             )
         self.instruction_dict[instruction.name] = instruction
 
-        # If blocks are active, register this instruction to ALL active blocks
-        # This supports syntax like: with record_block("L1"), record_block("L2"):
-        if self._current_block_stack:
-            for block_name in self._current_block_stack:
-                self.blocks[block_name][instruction.name] = instruction
-
     def get_instructions(self) -> dict[str, TPInstruction]:
         return self.instruction_dict
-
-    def get_block(self, name: str) -> dict[str, TPInstruction]:
-        return self.blocks.get(name, {})
-
-    def get_recorded_blocks(self) -> Any:
-        return self.blocks.keys()
-
-    @contextlib.contextmanager
-    def record_block(self, name: str):
-        self._current_block_stack.append(name)
-        try:
-            yield
-        finally:
-            self._current_block_stack.pop()
 
 
 class NoInstructionManager:
@@ -85,6 +77,12 @@ class NoInstructionManager:
 
 
 _instruction_manager: Optional[InstructionManager] = None
+
+
+def active_dense_nbr() -> bool:
+    """Broadcast the `dense_nbr` default from the active InstructionManager (False if
+    none). Instructions resolve their `dense_nbr=None` argument against this."""
+    return bool(getattr(_instruction_manager, "dense_nbr", False))
 
 
 def class_to_str(cls):
@@ -226,12 +224,29 @@ def capture_init_args(cls):
     return cls
 
 
+def _build_metadata(param_dtype=None) -> dict:
+    """Build the metadata dict to embed in model.yaml."""
+
+    meta = {
+        "tensorpotential_version": __version__,
+        "saved_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+    if param_dtype is not None:
+        meta["param_dtype"] = "float32" if param_dtype == tf.float32 else "float64"
+    return meta
+
+
 def save_instructions_dict(
     filename: str,
     instructions_list_or_dict: list[TPInstruction] | dict[str, TPInstruction],
+    param_dtype=None,
 ):
     """
-    Enforce the conversion to dict of instructions and save into YAML
+    Save instructions to YAML with a top-level wrapper:
+        metadata: {param_dtype, tensorpotential_version, saved_at}
+        instructions: {name: instruction_dict, ...}
     """
 
     instructions_dict: dict[str, TPInstruction] = (
@@ -240,23 +255,46 @@ def save_instructions_dict(
         else instructions_list_or_dict
     )
 
-    dict_of_instructions_dict: dict[str, dict] = {}
-
+    serialized_instructions: dict[str, dict] = {}
     for name, ins in instructions_dict.items():
         dct = ins.to_dict()
         # process TF's dicts wrappers and TPInstructions, call second time, just for the case
         recursive_walk_and_modify(dct, replace_TPInstruction_to_name)
-        dict_of_instructions_dict[name] = dct
+        serialized_instructions[name] = dct
+
+    output = {
+        "metadata": _build_metadata(param_dtype),
+        "instructions": serialized_instructions,
+    }
     with open(filename, "w") as f:
-        yaml.dump(dict_of_instructions_dict, stream=f, sort_keys=False)
+        yaml.dump(output, stream=f, sort_keys=False)
+
+
+def _extract_instructions_data(data) -> tuple[list | dict, bool]:
+    """Extract the instructions collection from raw YAML data.
+    Handles three formats:
+      - new: {metadata: {...}, instructions: {name: dict, ...}}
+      - old flat dict: {name: dict, ...}  (possibly with __metadata__ sentinel)
+      - very old list: [{__cls__: ..., name: ...}, ...]
+    Returns (collection, is_list).
+    """
+    if isinstance(data, dict):
+        if "instructions" in data:
+            # new wrapped format
+            return list(data["instructions"].values()), False
+        # old flat dict — strip legacy shadow-key if present
+        data.pop("__metadata__", None)
+        return list(data.values()), False
+    # very old list format
+    return data, True
 
 
 def load_instructions(filename: str):
     """Load serialized instructions from YAML (either as list or dict of instructions)"""
     with open(filename, "rt") as f:
-        collection_of_dict_instructions = yaml.safe_load(
-            f,
-        )
+        raw = yaml.safe_load(f)
+
+    collection_of_dict_instructions, is_list = _extract_instructions_data(raw)
 
     deserialized_instructions_dict = {}
 
@@ -265,11 +303,6 @@ def load_instructions(filename: str):
         if isinstance(item, dict) and "_instruction_" in item:
             name = item["name"]
             container[key] = deserialized_instructions_dict[name]
-
-    is_list = True  # by default - instructions list
-    if isinstance(collection_of_dict_instructions, dict):
-        collection_of_dict_instructions = list(collection_of_dict_instructions.values())
-        is_list = False
 
     for ins_dict in collection_of_dict_instructions:
         try:
@@ -321,6 +354,18 @@ class TPInstruction(tf.Module, ABC):
             info[var.name] = var.get_shape().as_list()
         return info
 
+    def get_cutoff(self) -> float | None:
+        """Return the cutoff radius of this instruction, or None if not applicable."""
+        return None
+
+    def get_element_map(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return (element_map_symbols, element_map_index) or None if not applicable."""
+        return None
+
+    def get_bond_cutoff_map(self) -> np.ndarray | None:
+        """Return the bond-specific cutoff matrix, or None if not applicable."""
+        return None
+
     @classmethod
     def get_instruction_type(cls) -> str:
         return cls._INSTRUCTION_TYPE
@@ -346,7 +391,6 @@ class TPInstruction(tf.Module, ABC):
 
 
 class LORAInstructionMixin(ABC):
-
     def __init__(self, lora_config):
         self.lora = False
         self.lora_config = None
@@ -371,7 +415,6 @@ class LORAInstructionMixin(ABC):
 
 
 class ElementsReduceInstructionMixin(ABC):
-
     @abstractmethod
     def prepare_variables_for_selected_elements(self, index_to_select):
         raise NotImplementedError()
@@ -406,9 +449,12 @@ class TPEquivariantInstruction(TPInstruction):
 
     def init_uncoupled_meta_data(self, l_p_init_list: list[list] = None):
         if l_p_init_list is None:
-            l_p_init_list = [[l, 1 if l % 2 == 0 else -1] for l in range(self.lmax + 1)]
+            l_p_init_list = [
+                [l, 1 if l % 2 == 0 else -1]
+                for l in range(self.lmax + 1)  # noqa: E741
+            ]
         meta = []
-        for l, p in l_p_init_list:
+        for l, p in l_p_init_list:  # noqa: E741
             for m in range(-l, l + 1):
                 meta.append([l, m, "", p, l])
         meta_df = pd.DataFrame(meta, columns=["l", "m", "hist", "parity", "sum_of_ls"])
@@ -421,7 +467,7 @@ class TPEquivariantInstruction(TPInstruction):
     ) -> dict:
         if l_p_list is None:
             plist = []
-            for l in range(max_l + 1):
+            for l in range(max_l + 1):  # noqa: E741
                 # p = 1 if l % 2 == 0 else -1
                 plist.append([l, 1])
                 plist.append([l, -1])
@@ -431,7 +477,9 @@ class TPEquivariantInstruction(TPInstruction):
         ind_d = coupling_meta_data.groupby(["parity", "l", "hist"]).indices
 
         func_ids = [
-            v for (p, l, *_), v in ind_d.items() if l <= max_l and [l, p] in plist
+            v
+            for (p, l, *_), v in ind_d.items()  # noqa: E741
+            if l <= max_l and [l, p] in plist
         ]
 
         collect_d = {}
@@ -464,7 +512,7 @@ class TPEquivariantInstruction(TPInstruction):
 
         if l_p_list is None:
             plist = []
-            for l in range(max_l + 1):
+            for l in range(max_l + 1):  # noqa: E741
                 # p = 1 if l % 2 == 0 else -1
                 plist.append([l, 1])
                 plist.append([l, -1])
@@ -477,7 +525,9 @@ class TPEquivariantInstruction(TPInstruction):
         #  Need to treat it properly below, but more importantly in the full context of the collector.
         #  For now, make sure the [l, p] list is not too restrictive.
         func_ids = [
-            v for (p, l, *_), v in ind_d.items() if l <= max_l and [l, p] in plist
+            v
+            for (p, l, *_), v in ind_d.items()  # noqa: E741
+            if l <= max_l and [l, p] in plist
         ]
 
         collect_d = {}
@@ -511,7 +561,9 @@ class TPEquivariantInstruction(TPInstruction):
         ind_d = self.coupling_meta_data.groupby(["parity", "l", "hist"]).indices
 
         func_ids = [
-            v for (p, l, *_), v in ind_d.items() if l == selected_l and p == selected_p
+            v
+            for (p, l, *_), v in ind_d.items()  # noqa: E741
+            if l == selected_l and p == selected_p
         ]
 
         collect_d = {}
@@ -628,7 +680,9 @@ class InstructionPrinter:
     def repr_var_info(
         instruction: TPInstruction, vars_counter: Dict[str, int] = None
     ) -> str:
-        hash_var_item: Callable[[str, List[int]], str] = lambda k, v: f"{k}={v}"
+        def hash_var_item(k: str, v: List[int]) -> str:
+            return f"{k}={v}"
+
         substr = ""
 
         col_width = 50
@@ -667,7 +721,7 @@ class InstructionPrinter:
     ) -> pd.DataFrame:
         df = df.copy()
         df["cg_list"] = df["cg_list"].apply(
-            lambda l: [f"{el:{format_str}}" for el in l]
+            lambda l: [f"{el:{format_str}}" for el in l]  # noqa: E741
         )
         return df
 

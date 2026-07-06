@@ -1,4 +1,25 @@
-from tensorpotential.instructions import *
+from tensorpotential.instructions.base import InstructionManager
+from tensorpotential.instructions.compute import (
+    BondLength,
+    FCRight2Left,
+    FunctionReduceN,
+    FunctionReduceParticular,
+    InvariantLayerRMSNorm,
+    MLPRadialFunction_v2,
+    ProductFunction,
+    RadialBasis,
+    ScalarChemicalEmbedding,
+    ScaledBondVector,
+    SingleParticleBasisFunctionEquivariantInd,
+    SingleParticleBasisFunctionScalarInd,
+    SphericalHarmonic,
+)
+from tensorpotential.instructions.output import (
+    ConstantScaleShiftTarget,
+    CreateOutputTarget,
+    LinMLPOut2ScalarTarget,
+    LinearOut2EquivarTarget,
+)
 from tensorpotential.potentials.registry import register_preset
 from tensorpotential.utils import Parity
 from tensorpotential.extra.gen_tensor import constants as tensor_constants
@@ -361,7 +382,7 @@ def grace_2(
             number_of_atom_types=num_elements,
             allowed_l_p=parity1,
         )
-        I = FunctionReduceN(
+        I = FunctionReduceN(  # noqa: E741
             name="I",
             instructions=[IM],
             ls_max=[lmax_indicator],
@@ -626,7 +647,7 @@ class ComputeBatchEFTensor(TrainFunction):
 
 
 def process_l0(a0):
-    I = tf.eye(3, batch_shape=[1], dtype=a0.dtype)
+    I = tf.eye(3, batch_shape=[1], dtype=a0.dtype)  # noqa: E741
     A0 = I * tf.reshape(a0, [-1, 1, 1])
     return tf.reshape(A0, [-1, 9])
 

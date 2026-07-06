@@ -1,21 +1,40 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import shutil
+import tempfile
 
 import tensorflow as tf
-
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
-
 
 from tensorpotential.loss import LossFunction
 from tensorpotential.metrics import ComputeMetrics
 from tensorpotential.tpmodel import (
-    TPModel,
     ComputeBatchEnergyAndForces,
     ComputeStructureEnergyAndForcesAndVirial,
+    TPModel,
 )
+from tensorpotential.utils import is_chief
+
+
+@contextlib.contextmanager
+def _chief_or_discardable_path(path, strategy):
+    """Yield `path` on chief; on non-chief, yield a unique temp path and rmtree after.
+
+    MultiWorkerMirroredStrategy requires every worker to participate in save ops
+    (they may invoke collectives internally), but only one worker's output should
+    land on the shared filesystem. Non-chief workers write to a local temp dir
+    which is removed when the context exits.
+    """
+    if is_chief(strategy):
+        yield path
+        return
+    tmp_dir = tempfile.mkdtemp(prefix="tp_nonchief_")
+    try:
+        yield os.path.join(tmp_dir, os.path.basename(path) or "out")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def get_output_dir(seed=42):
@@ -45,7 +64,7 @@ class TensorPotential:
         strategy: tf.distribute.Strategy = None,
         model_compute_function=ComputeStructureEnergyAndForcesAndVirial(),
         model_train_function=ComputeBatchEnergyAndForces(),
-        float_dtype: tf.DType = tf.float64,
+        param_dtype: tf.DType = tf.float32,
         eager_mode: bool = False,
         jit_compile: bool = True,
         seed: int = 42,
@@ -61,9 +80,11 @@ class TensorPotential:
         self.loss_function = loss_function
         self.regularization_loss = regularization_loss
         self.compute_metrics = compute_metrics
-        self.float_dtype = float_dtype
+        self.param_dtype = param_dtype
+        self.float_dtype = tf.float64
 
         # global output dir (will be used in many places)
+        self.seed = seed
         self.output_dir = get_output_dir(seed=seed)
 
         self.checkpoint_dir = os.path.join(self.output_dir, "checkpoints")
@@ -79,7 +100,10 @@ class TensorPotential:
                 train_function=model_train_function,
                 compute_function=model_compute_function,
             )
-            self.model.build(self.float_dtype)
+            self.model.build(
+                param_dtype=self.param_dtype,
+                input_signature_float_dtype=self.float_dtype,
+            )
             if self.loss_function is not None:
                 self.loss_function.build(self.float_dtype)
             if self.regularization_loss is not None:
@@ -103,8 +127,7 @@ class TensorPotential:
                         "opt_params", {"learning_rate": 0.01, "amsgrad": True}
                     ),
                 )
-                self.optimizer.exclude_from_weight_decay(var_names=["no_decay", "FC"])
-                # self.optimizer.exclude_from_weight_decay(var_names=["reducing", "FC"])
+                self._setup_weight_decay_exclusions()
                 try:
                     self.use_ema = self.fit_config["opt_params"]["use_ema"]
                 except KeyError:
@@ -123,11 +146,34 @@ class TensorPotential:
             #     )
             self.setup_checkpoint()
 
+    # Allowlist of variable name patterns that should have weight decay applied.
+    # Only variables whose names contain at least one of these patterns will be
+    # subject to weight decay. Everything else (norms, scales, shifts, gates,
+    # embeddings, readout) is automatically excluded.
+    WD_ALLOW_PATTERNS = ["reducing_"]
+
+    def _setup_weight_decay_exclusions(self):
+        """Exclude all variables except those matching WD_ALLOW_PATTERNS from weight decay."""
+        wd = self.optimizer.weight_decay
+        if not wd:
+            return
+
+        exclude_names = []
+        for v in self.model.variables_to_train:
+            has_wd = any(pat in v.name for pat in self.WD_ALLOW_PATTERNS)
+            tag = " WD " if has_wd else "SKIP"
+            logging.info(f"Weight decay: [{tag}] {v.name} {v.shape}")
+            if not has_wd:
+                exclude_names.append(v.name)
+
+        self.optimizer.exclude_from_weight_decay(var_names=exclude_names)
+
     def setup_checkpoint(self, with_optimizer=True):
         trackable_objs = {
             "model": self.model,
             "step": tf.Variable(0, dtype=tf.int32, trainable=False),
             "epoch": tf.Variable(0, dtype=tf.int32, trainable=False),
+            "intra_epoch_save": tf.Variable(False, dtype=tf.bool, trainable=False),
         }
         if self.optimizer and with_optimizer:
             trackable_objs["optimizer"] = self.optimizer
@@ -158,15 +204,28 @@ class TensorPotential:
     def increment_epoch(self):
         self.checkpoint.epoch.assign_add(1)
 
+    @property
+    def intra_epoch_save(self):
+        return bool(self.checkpoint.intra_epoch_save.numpy())
+
+    @intra_epoch_save.setter
+    def intra_epoch_save(self, value):
+        self.checkpoint.intra_epoch_save.assign(bool(value))
+
     def reset_epoch_and_step(self):
         self.checkpoint.epoch.assign(0)
         self.checkpoint.step.assign(0)
+        # No mid-epoch position remains once epoch/step are zeroed.
+        self.checkpoint.intra_epoch_save.assign(False)
 
     def reset_optimizer(self):
         with self.strategy.scope():
             if self.optimizer:
                 self.optimizer = self.optimizer.__class__(**self.optimizer.get_config())
                 self.setup_checkpoint()
+        # Mid-epoch rewind exists to "complete" gradient updates already baked
+        # into optimizer moments. With moments gone, rewind has no purpose.
+        self.checkpoint.intra_epoch_save.assign(False)
 
     def get_model_grad_signatures(self):
         dtypes = {"int": tf.int32, "float": self.float_dtype}
@@ -235,13 +294,26 @@ class TensorPotential:
         raise_errors=True,
         assert_consumed=False,
         assert_existing_objects_matched=False,
+        model_only: bool = False,
     ):
-        """load checkpoint from checkpoint_dir if exists"""
+        """load checkpoint from checkpoint_dir if exists.
+
+        ``model_only=True`` reads only the ``model`` (weights) subtree, ignoring
+        the training-bookkeeping trackables (step/epoch/intra_epoch_save) and
+        optimizer slots. Use it for inference / UQ loads where those are
+        irrelevant and a strict object match must not fail on checkpoints from
+        older fits that never wrote a given auxiliary trackable.
+        """
         if checkpoint_name is None:
             checkpoint_name = self.checkpoint_prefix + suffix
         if os.path.exists(f"{os.path.join(checkpoint_name)}.index"):
+            ckpt = (
+                tf.train.Checkpoint(model=self.model)
+                if model_only
+                else self.checkpoint
+            )
             with self.strategy.scope():
-                status = self.checkpoint.read(checkpoint_name)
+                status = ckpt.read(checkpoint_name)
                 if expect_partial:
                     status.expect_partial()
             if assert_consumed:
@@ -260,25 +332,36 @@ class TensorPotential:
                     f"No checkpoint index found at {checkpoint_name}.index"
                 )
 
-    def save_checkpoint(self, suffix="", checkpoint_name=None, verbose=False):
-        """save checkpoint to checkpoint_dir, overwrite if exists"""
+    def save_checkpoint(
+        self, suffix="", checkpoint_name=None, verbose=False, is_mid_epoch=False
+    ):
+        """save checkpoint to checkpoint_dir, overwrite if exists.
+
+        Sets the on-disk `intra_epoch_save` flag to `is_mid_epoch` so the
+        resume path can distinguish a mid-epoch save (caller passes True
+        from the intra-epoch save closure) from an epoch-boundary save
+        (default). All other call sites inherit False.
+        """
+        self.checkpoint.intra_epoch_save.assign(bool(is_mid_epoch))
         checkpoint_name = checkpoint_name or (self.checkpoint_prefix + suffix)
-        if verbose:
-            logging.info(f"Writing checkpoint to {checkpoint_name}.*")
-        if os.path.dirname(checkpoint_name):
-            os.makedirs(os.path.dirname(checkpoint_name), exist_ok=True)
-        self.checkpoint.write(checkpoint_name)
+        with _chief_or_discardable_path(checkpoint_name, self.strategy) as write_name:
+            if verbose and is_chief(self.strategy):
+                logging.info(f"Writing checkpoint to {write_name}.*")
+            if os.path.dirname(write_name):
+                os.makedirs(os.path.dirname(write_name), exist_ok=True)
+            self.checkpoint.write(write_name)
 
     def save_model(self, model_name=None, jit_compile=True, exact_path=None):
         """Saves model for serving"""
         exact_path = exact_path or os.path.join(self.output_dir, model_name)
-        if os.path.dirname(exact_path):
-            os.makedirs(os.path.dirname(exact_path), exist_ok=True)
-        self.model.save_model(
-            exact_path,
-            jit_compile=jit_compile,
-            float_dtype=self.float_dtype,
-        )
+        with _chief_or_discardable_path(exact_path, self.strategy) as write_path:
+            if os.path.dirname(write_path):
+                os.makedirs(os.path.dirname(write_path), exist_ok=True)
+            self.model.save_model(
+                write_path,
+                jit_compile=jit_compile,
+                input_signature_float_dtype=self.float_dtype,
+            )
 
     def save_model_with_aux_computes(
         self,
@@ -286,9 +369,27 @@ class TensorPotential:
         jit_compile=True,
         exact_path=None,
         communicated_keys=None,
+        gmm_uq_model=None,
     ):
         """Saves model with all auxiliary compute functions"""
         exact_path = exact_path or os.path.join(self.output_dir, model_name)
+        with _chief_or_discardable_path(exact_path, self.strategy) as exact_path:
+            self._save_model_with_aux_computes_impl(
+                exact_path=exact_path,
+                model_name=model_name,
+                jit_compile=jit_compile,
+                communicated_keys=communicated_keys,
+                gmm_uq_model=gmm_uq_model,
+            )
+
+    def _save_model_with_aux_computes_impl(
+        self,
+        exact_path,
+        model_name,
+        jit_compile,
+        communicated_keys,
+        gmm_uq_model=None,
+    ):
         if os.path.dirname(exact_path):
             os.makedirs(os.path.dirname(exact_path), exist_ok=True)
 
@@ -303,8 +404,17 @@ class TensorPotential:
             )
 
             use_2l_parallel = False
+            # When exporting with UQ, use standard compute for the 'compute' signature
+            # so its tf.function captures no GMM variables (TF cannot track them through
+            # the non-tf.Module compute_function attribute). 'compute_uq' is added
+            # separately by save_model and is the only signature that uses the GMM model.
+            export_compute_fn = (
+                ComputeStructureEnergyAndForcesAndVirial()
+                if gmm_uq_model is not None
+                else self.model.compute_function
+            )
             has_custom_compute = not isinstance(
-                self.model.compute_function, ComputeStructureEnergyAndForcesAndVirial
+                export_compute_fn, ComputeStructureEnergyAndForcesAndVirial
             )
             has_2layer = any(
                 isinstance(ins, SingleParticleBasisFunctionEquivariantInd)
@@ -358,31 +468,38 @@ class TensorPotential:
                     m_aux = build_split_tpmodel(
                         self.model.instructions,
                         communicated_keys=communicated_keys,
-                        float_dtype=self.float_dtype,
+                        param_dtype=self.param_dtype,
+                        input_signature_float_dtype=self.float_dtype,
                         jit_compile=jit_compile,
                         extra_aux_computes=extra_aux_computes,
                     )
                     m_aux.save_model(
                         exact_path,
                         jit_compile=jit_compile,
-                        float_dtype=self.float_dtype,
+                        input_signature_float_dtype=self.float_dtype,
+                        gmm_uq_model=gmm_uq_model,
                     )
             else:
                 with self.strategy.scope():
                     m_aux = TPModel(
                         instructions=self.model.instructions,
-                        compute_function=self.model.compute_function,
+                        compute_function=export_compute_fn,
                         train_function=self.model.train_function,
                         aux_compute=extra_aux_computes,
                     )
-                    m_aux.build(self.float_dtype, jit_compile=jit_compile)
+                    m_aux.build(param_dtype=self.param_dtype, jit_compile=jit_compile)
                     m_aux.save_model(
                         exact_path,
                         jit_compile=jit_compile,
-                        float_dtype=self.float_dtype,
+                        input_signature_float_dtype=self.float_dtype,
+                        gmm_uq_model=gmm_uq_model,
                     )
-        except Exception as e:
-            logging.error(f"Failed to save model with auxiliary compute functions: {e}")
+        except Exception:
+            logging.exception("Failed to save model with auxiliary compute functions")
+            if gmm_uq_model is not None:
+                # Fallback save_model uses the original model which may have a UQ
+                # compute_function capturing untracked GMM variables — don't attempt it.
+                raise
             logging.warning(
                 "Falling back to standard save_model without auxiliary functions."
             )
@@ -579,116 +696,92 @@ class TensorPotential:
         self.reduce_dict(results)
         return results
 
+    def _get_ema_optimizer(self):
+        """Return the optimizer that holds EMA state, unwrapping LossScaleOptimizer if needed."""
+        if hasattr(self.optimizer, "inner_optimizer"):
+            return self.optimizer.inner_optimizer
+        return self.optimizer
+
     def _swap_variables(self, optimizer):
+        """Swap model weights with EMA shadow weights in-place.
+
+        Uses numpy as intermediate storage. For MirroredVariables,
+        .numpy() reads from the primary replica and .assign() broadcasts to all.
+        Avoids strategy.extended.update which can be flaky with NCCL on multi-GPU.
+        """
         for var, average_var in zip(
             self.model.variables_to_train,
             optimizer._model_variables_moving_average,
         ):
-            # if isinstance(var, tf.Variable):
-            #     var = var.value
-            # if isinstance(average_var, tf.Variable):
-            #     average_var = average_var.value
-            # swap using addition to prevent variable creation
-            optimizer._distribution_strategy.extended.update(
-                var,
-                lambda a, b: a.assign_add(b),
-                args=(average_var,),
-            )
-            optimizer._distribution_strategy.extended.update(
-                var,
-                lambda a, b: b.assign(a - b),
-                args=(average_var,),
-            )
-            optimizer._distribution_strategy.extended.update(
-                var,
-                lambda a, b: a.assign(a - b),
-                args=(average_var,),
-            )
+            tmp = var.numpy()
+            var.assign(average_var)
+            average_var.assign(tmp)
+
+    def _swap_variables_on_device(self, optimizer):
+        """Swap model weights with EMA shadow weights in-place (on-device variant).
+
+        Uses tf.identity + strategy.extended.update to stay on GPU.
+        Exact precision, single update call per variable pair.
+        May have issues with NCCL synchronization on some multi-GPU setups.
+        """
+        strategy = optimizer._distribution_strategy
+        for var, average_var in zip(
+            self.model.variables_to_train,
+            optimizer._model_variables_moving_average,
+        ):
+
+            def swap_fn(v, avg):
+                tmp = tf.identity(v)
+                v.assign(avg)
+                avg.assign(tmp)
+
+            strategy.extended.update(var, swap_fn, args=(average_var,))
 
     def swap_variables(self):
-        # if hasattr(self.optimizer, "inner_optimizer"):
-        #     # LossScaleOptimizer
-        #     optimizer = self.optimizer.inner_optimizer
-        # else:
-        optimizer = self.optimizer
+        optimizer = self._get_ema_optimizer()
         if not hasattr(optimizer, "_model_variables_moving_average"):
             raise ValueError(
-                "SwapEMAWeights must be used when "
-                "`use_ema=True` is set on the optimizer. "
-                f"Received: use_ema={optimizer.use_ema}"
+                "swap_variables requires use_ema=True on the optimizer. "
+                f"Received: use_ema={getattr(optimizer, 'use_ema', False)}"
             )
-
         self._swap_variables(optimizer)
 
-    def on_epoch_begin(self):
-        if self.use_ema and self.swap_on_epoch and self._ema_weights_in_model:
-            self.swap_variables()
-            self._ema_weights_in_model = False
+    @contextlib.contextmanager
+    def ema_scope(self):
+        """Swap EMA weights into model on enter, swap back on exit.
 
-    # def on_epoch_end(self, epoch, logs=None):
-    #     if self.swap_on_epoch and not self._ema_weights_in_model:
-    #         self._swap_variables()
-    #         self._ema_weights_in_model = True
-    #         # We need to recover EMA weights from the previously swapped weights
-    #         # in the last epoch. This is because, at the end of the fitting,
-    #         # `finalize_variable_values` will be called to assign
-    #         # `_model_variables_moving_average` to `trainable_variables`.
-    #         if epoch == self.params["epochs"] - 1:
-    #             self._finalize_ema_values()
-    # def _tf_finalize_ema_values(self, optimizer):
-    #     for var, average_var in zip(
-    #         self.model.trainable_variables,
-    #         optimizer._model_variables_moving_average,
-    #     ):
-    #         if isinstance(var, backend.Variable):
-    #             var = var.value
-    #         if isinstance(average_var, backend.Variable):
-    #             average_var = average_var.value
-    #         optimizer._distribution_strategy.extended.update(
-    #             average_var,
-    #             lambda a, b: a.assign(b),
-    #             args=(var,),
-    #         )
-
-    def on_test_begin(self):
-        if self.use_ema and not self._ema_weights_in_model:
-            self.swap_variables()
+        No-op when use_ema=False or optimizer not yet built.
+        Safe for nested calls (inner scope is a no-op).
+        """
+        optimizer = self._get_ema_optimizer()
+        should_swap = (
+            self.use_ema
+            and hasattr(optimizer, "_model_variables_moving_average")
+            and not self._ema_weights_in_model
+        )
+        if should_swap:
+            self._swap_variables(optimizer)
             self._ema_weights_in_model = True
+        try:
+            yield
+        finally:
+            if should_swap:
+                self._swap_variables(optimizer)
+                self._ema_weights_in_model = False
 
-    def on_test_end(self):
-        if self.use_ema and self._ema_weights_in_model:
-            self.swap_variables()
-            self._ema_weights_in_model = False
+    def prepare_for_training(self):
+        """After loading a checkpoint (which stores model=EMA), swap back to training state.
 
-    def finalize_ema_values(self):
-        if hasattr(self.optimizer, "inner_optimizer"):
-            # LossScaleOptimizer
-            optimizer = self.optimizer.inner_optimizer
-        else:
-            optimizer = self.optimizer
+        No-op when use_ema=False or optimizer not built.
+        Safe for old checkpoints where model==shadow (swap is identity).
+        """
+        if not self.use_ema:
+            return
+        optimizer = self._get_ema_optimizer()
         if not hasattr(optimizer, "_model_variables_moving_average"):
-            raise ValueError(
-                "SwapEMAWeights must be used when "
-                "`use_ema=True` is set on the optimizer. "
-                f"Received: use_ema={optimizer.use_ema}"
-            )
-        if self.use_ema:
-            self._finalize_ema_values(optimizer)
-
-    def _finalize_ema_values(self, optimizer):
-        for var, average_var in zip(
-            self.model.variables_to_train,
-            optimizer._model_variables_moving_average,
-        ):
-            # if isinstance(var, tf.Variable):
-            #     var = var.value
-            # if isinstance(average_var, tf.Variable):
-            #     average_var = average_var.value
-            optimizer._distribution_strategy.extended.update(
-                average_var,
-                lambda a, b: a.assign(b),
-                args=(var,),
-            )
+            return
+        self._swap_variables(optimizer)
+        self._ema_weights_in_model = False
 
     def enable_lora_adaptation(self, lora_config=None):
         raise NotImplementedError("This functionality is not yet fully implemented")

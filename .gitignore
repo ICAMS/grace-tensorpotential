@@ -19,6 +19,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# ...but the grace_uq build subpackage is real code, not a setuptools artifact.
+!tensorpotential/uq/cli/build/
+!tensorpotential/uq/cli/build/*.py
 develop-eggs/
 dist/
 downloads/

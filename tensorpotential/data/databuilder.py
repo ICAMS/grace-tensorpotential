@@ -3,12 +3,11 @@ from __future__ import annotations
 import gc
 import itertools
 import logging
-import math
-import random
 import os
 import signal
 import threading
 import time
+import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
@@ -25,6 +24,21 @@ from tensorpotential import constants
 from tensorpotential.data.process_df import ENERGY_CORRECTED_COL, FORCES_COL, STRESS_COL
 from tensorpotential.utils import process_cutoff_dict, enforce_pbc
 
+
+def symbols_to_indices(symbols, sym_to_idx, *, default=None) -> np.ndarray:
+    """Map ASE chemical symbols to model element indices.
+
+    ``sym_to_idx`` is a ``{symbol: index}`` mapping. If ``default`` is None
+    (the strict default), unknown symbols raise ``KeyError`` — match the
+    strict behavior already used by the data pipeline. If ``default`` is an
+    int sentinel (e.g. ``-1``), unknowns map to that value instead.
+    """
+    if default is None:
+        return np.array([sym_to_idx[s] for s in symbols], dtype=np.int32)
+    sentinel = int(default)
+    return np.array(
+        [sym_to_idx.get(s, sentinel) for s in symbols], dtype=np.int32
+    )
 
 # from ase.neighborlist import neighbor_list as nl
 
@@ -201,10 +215,109 @@ def split_batches_into_buckets(batches_df, max_n_buckets):
     return buckets_list
 
 
+def _struct_max_neigh(data_dict):
+    """Max per-atom neighbor count for one (per-structure) data dict, from its real bond
+    list. Every atom is guaranteed >=1 neighbor by the fictitious-neighbor handling in
+    GeometricalDataBuilder.extract_from_ase_atoms."""
+    nat = get_number_of_real_atoms(data_dict)
+    n_real = get_number_of_real_neigh(data_dict)
+    ind_i = np.asarray(data_dict[constants.BOND_IND_I])[:n_real]
+    counts = np.bincount(ind_i, minlength=nat)[:nat]
+    return int(counts.max()) if counts.size else 0
+
+
+def bucketing_split_dense(
+    data_dict_list,
+    batch_size,
+    max_n_buckets,
+    slot_budget="auto",
+    n_neigh_buckets="auto",
+    net_padding=0.15,
+    max_shapes=64,
+    max_neigh_cap=None,
+    verbose=False,
+):
+    """max_neigh-aware elastic bucketing for the dense (reshape) layout. Same return contract
+    as ``bucketing_split`` — ``(data_batches, max_pad_batches)`` — but each ``max_pad`` dict
+    also carries ``PAD_MAX_NEIGH`` (the per-batch reshape width) and sets
+    ``PAD_MAX_N_NEIGHBORS = max_nat * max_neigh`` (the derived dense bond count).
+
+    ``net_padding`` is the UNIFIED target on the net neighbor-padding fraction (the dense
+    ``auto_bucket_max_padding``). Because the dense atom/neighbor axes are bound, an adaptive split
+    drives BOTH the ``max_neigh`` width bucketing AND the within-width ``nat`` (fake-atom) bucketing
+    to meet that target with the FEWEST distinct shapes. ``max_shapes`` is the HARD cap on distinct
+    ``(max_nat, max_neigh)`` shapes (== XLA recompiles) — the compile budget. ``n_neigh_buckets``
+    (explicit width K) and ``max_n_buckets`` (explicit nat-bucket cap) override the auto search.
+
+    ``verbose`` is accepted for API symmetry with ``bucketing_split`` but is currently
+    unused — ``plan_dense_batches`` takes no ``verbose`` argument."""
+    from tensorpotential.data.dense_nbr import plan_dense_batches
+
+    nat = np.array([get_number_of_real_atoms(d) for d in data_dict_list])
+    max_neigh = np.array([_struct_max_neigh(d) for d in data_dict_list])
+    n_neigh = np.array([get_number_of_real_neigh(d) for d in data_dict_list])
+
+    plan, dropped = plan_dense_batches(
+        nat,
+        max_neigh,
+        n_neigh,
+        batch_size=batch_size,
+        slot_budget=slot_budget,
+        n_neigh_buckets=n_neigh_buckets,
+        net_padding=net_padding,
+        max_shapes=max_shapes,
+        max_neigh_cap=max_neigh_cap,
+        max_n_buckets=max_n_buckets,
+    )
+    if dropped:
+        logging.warning(
+            f"dense_max_neigh_cap={max_neigh_cap}: dropped {len(dropped)} structure(s) with "
+            f"per-atom max_neigh above the cap (treated as broken cells)."
+        )
+
+    # Report the achieved compile budget (distinct shapes) and net padding; warn if the compile
+    # cap forced the net padding above the target.
+    if plan:
+        real_total = sum(int(pb_n) for pb_n in n_neigh)
+        slots = sum(pb["max_nat"] * pb["max_neigh"] for pb in plan)
+        achieved_net = 1.0 - real_total / slots if slots else 0.0
+        n_shapes = len({(pb["max_nat"], pb["max_neigh"]) for pb in plan})
+        logging.info(
+            f"dense bucketing: {len(plan)} batches, {n_shapes}/{max_shapes} distinct shapes "
+            f"(XLA recompiles), net neighbor padding {achieved_net * 1e2:.1f}% "
+            f"(target {net_padding * 1e2:.0f}%)"
+        )
+        if achieved_net > net_padding + 0.02:
+            logging.warning(
+                f"dense net padding {achieved_net * 1e2:.1f}% exceeds target {net_padding * 1e2:.0f}% "
+                f"because the compile cap max_shapes={max_shapes} binds. Raise dense_max_shapes "
+                f"(more XLA recompiles) or batch_size to lower padding."
+            )
+
+    data_batches = []
+    max_pad_batches = []
+    for pb in plan:
+        data_batches.append([data_dict_list[i] for i in pb["structure_ind"]])
+        max_pad_batches.append(
+            {
+                constants.PAD_MAX_N_STRUCTURES: pb["max_nstruct"],
+                constants.PAD_MAX_N_ATOMS: pb["max_nat"],
+                constants.PAD_MAX_NEIGH: pb["max_neigh"],
+                constants.PAD_MAX_N_NEIGHBORS: pb["max_nat"] * pb["max_neigh"],
+            }
+        )
+    return data_batches, max_pad_batches
+
+
 class AbstractDataBuilder(ABC):
     def __init__(self, float_dtype: str = "float64"):
         dtypes = {"float64": np.float64, "float32": np.float32}
         assert float_dtype in dtypes, f"float_dtype must be in {list(dtypes.keys())}"
+        if float_dtype == "float32":
+            warnings.warn(
+                f"DataBuiilder {self.__class__.__name__} wants to build a float32 data"
+                f"This is likely undesired."
+            )
         float_dtype = dtypes[float_dtype]
         self.float_dtype = float_dtype
 
@@ -257,6 +370,12 @@ class GeometricalDataBuilder(AbstractDataBuilder):
         cutoff_dict: dict = None,
         is_fit_stress=False,
         bond_type: str = "symmetric_bond",
+        dense_nbr: bool = False,
+        dense_slot_budget="auto",
+        dense_n_neigh_buckets="auto",
+        dense_net_padding=0.15,
+        dense_max_shapes=64,
+        dense_max_neigh_cap=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -291,6 +410,26 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             self.nl_cutoffs = self.cutoff
 
         self.is_fit_stress = is_fit_stress
+        # Mirrors input.yaml::potential::dense_nbr (the model's dense reshape mode).
+        # When True, pad_batch emits the per-atom-uniform reshape bond layout
+        # (_emit_dense_reshape_layout) and construct_batches routes batching through
+        # bucketing_split_dense; single-structure inference uses the same layout via
+        # DensePaddingManager in the calculator.
+        self.dense_nbr = bool(dense_nbr)
+        # Dense (reshape) batching knobs (mode 1, in-RAM). Used by bucketing_split_dense via
+        # construct_batches. See knowledge/superpowers/specs/2026-06-24-dense-nbr-bucketing-design.md.
+        # dense_net_padding is the UNIFIED net neighbor-padding target (dense auto_bucket_max_padding):
+        # it drives BOTH the adaptive max_neigh width bucketing and the within-width nat (fake-atom)
+        # bucketing so the combined net lands at the target (the axes are bound in dense). The
+        # cli sources it from fit::auto_bucket_max_padding (default 0.15 in dense). dense_max_shapes
+        # is the HARD cap on distinct (max_nat, max_neigh) shapes (== XLA recompiles) — the compile
+        # budget. dense_n_neigh_buckets (explicit width K) overrides the adaptive search;
+        # dense_max_neigh_cap drops over-coordinated (broken) cells.
+        self.dense_slot_budget = dense_slot_budget
+        self.dense_n_neigh_buckets = dense_n_neigh_buckets
+        self.dense_net_padding = dense_net_padding
+        self.dense_max_shapes = dense_max_shapes
+        self.dense_max_neigh_cap = dense_max_neigh_cap
 
     def extract_from_ase_atoms(self, ase_atoms, **kwarg):
         """
@@ -309,8 +448,8 @@ class GeometricalDataBuilder(AbstractDataBuilder):
 
         ind_i, ind_j, bond_vector = nl("ijD", ase_atoms, cutoff=cutoff)
 
-        atomic_mu_i = np.array(
-            [self.elements_map[s] for s in ase_atoms.get_chemical_symbols()]
+        atomic_mu_i = symbols_to_indices(
+            ase_atoms.get_chemical_symbols(), self.elements_map
         )
 
         # nat_per_specie = defaultdict(int)
@@ -406,7 +545,7 @@ class GeometricalDataBuilder(AbstractDataBuilder):
             constants.N_STRUCTURES_BATCH_REAL,
             constants.N_NEIGHBORS_REAL,
         ]:
-            sum_val = sum([data_dict[key] for data_dict in pre_batch_list])
+            sum_val = sum((int(data_dict[key]) for data_dict in pre_batch_list))
             res_dict[key] = np.array(sum_val)
 
         # batch_tot_nat, batch_total_num_structures
@@ -510,6 +649,16 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                 constant_values=max_structs - 1,  # fake structure
             )
 
+        if self.dense_nbr:
+            # Dense (reshape) layout: replace the flat bond arrays with the per-atom-uniform
+            # [max_nat * max_neigh] layout the reshape compute consumes. Each atom is padded
+            # to `width` slots; padded slots get a dummy bond > cutoff (zeroed by the
+            # envelope). The fake atom (if any) gets `width` all-dummy slots.
+            self._emit_dense_reshape_layout(
+                batch, int(max_nat), int(max_pad_dict[constants.PAD_MAX_NEIGH])
+            )
+            return
+
         # pad neigh
         if pad_nneigh > 0:
             for key in [
@@ -522,7 +671,6 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                     (0, pad_nneigh),
                     mode="constant",
                     constant_values=a[0],
-                    # TODO: pad BOND_IND_I BOND_IND_J with fake atom?
                 )
 
             # pad BOND_IND_I BOND_IND_J with fake atom
@@ -554,6 +702,35 @@ class GeometricalDataBuilder(AbstractDataBuilder):
                 mode="constant",
                 constant_values=max_structs - 1,  # fake structure
             )
+
+    def _emit_dense_reshape_layout(self, batch, max_nat, width):
+        """In-place: rebuild the bond arrays in the per-atom-uniform [max_nat * width] reshape
+        layout from the REAL bonds. Padded slots (incl. the fake atom's whole block) get a
+        dummy bond > cutoff so the envelope zeros them; BOND_IND dummies point at atom 0 (a
+        zero-contribution scatter target). Requires n_bonds == max_nat * width exactly."""
+        from tensorpotential.data.dense_nbr import (
+            build_dense_reshape_perm,
+            reorder_bonds_for_reshape,
+        )
+
+        n_real = get_number_of_real_neigh(batch)
+        ind_i = np.asarray(batch[constants.BOND_IND_I])[:n_real]
+        perm, _ = build_dense_reshape_perm(
+            ind_i, n_atoms=max_nat, sentinel=n_real, force_max_neigh=width
+        )
+        dummy = {
+            constants.BOND_VECTOR: 52.0,  # > cutoff -> envelope zeros padded slots
+            constants.BOND_MU_I: 0,
+            constants.BOND_MU_J: 0,
+            constants.BOND_IND_I: 0,
+            constants.BOND_IND_J: 0,
+            constants.BONDS_TO_STRUCTURE_MAP: 0,
+        }
+        present = {k: np.asarray(batch[k])[:n_real] for k in dummy if k in batch}
+        reordered = reorder_bonds_for_reshape(
+            present, perm, {k: dummy[k] for k in present}
+        )
+        batch.update(reordered)
 
 
 class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
@@ -719,11 +896,11 @@ class ReferenceEnergyForcesStressesDataBuilder(AbstractDataBuilder):
     def join_to_batch(self, pre_batch_list: list):
         res_dict = {}
         for key in [constants.DATA_REFERENCE_ENERGY]:
-            data_list = [float(data_dict[key]) for data_dict in pre_batch_list]
+            data_list = [np.float64(data_dict[key]) for data_dict in pre_batch_list]
             res_dict[key] = np.array(data_list).reshape(-1, 1).astype(self.float_dtype)
 
         for key in [constants.DATA_STRUCTURE_ID]:
-            data_list = [int(data_dict[key]) for data_dict in pre_batch_list]
+            data_list = [np.int32(data_dict[key]) for data_dict in pre_batch_list]
             res_dict[key] = np.array(data_list).reshape(-1, 1).astype(int)
 
         for key in [constants.DATA_REFERENCE_FORCES]:
@@ -920,13 +1097,29 @@ def construct_batches(
         # bucketing
         if verbose:
             logging.info("2/4. Splitting batches into per-batch groups.")
-        pre_batch_groups, max_pad_batches = bucketing_split(
-            data_dict_list,
-            batch_size=batch_size,
-            max_n_buckets=max_n_buckets,
-            verbose=verbose,
-            max_padding_fraction=max_padding_fraction,
+        dense_builder = next(
+            (db for db in data_builders if getattr(db, "dense_nbr", False)), None
         )
+        if dense_builder is not None:
+            pre_batch_groups, max_pad_batches = bucketing_split_dense(
+                data_dict_list,
+                batch_size=batch_size,
+                max_n_buckets=max_n_buckets,
+                slot_budget=dense_builder.dense_slot_budget,
+                n_neigh_buckets=dense_builder.dense_n_neigh_buckets,
+                net_padding=dense_builder.dense_net_padding,
+                max_shapes=dense_builder.dense_max_shapes,
+                max_neigh_cap=dense_builder.dense_max_neigh_cap,
+                verbose=verbose,
+            )
+        else:
+            pre_batch_groups, max_pad_batches = bucketing_split(
+                data_dict_list,
+                batch_size=batch_size,
+                max_n_buckets=max_n_buckets,
+                verbose=verbose,
+                max_padding_fraction=max_padding_fraction,
+            )
         del data_dict_list
         if gc_collect:
             gc.collect()
@@ -949,7 +1142,7 @@ def construct_batches(
         # Stage 4. Padding batches
         if verbose:
             logging.info("4/4. Padding batches")
-        if external_max_nneigh is not None:
+        if dense_builder is None and external_max_nneigh is not None:
             current_max_nneigh = np.max(
                 [d[constants.PAD_MAX_N_NEIGHBORS] for d in max_pad_batches]
             )
@@ -957,7 +1150,7 @@ def construct_batches(
                 external_max_nneigh = current_max_nneigh
             for d in max_pad_batches:
                 d[constants.PAD_MAX_N_NEIGHBORS] = external_max_nneigh
-        if external_max_nat is not None:
+        if dense_builder is None and external_max_nat is not None:
             current_max_nat = np.max(
                 [d[constants.PAD_MAX_N_ATOMS] for d in max_pad_batches]
             )
@@ -1049,9 +1242,7 @@ def parallel_process_dataframe(
         initializer=start_thread_to_terminate_when_parent_process_dies,
         initargs=(os.getpid(),),
     ) as executor:
-        with tqdm(
-            total=len(df_or_ase_atoms_list), mininterval=MININTERVAL
-        ) as pbar:
+        with tqdm(total=len(df_or_ase_atoms_list), mininterval=MININTERVAL) as pbar:
             for chunk in chunks:
                 # Submit tasks for each row in df_or_ase_atoms_list
                 futures = [

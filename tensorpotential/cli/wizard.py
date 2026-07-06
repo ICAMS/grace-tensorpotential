@@ -42,24 +42,18 @@ except ImportError:
     _HAS_RICH = False
 
 try:
-    import readline
+    import readline  # noqa: F401
 
     no_readline = False
 except ImportError:
     no_readline = True
 
 from tensorpotential.potentials import (
-    get_preset,
     get_public_preset_list,
     get_default_preset_name,
     get_preset_settings,
 )
 
-from tensorpotential.calculator.foundation_models import (
-    MODELS_METADATA,
-    CHECKPOINT_URL_KEY,
-    DESCRIPTION_KEY,
-)
 
 try:
     from tensorpotential.extra.gen_tensor.wizard import run_gen_tensor_wizard
@@ -146,6 +140,20 @@ def _success(msg: str):
         _rich_console.print(f"  [bold green]✓[/bold green] {msg}")
     else:
         print(f"  OK: {msg}")
+
+
+def _warning(msg: str):
+    if _HAS_RICH:
+        _rich_console.print(f"  [bold orange1]![/bold orange1] {msg}")
+    else:
+        print(f"  WARNING: {msg}")
+
+
+def _error(msg: str):
+    if _HAS_RICH:
+        _rich_console.print(f"  [bold red]✗[/bold red] {msg}")
+    else:
+        print(f"  ERROR: {msg}")
 
 
 def _section(title: str):
@@ -245,7 +253,7 @@ class _WizardState:
     test_size: float = 0.05
     # Model
     fit_type: str = "finetune"
-    finetune_model: bool = False
+    load_existing_model: bool = False
     foundation_model_name: str = ""
     finetune_mode: str = "naive"  # "naive" or "frozen"
     preset_name: str = ""
@@ -273,6 +281,8 @@ class _WizardState:
     new_energy_w: int = 128
     new_force_w: int = 32
     new_stress_w: float = 32.0
+    # Precision
+    param_dtype: str = "float32"
     # Weighting & batch
     weighting_scheme: str = "uniform"
     batch_size: int = 32
@@ -461,18 +471,18 @@ def _section_fit_type(s: _WizardState) -> _WizardState:
     )
     # Map to internal logic
     if s.fit_type == "finetune foundation model":
-        s.finetune_model = True
+        s.load_existing_model = True
     elif s.fit_type == "continue fit":
-        s.finetune_model = True
+        s.load_existing_model = True
     else:
-        s.finetune_model = False
+        s.load_existing_model = False
     return s
 
 
 def _section_model(s: _WizardState) -> _WizardState:
     _section("Model Details")
 
-    if s.finetune_model:
+    if s.load_existing_model:
         if s.fit_type == "continue fit":
             s.foundation_model_name = _ask_path(
                 "Model config to continue from (e.g. model.yaml):"
@@ -549,7 +559,7 @@ def _section_model(s: _WizardState) -> _WizardState:
                     "naive finetuning (all model parameters will be updated)",
                     "frozen weights (only some parameters will be updated)",
                 ],
-                default="naive finetuning (all model parameters will be updated)",
+                default="frozen weights (only some parameters will be updated)",
             )
             # Normalise to short key
             if s.finetune_mode.startswith("frozen"):
@@ -594,6 +604,21 @@ def _section_model(s: _WizardState) -> _WizardState:
         _success(f"Cutoff: {s.cutoff} Å")
         s.learning_rate = 0.008
         s.eval_init_stats = False
+
+    if not s.load_existing_model:
+        _section("Parameter precision")
+        precision = _ask_select(
+            "Model parameter precision:",
+            choices=[
+                "mixed FP32/64 (parameters in FP32, geometry in FP64)",
+                "FP64 (full double precision)",
+            ],
+            default="mixed FP32/64 (parameters in FP32, geometry in FP64)",
+        )
+        s.param_dtype = "float32" if precision.startswith("mixed") else "float64"
+        _success(f"param_dtype: {s.param_dtype}")
+    else:
+        s.param_dtype = None  # inferred from checkpoint/model.yaml
     return s
 
 
@@ -740,7 +765,7 @@ def _show_review(s: _WizardState):
             s.test_filename if s.use_separate_test else f"split {s.test_size:.0%}",
         )
         t.add_row("Save dataset", "True" if not s.use_separate_test else "False")
-        if s.finetune_model:
+        if s.load_existing_model:
             label = (
                 "Previous model" if s.fit_type == "continue fit" else "Foundation model"
             )
@@ -752,7 +777,7 @@ def _show_review(s: _WizardState):
                 "Model",
                 f"{s.preset_name} / {s.preset_complexity}  cutoff={s.cutoff} Å",
             )
-        if s.finetune_model and s.fit_type == "finetune foundation model":
+        if s.load_existing_model and s.fit_type == "finetune foundation model":
             t.add_row("Finetuning mode", s.finetune_mode)
         t.add_row("Eval initial stats", str(s.eval_init_stats))
         t.add_row("Reset epoch/step", str(s.reset_epoch_and_step))
@@ -762,6 +787,8 @@ def _show_review(s: _WizardState):
             "Loss",
             f"{s.loss_type}  E={s.energy_loss_weight}  F={s.force_loss_weight}{stress_part}",
         )
+        if not s.load_existing_model:
+            t.add_row("Param dtype", s.param_dtype)
         t.add_row("Weighting", s.weighting_scheme)
         t.add_row("Batch size", str(s.batch_size))
         t.add_row("Total updates", str(s.target_total_updates))
@@ -783,7 +810,7 @@ def _show_review(s: _WizardState):
             f"  Test:        {s.test_filename if s.use_separate_test else f'split {s.test_size}'}"
         )
         print(f"  Save dataset: {'True' if not s.use_separate_test else 'False'}")
-        if s.finetune_model:
+        if s.load_existing_model:
             label = (
                 "Previous model" if s.fit_type == "continue fit" else "Foundation model"
             )
@@ -796,11 +823,13 @@ def _show_review(s: _WizardState):
             print(
                 f"  Model:       {s.preset_name}/{s.preset_complexity}  cutoff={s.cutoff}"
             )
-        if s.finetune_model and s.fit_type == "finetune foundation model":
+        if s.load_existing_model and s.fit_type == "finetune foundation model":
             print(f"  Finetune:    {s.finetune_mode}")
         print(f"  Eval init:   {s.eval_init_stats}")
         print(f"  Reset epoch: {s.reset_epoch_and_step}")
         print(f"  Optimizer:   {s.optimizer}")
+        if not s.load_existing_model:
+            print(f"  Param dtype: {s.param_dtype}")
         print(f"  Loss:        {s.loss_type}  F={s.force_loss_weight}")
         print(f"  Weighting:   {s.weighting_scheme}  batch={s.batch_size}")
         print(f"  Total updates: {s.target_total_updates}")
@@ -820,7 +849,7 @@ def _apply_state(s: _WizardState, template: str) -> str:
         template = template.replace("{{SAVE_DATASET}}", "True")
 
     # Model
-    if s.finetune_model:
+    if s.load_existing_model:
         if s.fit_type == "continue fit":
             potential_block = f"filename: {s.foundation_model_name}\n\n"
         else:
@@ -939,6 +968,13 @@ def _apply_state(s: _WizardState, template: str) -> str:
     template = template.replace("{{BATCH_SIZE}}", str(s.batch_size))
     template = template.replace("{{TEST_BATCH_SIZE}}", str(4 * s.batch_size))
     template = template.replace("{{TARGET_TOTAL_UPDATES}}", str(s.target_total_updates))
+    if s.param_dtype is None:
+        template = template.replace(
+            "param_dtype: {{PARAM_DTYPE}}",
+            "# param_dtype: inferred from checkpoint/model.yaml",
+        )
+    else:
+        template = template.replace("{{PARAM_DTYPE}}", s.param_dtype)
 
     return template
 

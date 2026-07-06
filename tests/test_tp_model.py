@@ -21,7 +21,12 @@ from tensorpotential.tpmodel import TPModel, ExtractBasisFunctions
 #    GRACE_2LAYER,
 # )
 from tensorpotential.potentials import get_preset
-from tensorpotential.instructions import load_instructions, save_instructions_dict
+from tensorpotential.instructions import (
+    load_instructions,
+    save_instructions_dict,
+)
+from tensorpotential.utils import get_dtype_by_name
+from tensorpotential.metadata_utils import read_model_metadata
 from tensorpotential.calculator import TPCalculator
 
 from ase import Atoms
@@ -168,12 +173,12 @@ def test_convert_model_reduce_elements():
         basis_type="Cheb",
         cutoff_dict={"Mo": 4, "Nb": 5, "Ta": 6, "W": 7},
     ).get_instructions()
-    tp = TensorPotential(instructions, float_dtype=float_dtype)
+    tp = TensorPotential(instructions, param_dtype=float_dtype)
 
     potential_file_name = os.path.join(TEST_PATH, "model.MoNbTaW.yaml")
     checkpoint_name = os.path.join(TEST_PATH, "checkpoint.MoNbTaW")
 
-    save_instructions_dict(potential_file_name, instructions)
+    save_instructions_dict(potential_file_name, instructions, param_dtype=float_dtype)
     tp.save_checkpoint(checkpoint_name=checkpoint_name)
 
     assert os.path.isfile(potential_file_name)
@@ -191,18 +196,31 @@ def test_convert_model_reduce_elements():
         checkpoint_name=checkpoint_name,
         new_potential_file_name=new_potential_file_name,
         new_checkpoint_name=new_checkpoint_name,
+        param_dtype=float_dtype,
     )
 
     assert os.path.isfile(new_potential_file_name)
     assert os.path.isfile(new_checkpoint_name + ".index")
 
-    # stage 2: compare predictions
+    # stage 2: compare predictions — read param_dtype from model.yaml metadata
     instructions1 = load_instructions(potential_file_name)
-    instructions2 = load_instructions(new_potential_file_name)
-    model1 = TensorPotential(instructions1)
+    meta1 = read_model_metadata(potential_file_name)
+    dtype1 = (
+        get_dtype_by_name(meta1["param_dtype"])
+        if "param_dtype" in meta1
+        else tf.float64
+    )
+    model1 = TensorPotential(instructions1, param_dtype=dtype1)
     model1.load_checkpoint(checkpoint_name=checkpoint_name)
 
-    model2 = TensorPotential(instructions2)
+    instructions2 = load_instructions(new_potential_file_name)
+    meta2 = read_model_metadata(new_potential_file_name)
+    dtype2 = (
+        get_dtype_by_name(meta2["param_dtype"])
+        if "param_dtype" in meta2
+        else tf.float64
+    )
+    model2 = TensorPotential(instructions2, param_dtype=dtype2)
     model2.load_checkpoint(checkpoint_name=new_checkpoint_name)
 
     calc1 = TPCalculator(model1.model)
@@ -234,6 +252,58 @@ def test_convert_model_reduce_elements():
     shutil.rmtree(TEST_PATH)
 
 
+@pytest.mark.parametrize(
+    "param_dtype,expected_str",
+    [
+        (tf.float32, "float32"),
+        (tf.float64, "float64"),
+    ],
+)
+def test_save_load_model_metadata_param_dtype(tmp_path, param_dtype, expected_str):
+    """Verify param_dtype round-trips through model.yaml metadata."""
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    instructions = GRACE_2LAYER(
+        element_map={"Cu": 0, "Zn": 1}, lmax=0, basis_type="Cheb"
+    ).get_instructions()
+
+    model_path = str(tmp_path / "model.yaml")
+
+    # save with param_dtype metadata
+    save_instructions_dict(model_path, instructions, param_dtype=param_dtype)
+
+    # read metadata and verify
+    metadata = read_model_metadata(model_path)
+    assert "param_dtype" in metadata, "param_dtype missing from model.yaml metadata"
+    assert metadata["param_dtype"] == expected_str
+
+    # load instructions — should work without error (metadata is skipped)
+    loaded = load_instructions(model_path)
+    assert isinstance(loaded, dict)
+    assert len(loaded) == len(instructions)
+
+
+def test_load_model_metadata_missing_for_old_models(tmp_path):
+    """Old model.yaml without metadata should return empty dict from read_model_metadata."""
+    GRACE_2LAYER = get_preset("GRACE_2LAYER_v1_24")
+    instructions = GRACE_2LAYER(
+        element_map={"Cu": 0, "Zn": 1}, lmax=0, basis_type="Cheb"
+    ).get_instructions()
+
+    model_path = str(tmp_path / "model.yaml")
+
+    # save WITHOUT param_dtype (simulating old behavior)
+    save_instructions_dict(model_path, instructions)
+
+    metadata = read_model_metadata(model_path)
+    assert "saved_at" in metadata
+    assert "tensorpotential_version" in metadata
+
+    # load should still work
+    loaded = load_instructions(model_path)
+    assert isinstance(loaded, dict)
+    assert len(loaded) == len(instructions)
+
+
 @pytest.mark.xfail
 def test_activate_reduce_lora():
     LORA_CONFIG = {"rank": 4, "alpha": 1}
@@ -242,7 +312,7 @@ def test_activate_reduce_lora():
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0, basis_type="SBessel"
     )
-    tp = TensorPotential(instructions, float_dtype=float_dtype)
+    tp = TensorPotential(instructions, param_dtype=float_dtype)
     assert not tp.is_lora_enabled()
     tp.save_checkpoint(checkpoint_name="test_checkpoints/checkpoint_no_lora")
 
@@ -327,7 +397,7 @@ def test_activate_reduce_additive():
     instructions = GRACE_2LAYER(
         element_map={"Mo": 0, "Nb": 1, "Ta": 2, "W": 3}, lmax=0, basis_type="SBessel"
     )
-    tp = TensorPotential(instructions, float_dtype=float_dtype)
+    tp = TensorPotential(instructions, param_dtype=float_dtype)
     assert not tp.is_lora_enabled()
     tp.save_checkpoint(checkpoint_name="test_checkpoints/checkpoint_no_lora")
 

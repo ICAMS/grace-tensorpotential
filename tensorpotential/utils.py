@@ -11,9 +11,13 @@ import time
 import numpy as np
 import pandas as pd
 import logging
+from contextlib import contextmanager
 
 from tensorpotential.instructions.base import ElementsReduceInstructionMixin
 from yaml import safe_load
+
+from tensorflow.dtypes import float32, float64, DType
+from tensorpotential.metadata_utils import get_dtype_by_name
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -25,6 +29,27 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
+
+
+def is_chief(strategy) -> bool:
+    """Whether the current process should perform chief-only work (file writes, etc.).
+
+    Returns True for single-process strategies (default / MirroredStrategy) and for
+    the chief worker under MultiWorkerMirroredStrategy. Returns False only for
+    non-chief MWMS workers.
+    """
+    if strategy is None:
+        return True
+    resolver = getattr(strategy, "cluster_resolver", None)
+    if resolver is None:
+        return True
+    task_type = getattr(resolver, "task_type", None)
+    task_id = getattr(resolver, "task_id", None)
+    if task_type is None:
+        return True
+    if task_type == "chief":
+        return True
+    return task_type == "worker" and task_id == 0
 
 
 def load_metrics(fname):
@@ -1023,11 +1048,13 @@ default_input_dict = {
 }
 
 
-def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_path):
+def select_elements_in_model(
+    elements_to_select, instructions_dict, checkpoint_path, param_dtype
+):
     from tensorpotential import TensorPotential
     from tensorpotential.instructions.compute import ScalarChemicalEmbedding
 
-    tp = TensorPotential(potential=instructions_dict)
+    tp = TensorPotential(potential=instructions_dict, param_dtype=param_dtype)
     logging.info(f"Loading checkpoint from {checkpoint_path}")
     tp.load_checkpoint(
         checkpoint_name=checkpoint_path,
@@ -1062,7 +1089,7 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
     )
 
     objects_to_patch_dict = {}
-    logging.info(f"Analyzing instructions  to patch:")
+    logging.info("Analyzing instructions  to patch:")
     for name, ins in instructions_dict.items():
         if isinstance(ins, ElementsReduceInstructionMixin):
             patch_dict = ins.prepare_variables_for_selected_elements(index_to_select)
@@ -1071,14 +1098,14 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
                 logging.info(f" - {name}: {len(patch_dict)} tensors to patch")
 
     # patching
-    logging.info(f"Patching trainable variables:")
+    logging.info("Patching trainable variables:")
     for ins_name, patch_dict in objects_to_patch_dict.items():
         ins = instructions_dict[ins_name]
         for var_name, var in patch_dict.items():
             logging.info(f" - {ins.name}.{var_name}: shape={var.shape}")
             setattr(ins, var_name, var)
 
-    logging.info(f"Patching model variables:")
+    logging.info("Patching model variables:")
     for name, ins in instructions_dict.items():
         if isinstance(ins, ElementsReduceInstructionMixin):
             logging.info(f" - {ins.name}")
@@ -1088,11 +1115,12 @@ def select_elements_in_model(elements_to_select, instructions_dict, checkpoint_p
 
 
 def convert_model_reduce_elements(
-    element_map,
-    potential_file_name,
-    checkpoint_name,
-    new_potential_file_name,
-    new_checkpoint_name,
+    element_map: dict,
+    potential_file_name: str,
+    checkpoint_name: str,
+    new_potential_file_name: str,
+    new_checkpoint_name: str,
+    param_dtype: DType = None,
 ):
 
     from tensorpotential.instructions.base import (
@@ -1101,6 +1129,12 @@ def convert_model_reduce_elements(
     )
     from tensorpotential.tensorpot import TensorPotential
 
+    param_dtype = param_dtype or float32
+    assert param_dtype in [
+        float32,
+        float64,
+    ], f"Unknown dtype {param_dtype}. Supported dtypes: [float32, float64]"
+
     instructions_dict = load_instructions(potential_file_name)
     if not isinstance(instructions_dict, dict):
         logging.info(
@@ -1108,7 +1142,7 @@ def convert_model_reduce_elements(
             + " Convert it using `grace_utils update_model`"
         )
         sys.exit(0)
-    tp = TensorPotential(potential=instructions_dict)
+    tp = TensorPotential(potential=instructions_dict, param_dtype=param_dtype)
     logging.info(f"Loading checkpoint from {checkpoint_name}")
     tp.load_checkpoint(
         checkpoint_name=checkpoint_name,
@@ -1128,13 +1162,16 @@ def convert_model_reduce_elements(
         elements_to_select=elements_to_select,
         instructions_dict=instructions_dict,
         checkpoint_path=checkpoint_name,
+        param_dtype=param_dtype,
     )
 
     logging.info(f"Saving converted checkpoint to {new_checkpoint_name}")
     tp.save_checkpoint(checkpoint_name=new_checkpoint_name, verbose=True)
 
     logging.info(f"Saving converted model to {new_potential_file_name}")
-    save_instructions_dict(new_potential_file_name, instructions_dict)
+    save_instructions_dict(
+        new_potential_file_name, instructions_dict, param_dtype=param_dtype
+    )
 
 
 def enforce_pbc(atoms, cutoff):
@@ -1148,6 +1185,44 @@ def enforce_pbc(atoms, cutoff):
     atoms.set_pbc(True)
 
     return atoms
+
+
+def get_param_dtype_from_config(potential_config: dict, log=None) -> tuple[DType, str]:
+    param_dtype_flag = potential_config.get("param_dtype")
+
+    if param_dtype_flag is None and "float_dtype" in potential_config:
+        if log:
+            log.warning(
+                "The parameter 'float_dtype' is deprecated and will be removed in a future version. "
+                "Please use 'param_dtype' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        param_dtype_flag = potential_config.get("float_dtype")
+
+    if param_dtype_flag is None:
+        param_dtype_flag = "float32"
+        if log:
+            log.info(f"Using default model parameter dtype: {param_dtype_flag}")
+    else:
+        if log:
+            log.info(f"Model parameter dtype: {param_dtype_flag}")
+
+    return get_dtype_by_name(param_dtype_flag), param_dtype_flag
+
+
+
+
+@contextmanager
+def suppress_tf_logging(level=logging.WARNING):
+    """Temporarily raise the TensorFlow logger level to suppress noisy INFO messages."""
+    tf_logger = logging.getLogger("tensorflow")
+    prev_level = tf_logger.level
+    tf_logger.setLevel(level)
+    try:
+        yield
+    finally:
+        tf_logger.setLevel(prev_level)
 
 
 class Parity:

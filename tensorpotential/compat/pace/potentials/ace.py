@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from itertools import product, combinations_with_replacement
+from itertools import combinations_with_replacement
 
 from tensorpotential.compat.pace.functions import radial_functions, spherical_harmonics
 from tensorpotential.compat.pace.utils.symbols import symbol_to_atomic_number

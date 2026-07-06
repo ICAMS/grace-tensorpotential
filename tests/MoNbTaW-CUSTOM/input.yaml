@@ -13,6 +13,7 @@ potential:
   kwargs: { n_rad_max: 16 }
   shift: True
   scale: True
+  param_dtype: float64
 
 fit:
   #  strategy: mirrored

@@ -12,6 +12,7 @@ potential:
   preset: "FS"
   kwargs: {fs_parameters: [[1, 1], [1, 0.5], [1, 0.25]]}
   scale: True
+  param_dtype: float64
 
 fit:
   #  strategy: mirrored

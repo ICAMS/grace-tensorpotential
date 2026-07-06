@@ -7,8 +7,13 @@ import numpy as np
 from ase import Atoms
 
 from pathlib import Path
+import tensorflow as tf
 
-from tensorpotential.instructions import SingleParticleBasisFunctionEquivariantInd
+from tensorpotential.instructions import (
+    SingleParticleBasisFunctionEquivariantInd,
+)
+from tensorpotential.utils import get_dtype_by_name
+from tensorpotential.metadata_utils import read_model_metadata
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
@@ -24,6 +29,22 @@ def load_checkpoint(tp, checkpoint_path):
         assert_consumed=False,
         assert_existing_objects_matched=False,
     )
+
+
+def resolve_param_dtype(args, model_path: str):
+    """Determine param_dtype: use explicit --param_dtype if given, else read from
+    model.yaml metadata, else fall back to float64 for backward compatibility."""
+    if getattr(args, "param_dtype", None) is not None:
+        return get_dtype_by_name(args.param_dtype)
+    metadata = read_model_metadata(model_path)
+    if "param_dtype" in metadata:
+        dtype_str = metadata["param_dtype"]
+        logger.info(f"param_dtype={dtype_str} inferred from model.yaml metadata")
+        return get_dtype_by_name(dtype_str)
+    logger.info(
+        "No param_dtype in model.yaml (old model) — using float64 for backward compatibility"
+    )
+    return tf.float64
 
 
 def preprocess_args(args):
@@ -49,7 +70,7 @@ def update_model(args):
         args.checkpoint_path,
         args.output_suffix,
     )
-
+    param_dtype = resolve_param_dtype(args, model_path)
     # clean checkpoint_name from .index suffix if needed
     if checkpoint_path.endswith(".index"):
         checkpoint_path = checkpoint_path.replace(".index", "")
@@ -68,7 +89,7 @@ def update_model(args):
     instructions_dict = {ins.name: ins for ins in instructions}
     assert len(instructions_dict) == len(instructions)
 
-    tp = TensorPotential(potential=instructions)
+    tp = TensorPotential(potential=instructions, param_dtype=param_dtype)
     load_checkpoint(tp, checkpoint_path)
 
     tp.model.instructions = instructions_dict
@@ -82,15 +103,15 @@ def update_model(args):
         new_model_path = new_model_path.replace(ext, output_suffix + ext)
 
     logger.info(f"Saving converted model to {new_model_path}")
-    save_instructions_dict(new_model_path, instructions_dict)
+    save_instructions_dict(new_model_path, instructions_dict, param_dtype=param_dtype)
 
     # try to load again
     logger.info(f"Trying to load converted model from {new_model_path}")
     new_instructions = load_instructions(new_model_path)
-    tp_new = TensorPotential(potential=new_instructions)
+    tp_new = TensorPotential(potential=new_instructions, param_dtype=param_dtype)
     load_checkpoint(tp_new, new_checkpoint_path)
 
-    logger.info(f"Finished")
+    logger.info("Finished")
 
 
 def resave_checkpoint(args):
@@ -107,6 +128,7 @@ def resave_checkpoint(args):
         args.checkpoint_path,
         args.output_suffix,
     )
+    param_dtype = resolve_param_dtype(args, model_path)
     new_checkpoint_path = checkpoint_path + output_suffix
 
     # clean checkpoint_name from .index suffix if needed
@@ -120,21 +142,21 @@ def resave_checkpoint(args):
     logger.info(f"Loading model from {model_path}")
     instructions = load_instructions(model_path)
 
-    tp = TensorPotential(potential=instructions)
+    tp = TensorPotential(potential=instructions, param_dtype=param_dtype)
 
     load_checkpoint(tp, checkpoint_path)
 
     logger.info(f"Saving converted checkpoint to {new_checkpoint_path}")
-    tp.setup_checkpoint(with_optimizer=False)  # will reset al lexcept model's weights
+    tp.setup_checkpoint(with_optimizer=False)  # will reset all except model's weights
     tp.save_checkpoint(checkpoint_name=new_checkpoint_path, verbose=True)
 
     # try to load again
     logger.info(f"Trying to load again model from {model_path}")
     new_instructions = load_instructions(model_path)
-    tp_new = TensorPotential(potential=new_instructions)
+    tp_new = TensorPotential(potential=new_instructions, param_dtype=param_dtype)
     load_checkpoint(tp_new, new_checkpoint_path)
 
-    logger.info(f"Finished")
+    logger.info("Finished")
 
 
 def reduce_elements(args):
@@ -152,7 +174,7 @@ def reduce_elements(args):
         args.output_suffix,
         args.elements,
     )
-
+    param_dtype = resolve_param_dtype(args, model_path)
     # clean checkpoint_name from .index suffix if needed
     if checkpoint_path.endswith(".index"):
         checkpoint_path = checkpoint_path.replace(".index", "")
@@ -169,8 +191,9 @@ def reduce_elements(args):
         )
         sys.exit(0)
 
-    tp = TensorPotential(potential=instructions_dict)
+    tp = TensorPotential(potential=instructions_dict, param_dtype=param_dtype)
     load_checkpoint(tp, checkpoint_path)
+    tp.model.decorate_compute_function()
 
     new_checkpoint_path = checkpoint_path + output_suffix
     new_model_path = model_path
@@ -193,14 +216,16 @@ def reduce_elements(args):
         checkpoint_name=checkpoint_path,
         new_potential_file_name=new_model_path,
         new_checkpoint_name=new_checkpoint_path,
+        param_dtype=param_dtype,
     )
 
     # try to load again
     logger.info("==========================")
     logger.info(f"Trying to load converted model from {new_model_path}")
     new_instructions = load_instructions(new_model_path)
-    tp_new = TensorPotential(potential=new_instructions)
+    tp_new = TensorPotential(potential=new_instructions, param_dtype=param_dtype)
     load_checkpoint(tp_new, new_checkpoint_path)
+    tp_new.model.decorate_compute_function()
 
     calc_new = TPCalculator(model=tp_new.model)
     for el, info in test_atoms.items():
@@ -215,12 +240,15 @@ def reduce_elements(args):
             en, en_ref
         ), f"Energy not equal for element {el}: {en} != {en_ref}"
 
-    logger.info(f"Finished")
+    logger.info("Finished")
 
 
-def cast_model(args):
+def cast_model_param(args):
     from tensorpotential import TensorPotential
-    from tensorpotential.instructions.base import load_instructions
+    from tensorpotential.instructions.base import (
+        load_instructions,
+        save_instructions_dict,
+    )
     from tensorflow import float32, float64, Variable, Module
 
     def recursive_cast_instruction_vars(
@@ -277,7 +305,7 @@ def cast_model(args):
     d_to = dtypes[to_dtype]
 
     pot = load_instructions(model_path)
-    tp = TensorPotential(potential=pot, fit_config={}, float_dtype=d_from)
+    tp = TensorPotential(potential=pot, fit_config={}, param_dtype=d_from)
     load_checkpoint(tp, checkpoint_path)
     assert isinstance(
         tp.model.instructions, dict
@@ -285,14 +313,30 @@ def cast_model(args):
     for iname, ins in tp.model.instructions.items():
         recursive_cast_instruction_vars(ins, d_from, d_to, max_depth=5)
     logger.info(f"Successfully casted model at {checkpoint_path} to {to_dtype} dtype")
-    tp.save_checkpoint(checkpoint_name=checkpoint_path + output_suffix, verbose=True)
-    logger.info(f"Saved casted checkpoint to {checkpoint_path + output_suffix}")
+
+    # Emit the casted result as a self-contained, drop-in model directory with STANDARD
+    # file names — <ckpt_dir>/casted<suffix>/{model.yaml, checkpoint.index, checkpoint.data-*}.
+    # A dedicated dir keeps the standard `model.yaml` name (not model-<suffix>.yaml) without
+    # clobbering the source fp64 model.yaml/checkpoint. The model.yaml is written in the new
+    # wrapped format stamped with the target param_dtype, so it is self-describing:
+    # resolve_param_dtype() returns the target dtype and every downstream tool (export,
+    # export_kokkos, grace_uq, TPCalculator-from-checkpoint) rebuilds at the matching precision
+    # instead of defaulting to float64 and dtype-mismatching the casted weights.
+    casted_dir = Path(checkpoint_path).resolve().parent / f"casted{output_suffix}"
+    casted_dir.mkdir(parents=True, exist_ok=True)
+    casted_ckpt = str(casted_dir / "checkpoint")
+    tp.save_checkpoint(checkpoint_name=casted_ckpt, verbose=True)
+    save_instructions_dict(str(casted_dir / "model.yaml"), tp.model.instructions, param_dtype=d_to)
+    logger.info(
+        f"Saved casted model ({to_dtype}) to {casted_dir}/ "
+        f"(standard names: model.yaml + checkpoint.*)"
+    )
 
     current_directory = Path.cwd()
     full_path = current_directory / "casted_model"
     instructions = load_instructions(model_path)
-    tp = TensorPotential(potential=instructions, float_dtype=d_to)
-    load_checkpoint(tp, checkpoint_path + output_suffix)
+    tp = TensorPotential(potential=instructions, param_dtype=d_to)
+    load_checkpoint(tp, casted_ckpt)
     tp.save_model(exact_path=full_path, jit_compile=True)
     logger.info(f"Saved casted model to {full_path}")
 
@@ -304,13 +348,14 @@ def export_model(args):
 
     preprocess_args(args)
 
-    model_path, checkpoint_path, output_suffix = (
+    model_path, checkpoint_path, _ = (
         args.potential,
         args.checkpoint_path,
         args.output_suffix,
     )
     save_fs = args.sf
-
+    param_dtype = resolve_param_dtype(args, model_path)
+    communicated_keys = getattr(args, "communicated_keys", None)
     # clean checkpoint_name from .index suffix if needed
     if checkpoint_path.endswith(".index"):
         checkpoint_path = checkpoint_path.replace(".index", "")
@@ -321,22 +366,87 @@ def export_model(args):
 
     logger.info(f"Loading model from {model_path}")
     instructions = load_instructions(model_path)
-    tp = TensorPotential(potential=instructions)
+    tp = TensorPotential(potential=instructions, param_dtype=param_dtype)
     logger.info(f"Loading checkpoint from {checkpoint_path}")
     load_checkpoint(tp, checkpoint_path)
 
     if not save_fs:
         saved_model_name = args.saved_model_name
         logger.info(f"Exporting model to {saved_model_name}")
-        tp.save_model(exact_path=saved_model_name, jit_compile=True)
+        tp.save_model_with_aux_computes(
+            exact_path=saved_model_name,
+            jit_compile=True,
+            communicated_keys=communicated_keys,
+        )
     else:
         saved_model_name = args.saved_model_name
-        if not saved_model_name.endswith(".yaml") or saved_model_name.endswith(".yml"):
+        if not (
+            saved_model_name.endswith(".yaml") or saved_model_name.endswith(".yml")
+        ):
             saved_model_name += ".yaml"
         logger.info(f"Exporting FS model to {saved_model_name}")
         tp.export_to_yaml(exact_filename=saved_model_name)
 
-    logger.info(f"Finished")
+    logger.info("Finished")
+
+
+def export_kokkos(args):
+    """Export GRACE-1L/2L weights to .npz for the LAMMPS Kokkos pair styles."""
+    from tensorpotential.instructions.base import load_instructions
+    from tensorpotential.scripts._kokkos_export import (
+        export_1l_npz,
+        export_2l_npz,
+        export_3l_npz,
+    )
+
+    preprocess_args(args)
+
+    model_path, checkpoint_path = args.potential, args.checkpoint_path
+    if checkpoint_path and checkpoint_path.endswith(".index"):
+        checkpoint_path = checkpoint_path[: -len(".index")]
+
+    param_dtype = resolve_param_dtype(args, model_path)
+    dtype_str = "float64" if param_dtype == tf.float64 else "float32"
+
+    instructions = load_instructions(model_path)
+    instr_dict = (
+        instructions if isinstance(instructions, dict)
+        else {ins.name: ins for ins in instructions}
+    )
+
+    arch = args.arch
+    if arch == "auto":
+        # 3L first: it uses `SPBF` instructions in equivariant mode (>=2 of them
+        # for the two equivariant layers), a class disjoint from the 2L
+        # `SingleParticleBasisFunctionEquivariantInd`, so the checks don't collide.
+        n_equivariant_spbf = sum(
+            1
+            for ins in instr_dict.values()
+            if type(ins).__name__ == "SPBF" and getattr(ins, "equivariant_mode", False)
+        )
+        is_2l = any(
+            type(ins).__name__ == "SingleParticleBasisFunctionEquivariantInd"
+            for ins in instr_dict.values()
+        )
+        if n_equivariant_spbf >= 2:
+            arch = "3l"
+        elif is_2l:
+            arch = "2l"
+        else:
+            arch = "1l"
+        logger.info(f"Auto-detected architecture: GRACE-{arch.upper()}")
+    else:
+        logger.info(f"Forced architecture: GRACE-{arch.upper()}")
+
+    exporter = {"1l": export_1l_npz, "2l": export_2l_npz, "3l": export_3l_npz}[arch]
+    exporter(
+        model_path,
+        checkpoint_path,
+        args.output,
+        dtype_str,
+        uq_artifacts_path=args.uq_artifacts_path,
+    )
+    logger.info("Finished")
 
 
 def model_summary(args):
@@ -344,15 +454,15 @@ def model_summary(args):
 
     from tensorpotential.instructions.base import load_instructions
     from tensorpotential.tpmodel import TPModel
-    import tensorflow as tf
 
     model_path = args.potential
     verbose = args.verbose
 
     logger.info(f"Loading model from {model_path}")
     instructions_dict = load_instructions(model_path)
+    param_dtype = resolve_param_dtype(args, model_path)
     tp = TPModel(instructions_dict)
-    tp.build(tf.float64)
+    tp.build(param_dtype)
     res = tp.summary(verbose=verbose)
     logger.info(f"Summary (verbose={verbose}) is:\n{res}")
 
@@ -363,7 +473,6 @@ def aux_model(args):
     from tensorpotential.instructions import load_instructions
     from tensorpotential.tpmodel import (
         ComputeEnergy,
-        ComputeStructureEnergyAndForcesAndVirial,
         TPModel,
     )
     from tensorpotential.tensorpot import TensorPotential
@@ -373,8 +482,6 @@ def aux_model(args):
         find_non_local_keys,
     )
 
-    import tensorflow as tf
-
     model_path, checkpoint_path, output_path, communicated_keys = (
         args.potential,
         args.checkpoint_path,
@@ -382,7 +489,7 @@ def aux_model(args):
         args.communicated_keys,
     )
     # aux_options = args.aux
-
+    param_dtype = resolve_param_dtype(args, model_path)
     # clean checkpoint_name from .index suffix if needed
     if checkpoint_path.endswith(".index"):
         checkpoint_path = checkpoint_path.replace(".index", "")
@@ -390,7 +497,6 @@ def aux_model(args):
     logger.info(f"Upgrading model {model_path} with checkpoint at {checkpoint_path}")
 
     instr = load_instructions(model_path)
-    float_dtype = tf.float64
 
     extra_aux_computes = {"compute_energy": ComputeEnergy()}
 
@@ -403,7 +509,7 @@ def aux_model(args):
         if isinstance(ins, SingleParticleBasisFunctionEquivariantInd):
             has_spbfei = True
             logger.info(
-                f"GRACE-2L model is identified (SingleParticleBasisFunctionEquivariantInd instruction found)"
+                "GRACE-2L model is identified (SingleParticleBasisFunctionEquivariantInd instruction found)"
             )
             break
     if has_spbfei:
@@ -428,21 +534,22 @@ def aux_model(args):
         m = build_split_tpmodel(
             instr,
             communicated_keys=communicated_keys,
-            float_dtype=float_dtype,
+            param_dtype=param_dtype,
             jit_compile=True,
             extra_aux_computes=extra_aux_computes,
         )
     else:
         m = TPModel(instructions=instr, aux_compute=extra_aux_computes)
-        m.build(float_dtype, jit_compile=True)
-        m.decorate_compute_function(float_dtype, jit_compile=True)
+        m.build(param_dtype=param_dtype, jit_compile=True)
+        m.decorate_compute_function(jit_compile=True)
 
-    tp = TensorPotential(m.instructions)
+    tp = TensorPotential(m.instructions, param_dtype=param_dtype)
     tp.model = m
     tp.load_checkpoint(
         checkpoint_name=checkpoint_path,
         assert_consumed=False,
-        assert_existing_objects_matched=True,
+        assert_existing_objects_matched=False,
+        expect_partial=True,
     )
 
     logger.info(f"Saving upgraded model to {output_path}")
@@ -457,6 +564,13 @@ def main():
         description="CLI tool for model conversions and summarization",
     )
     parser.add_argument("-p", "--potential", required=True, help="Path to model.yaml")
+    parser.add_argument(
+        "--param_dtype",
+        required=False,
+        type=str,
+        default=None,
+        help="Model parameters' dtype (float32 or float64). If not set, inferred from model.yaml metadata; falls back to float64 for old models.",
+    )
     parser.add_argument(
         "-c", "--checkpoint-path", required=False, help="Path to checkpoint"
     )
@@ -493,7 +607,7 @@ def main():
 
     # precision
     parser_precision = subparsers.add_parser(
-        "cast_model", help="Change model's floating point precision."
+        "cast_model_param", help="Change model's floating point precision."
     )
     parser_precision.add_argument(
         "-curr",
@@ -507,7 +621,7 @@ def main():
         choices=["fp32", "fp64"],
         help="New precision type to cast into",
     )
-    parser_precision.set_defaults(func=lambda args: cast_model(args))
+    parser_precision.set_defaults(func=lambda args: cast_model_param(args))
 
     # export model
     parser_export = subparsers.add_parser(
@@ -525,9 +639,43 @@ def main():
         dest="saved_model_name",
         type=str,
         default="saved_model",
-        help="Save to GRACE-FS/C++ YAML model format",
+        help="Path where to save the SavedModel or YAML file",
+    )
+    parser_export.add_argument(
+        "-ck",
+        "--communicated-keys",
+        nargs="+",
+        default=None,
+        help="List of communicated keys for 2L model parallel split export",
     )
     parser_export.set_defaults(func=lambda args: export_model(args))
+
+    # export to Kokkos .npz
+    parser_kokkos = subparsers.add_parser(
+        "export_kokkos",
+        help="Export GRACE-1L/2L/3L weights to .npz for LAMMPS Kokkos pair style.",
+    )
+    parser_kokkos.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output .npz path (e.g. grace_2l_weights.npz)",
+    )
+    parser_kokkos.add_argument(
+        "--arch",
+        choices=["auto", "1l", "2l", "3l"],
+        default="auto",
+        help="Override architecture (default: auto-detect from instructions).",
+    )
+    parser_kokkos.add_argument(
+        "--uq-artifacts",
+        dest="uq_artifacts_path",
+        default=None,
+        help="Path to gmm_artifacts.npz (UQ). If given, dense uq_* arrays "
+        "(centroids, inverse covariances, gamma thresholds, error model) are "
+        "baked into the exported kokkos .npz.",
+    )
+    parser_kokkos.set_defaults(func=lambda args: export_kokkos(args))
 
     # info
     parser_summary = subparsers.add_parser("summary", help="Show info about the model")

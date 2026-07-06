@@ -12,23 +12,23 @@ import shutil
 
 import numpy as np
 import pytest
+import tensorflow as tf
 from ase.build import bulk
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-
-import tensorflow as tf
-
-tf.config.experimental.enable_tensor_float_32_execution(False)
-
-from tensorpotential import constants, TPModel
+from tensorpotential import TPModel, constants
+from tensorpotential.data.databuilder import GeometricalDataBuilder
+from tensorpotential.instructions.instruction_graph_utils import (
+    build_split_tpmodel,
+    split_2layer_instructions,
+)
+from tensorpotential.potentials import get_preset
 from tensorpotential.tpmodel import (
     ComputeBlock,
     ComputeBlockInputGradient,
     ComputeBlockOutputGradient,
 )
-from tensorpotential.potentials import get_preset
-from tensorpotential.data.databuilder import GeometricalDataBuilder
-from tensorpotential.instructions.instruction_graph_utils import build_split_tpmodel
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 # --- Fixtures ---
@@ -104,7 +104,8 @@ class TestComputeBlock:
 
         preset = get_preset("GRACE_2LAYER_latest")
         instructor = preset(**grace_2layer_config)
-        block_layer_1 = instructor.get_block("Layer_1")
+        instructions = instructor.get_instructions()
+        block_layer_1, _ = split_2layer_instructions(instructions, communication_keys)
 
         # Create ComputeBlock
         compute_block = ComputeBlock(
@@ -116,9 +117,8 @@ class TestComputeBlock:
 
         # Build model with aux compute
         aux_computes = {"forward_layer_1": compute_block}
-        instructions = instructor.get_instructions()
         m = TPModel(instructions=instructions, aux_compute=aux_computes)
-        m.build(tf.float64, jit_compile=True, input_dtype=tf.float64)
+        m.build(param_dtype=tf.float64, jit_compile=True)
 
         # Prepare input data
         inpt_tf = prepare_data(
@@ -151,7 +151,8 @@ class TestComputeBlockInputGradient:
 
         preset = get_preset("GRACE_2LAYER_latest")
         instructor = preset(**grace_2layer_config)
-        block_layer_2 = instructor.get_block("Layer_2")
+        instructions = instructor.get_instructions()
+        _, block_layer_2 = split_2layer_instructions(instructions, communication_keys)
 
         # Create ComputeBlockInputGradient
         compute_block_grad = ComputeBlockInputGradient(
@@ -184,7 +185,7 @@ class TestComputeBlockInputGradient:
         aux_computes = {"backward_layer_2": compute_block_grad}
         instructions = instructor.get_instructions()
         m = TPModel(instructions=instructions, aux_compute=aux_computes)
-        m.build(tf.float64, jit_compile=True, input_dtype=tf.float64)
+        m.build(param_dtype=tf.float64, jit_compile=True)
 
         # Execute backward layer 2
         l2_results = m.backward_layer_2(inpt_tf)
@@ -208,7 +209,8 @@ class TestComputeBlockOutputGradient:
 
         preset = get_preset("GRACE_2LAYER_latest")
         instructor = preset(**grace_2layer_config)
-        block_layer_1 = instructor.get_block("Layer_1")
+        instructions = instructor.get_instructions()
+        block_layer_1, _ = split_2layer_instructions(instructions, communication_keys)
 
         l2_grad_specs = {f"grad_{k}": v for k, v in l1_out_specs.items()}
 
@@ -241,7 +243,7 @@ class TestComputeBlockOutputGradient:
         aux_computes = {"backward_layer_1": compute_block_out_grad}
         instructions = instructor.get_instructions()
         m = TPModel(instructions=instructions, aux_compute=aux_computes)
-        m.build(tf.float64, jit_compile=True, input_dtype=tf.float64)
+        m.build(param_dtype=tf.float64, jit_compile=True)
 
         # Execute backward layer 1
         l1_grads = m.backward_layer_1(inpt_tf)
@@ -271,7 +273,7 @@ class TestGraphSplitIntegration:
         m_split = build_split_tpmodel(
             instructions,
             communicated_keys=communication_keys,
-            float_dtype=tf.float64,
+            param_dtype=tf.float32,
             jit_compile=True,
         )
 
@@ -305,10 +307,8 @@ class TestGraphSplitIntegration:
 
         # --- Reference execution ---
         m_ref = TPModel(instructions=instructions)
-        m_ref.build(tf.float64, jit_compile=True, input_dtype=tf.float64)
-        m_ref.decorate_compute_function(
-            tf.float64, jit_compile=True, input_dtype=tf.float64
-        )
+        m_ref.build(param_dtype=tf.float32, jit_compile=True)
+        m_ref.decorate_compute_function(jit_compile=True)
 
         # Get reference input data
         db = GeometricalDataBuilder(
@@ -358,7 +358,7 @@ class TestGraphSplitSaveReload:
             m_aux = build_split_tpmodel(
                 instructions,
                 communicated_keys=communication_keys,
-                float_dtype=tf.float64,
+                param_dtype=tf.float64,
                 jit_compile=True,
             )
 
@@ -366,8 +366,7 @@ class TestGraphSplitSaveReload:
             m_aux.save_model(
                 model_path,
                 jit_compile=True,
-                float_dtype=tf.float64,
-                input_dtype=tf.float64,
+                input_signature_float_dtype=tf.float64,
             )
 
             # Get original outputs

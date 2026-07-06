@@ -1,8 +1,6 @@
 import logging
 import os
-import tempfile
 
-import pytest
 import yaml
 
 from tensorpotential.cli.gracemaker import add_loaded_model_parameter

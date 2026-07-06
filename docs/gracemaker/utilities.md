@@ -50,17 +50,18 @@ ___
 Utility to convert, export and summarize GRACE models
 
 ```
-usage: grace_utils [-h] -p POTENTIAL [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary,aux_model} ...
+usage: grace_utils [-h] -p POTENTIAL [--param_dtype float32] [-c CHECKPOINT_PATH] [-os OUTPUT_SUFFIX] {update_model,resave_checkpoint,reduce_elements,cast_model,export,export_kokkos,summary,aux_model} ...
 
 CLI tool for model conversions and summarization
 
 positional arguments:
-  {update_model,resave_checkpoint,reduce_elements,cast_model,export,summary,aux_model}
+  {update_model,resave_checkpoint,reduce_elements,cast_model_param,export,export_kokkos,summary,aux_model}
     update_model        Update model (model.yaml) and corresponding checkpoint.
     resave_checkpoint   Resave model's (model.yaml) checkpoint (no optimizer)
     reduce_elements     Reduce elements from the model.
-    cast_model          Change model's floating point precision.
+    cast_model_param    Change model parameters' floating point precision.
     export              Export model to saved_model or FS/C++ format.
+    export_kokkos       Export GRACE-1L/2L weights to .npz for LAMMPS Kokkos pair style.
     summary             Show info about the model
     aux_model           Upgrade model with different compute functions: parallel_2L, compute_energy_only,
 
@@ -72,6 +73,8 @@ options:
                         Path to checkpoint
   -os OUTPUT_SUFFIX, --output-suffix OUTPUT_SUFFIX
                         Output suffix for converted
+  --param_dtype,        float32 (default), float64
+                        Expected model parameters' dtype
 
 
 -------------------
@@ -95,7 +98,17 @@ export:
   -sf                   Save to GRACE-FS/C++ YAML model format
   -n SAVED_MODEL_NAME, --saved-model-name SAVED_MODEL_NAME
 --------
-cast_model:
+export_kokkos:
+
+  -o OUTPUT, --output OUTPUT
+                        Output .npz path (e.g. grace_2l_weights.npz)
+  --arch {auto,1l,2l}   Override architecture (default: auto-detect from instructions)
+  --uq-artifacts UQ_ARTIFACTS_PATH
+                        Path to gmm_artifacts.npz (UQ). Bakes dense uq_* arrays
+                        (centroids, inverse covariances, gamma thresholds, error
+                        model) into the exported .npz.
+--------
+cast_model_param:
 
   -curr {fp32,fp64}  Current precision type to cast from
   -to {fp32,fp64}    New precision type to cast into
@@ -132,12 +145,14 @@ For example, selecting only  Mo, Nb, Ta and W from a large model:
 grace_utils -p /path/to/model-dict.yaml -c /path/to/checkpoint/checkpoint-dict.index  -os MoNbTaW reduce_elements -e Mo Nb Ta W
 ```
 
-#### Change model's floating point precision
-GRACE models can be trained in both single and double floating point precision.
-Conversion between the two can be done with the  `cast_model` utility, for example to convert from single to double precision:
+#### Change model parameters' floating point precision
+GRACE models can be trained in both single and double floating point precision
+for trainable parameters.
+Conversion between the two can be done with the `cast_model_param` utility,
+for example to convert from single to double precision:
 
 ```bash
-grace_utils -p /path/to/model.yaml -c /path/to/checkpoint.index -os "double" cast_model -curr fp32 -to fp64
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint.index -os "double" cast_model_param -curr fp32 -to fp64
 ```
 
 
@@ -152,6 +167,64 @@ For GRACE-FS model, one can export to GRACE-FS/C++ format(.yaml) by adding `-sf`
 ```bash
 grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export -n my_GRACE-FS.yaml -sf
 ```
+
+#### Export to .npz for LAMMPS Kokkos pair style
+
+GRACE-1L and GRACE-2L models can be exported to a self-contained `.npz` blob
+that the `pair_grace_1l_kokkos` / `pair_grace_2l_kokkos` LAMMPS pair styles
+read directly — no TensorFlow at LAMMPS runtime. The architecture (1L vs 2L)
+is auto-detected from the model's instructions.
+
+```bash
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
+```
+
+Use the resulting file in your LAMMPS input as:
+
+```
+pair_style grace/1l/kk    # or grace/2l/kk
+pair_coeff * * grace_weights.npz <element1> <element2> ...
+```
+
+!!! warning "Standard architectures only"
+    `grace/1l/kk` and `grace/2l/kk` only support the standard GRACE-1L / 2L
+    architectures from the built-in [presets](../presets/) and
+    [foundation models](../foundation/). Models with non-standard instructions,
+    unsupported activations, or dimensions above the LAMMPS compile-time caps
+    are rejected by `export_kokkos`. For custom architectures use the
+    TensorFlow-based pair styles (`grace`, `grace/2layer/parallel`, …) or
+    GRACE-FS instead.
+
+Use `--arch 1l` / `--arch 2l` to override architecture auto-detection.
+
+##### Baking in UQ (uncertainty quantification) artifacts
+
+If the model has a GMM-based UQ artifact (`gmm_artifacts.npz`, schema v2),
+pass it via `--uq-artifacts` to bake the dense `uq_*` arrays — cluster
+centroids, per-cluster inverse covariances, gamma extrapolation-grade
+thresholds, and the per-element force-error model — directly into the
+exported `.npz`:
+
+```bash
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index \
+            export_kokkos -o grace_weights.npz \
+            --uq-artifacts /path/to/gmm_artifacts.npz
+```
+
+The Kokkos pair style then computes the per-atom extrapolation grade `gamma`
+and predicted force error directly from the same `.npz` — no separate UQ file
+is needed at LAMMPS runtime. Without `--uq-artifacts`, a plain (non-UQ) `.npz`
+is exported.
+
+The same `.npz` works with three runtime-precision variants of the pair style
+— pick the one that matches your accuracy / throughput trade-off:
+
+- `grace/{1l,2l}/kk`        — full fp64 (default)
+- `grace/{1l,2l}/kk/mixed`  — geometry in fp64, NN math in fp32
+- `grace/{1l,2l}/kk/fp32`   — everything in fp32
+
+Empirically, `fp32` and `mixed` agree with `fp64` to roughly **1e-6 relative
+precision** on energies and forces — well within typical MD requirements.
 
 #### Model summary
 To print summary of the GRACE model with different level of verbosity (0 - least, 1 - moderate and 2 - most verbose):

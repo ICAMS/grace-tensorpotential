@@ -1,16 +1,17 @@
-import pytest
 import pandas as pd
-import numpy as np
 from tensorpotential.data.databuilder import estimate_n_buckets
+
 
 def test_estimate_n_buckets_adaptive():
     # Helper to create a dummy batches_df
     def create_df(n_neigh_list):
-        return pd.DataFrame({
-            "n_neighbours": n_neigh_list,
-            "n_atoms": [10] * len(n_neigh_list),
-            "n_structures": [1] * len(n_neigh_list)
-        })
+        return pd.DataFrame(
+            {
+                "n_neighbours": n_neigh_list,
+                "n_atoms": [10] * len(n_neigh_list),
+                "n_structures": [1] * len(n_neigh_list),
+            }
+        )
 
     # Case 1: All identical -> 1 bucket (0% overhead)
     df1 = create_df([100, 100, 100, 100])
@@ -34,6 +35,7 @@ def test_estimate_n_buckets_adaptive():
     # Case 4: Tight threshold
     # n=1: overhead ~4.2% (above 1%)
     assert estimate_n_buckets(df3, 0.01) > 1
+
 
 if __name__ == "__main__":
     test_estimate_n_buckets_adaptive()

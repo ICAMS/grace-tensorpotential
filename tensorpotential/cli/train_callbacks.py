@@ -4,8 +4,6 @@ from typing import Any, Dict, Union, Protocol
 
 import numpy as np
 import tensorflow as tf
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 from tensorpotential import TensorPotential
 

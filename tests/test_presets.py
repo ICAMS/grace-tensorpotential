@@ -2,16 +2,11 @@ import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-import numpy as np
-import tensorflow as tf
-import pytest
 
 from pathlib import Path
 
-from tensorpotential.instructions import *
-from tensorpotential.utils import Parity
+from tensorpotential.instructions import load_instructions
 from tensorpotential.potentials import get_preset
-from tensorpotential import constants
 
 prefix = Path(__file__).parent.resolve()
 

@@ -1,22 +1,20 @@
+import logging
 import os
+from pathlib import Path
 
 import numpy as np
-import pytest
+import pandas as pd
+
+from tensorpotential.data.process_df import (
+    E_CHULL_DIST_PER_ATOM,
+    compute_convexhull_dist,
+)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-import logging
-
-LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
 
-import pandas as pd
-from pathlib import Path
-
 prefix = Path(__file__).parent.resolve()
-
-from tensorpotential.data.process_df import *
 
 
 def test_compute_convex_hull():

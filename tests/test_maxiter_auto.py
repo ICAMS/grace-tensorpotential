@@ -15,7 +15,7 @@ def test_compute_maxiter_bfgs():
     assert compute_maxiter(500, 100, "BFGS") == 500
     assert compute_maxiter(100, 10, "L-BFGS-B") == 100
     # Rounding
-    assert compute_maxiter(123, 10, "BFGS") == 120
+    assert compute_maxiter(123, 10, "BFGS") == 123
     # Clamping
     assert compute_maxiter(10000, 10, "BFGS") == 5000
     assert compute_maxiter(5, 10, "BFGS") == 10

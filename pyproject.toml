@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorpotential"
-version = "0.5.9"
+version = "0.6.0"
 authors = [
     { name = "Anton Bochkarev", email = "anton.bochkarev@rub.de" },
     { name = "Yury Lysogorskiy", email = "yury.lysogorskiy@rub.de" },
@@ -19,9 +19,9 @@ classifiers = [
 ]
 dependencies = [
     # for windows and macos
-    "tensorflow<2.20; sys_platform == 'win32' or sys_platform == 'darwin'",
+    "tensorflow<=2.20; sys_platform == 'win32' or sys_platform == 'darwin'",
     # for linux
-    "tensorflow[and-cuda]<2.20; sys_platform == 'linux'",
+    "tensorflow[and-cuda]<=2.20; sys_platform == 'linux'",
     "tf_keras",  # Required for legacy Keras API. Users may need to set TF_USE_LEGACY_KERAS=1
     "scipy",
     "matscipy",
@@ -31,8 +31,10 @@ dependencies = [
     "ase",
     "pyyaml>=6.0.2",
     "tqdm",
+    "requests",
     "questionary>=2.0",
     "rich>=13.0",
+    "scikit-learn>=1.1",
 ]
 [project.urls]
 "Homepage" = "https://github.com/ICAMS/grace-tensorpotential"
@@ -46,3 +48,12 @@ df2extxyz = "tensorpotential.scripts.df2extxyz:main"
 grace_preprocess = "tensorpotential.scripts.grace_preprocess:main"
 grace_predict = "tensorpotential.scripts.grace_predict:main"
 grace_utils = "tensorpotential.scripts.grace_utils:main"
+grace_uq = "tensorpotential.scripts.grace_uq:main"
+grace_dashboard = "tensorpotential.scripts.grace_dashboard:main"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# E501: line length is handled by the formatter, not enforced here.
+# E741: `l` is the angular-momentum quantum number throughout the codebase
+# (spherical harmonics, lmax, ...); it is a deliberate, standard physics name.
+ignore = ["E501", "E741"]

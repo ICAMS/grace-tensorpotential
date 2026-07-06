@@ -36,6 +36,7 @@ class _WizardStateTensor:
     # Batch & training
     batch_size: int = 10
     target_total_updates: int = 10000
+    param_dtype: str = "float32"
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,23 @@ def _section_tensor_batch(s: _WizardStateTensor) -> _WizardStateTensor:
     return s
 
 
+def _section_tensor_precision(s: _WizardStateTensor) -> _WizardStateTensor:
+    from tensorpotential.cli.wizard import _ask_select, _section, _success
+
+    _section("Parameter precision")
+    precision = _ask_select(
+        "Model parameter precision:",
+        choices=[
+            "mixed FP32/64 (parameters in FP32, geometry in FP64)",
+            "FP64 (full double precision)",
+        ],
+        default="mixed FP32/64 (parameters in FP32, geometry in FP64)",
+    )
+    s.param_dtype = "float32" if precision.startswith("mixed") else "float64"
+    _success(f"param_dtype: {s.param_dtype}")
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Review
 # ---------------------------------------------------------------------------
@@ -215,6 +233,7 @@ def _show_review_tensor(s: _WizardStateTensor):
         )
         t.add_row("Batch size", str(s.batch_size))
         t.add_row("Total updates", str(s.target_total_updates))
+        t.add_row("Param dtype", s.param_dtype)
 
         _rich_console.print()
         _rich_console.print(
@@ -239,6 +258,7 @@ def _show_review_tensor(s: _WizardStateTensor):
         )
         print(f"  Batch size:        {s.batch_size}")
         print(f"  Total updates:     {s.target_total_updates}")
+        print(f"  Param dtype:       {s.param_dtype}")
         print("--------------")
 
 
@@ -381,7 +401,6 @@ def _generate_tensor_property_interactive(df, s):
         _ask_confirm,
         _info,
         _success,
-        _HAS_QUESTIONARY,
     )
 
     # Offer all columns except tensor_property itself and the non-numeric index column
@@ -514,7 +533,7 @@ def _verify_one_df(df, filename, s, *, label="dataset"):
     Returns (updated_filename, all_ok).
     updated_filename differs from filename only when a new file is saved.
     """
-    from tensorpotential.cli.wizard import _ask_confirm, _ask_text, _info, _success
+    from tensorpotential.cli.wizard import _ask_confirm, _ask_text, _info, _success, _error
 
     all_ok = True
 
@@ -529,12 +548,12 @@ def _verify_one_df(df, filename, s, *, label="dataset"):
         if col in df.columns:
             _success(f"[{label}] '{col}': present")
         else:
-            _info(f"[{label}] '{col}': MISSING (required for training)")
+            _error(f"[{label}] '{col}': MISSING (required for training)")
             all_ok = False
 
     # ── tensor_property ──────────────────────────────────────────────────────
     if "tensor_property" not in df.columns:
-        _info(f"[{label}] 'tensor_property': MISSING")
+        _error(f"[{label}] 'tensor_property': MISSING")
         all_ok = False
 
         if _ask_confirm(
@@ -559,7 +578,7 @@ def _verify_one_df(df, filename, s, *, label="dataset"):
                     _info(f"Updated {label} filename in input.yaml.")
                     all_ok = True
                 except Exception as exc:
-                    _info(f"Could not save: {exc}")
+                    _error(f"Could not save: {exc}")
     else:
         _success(f"[{label}] 'tensor_property': present")
 
@@ -569,11 +588,11 @@ def _verify_one_df(df, filename, s, *, label="dataset"):
         if ok:
             _success(f"[{label}] Shape: OK (checked up to 50 structures)")
         else:
-            _info(f"[{label}] Shape issues:")
+            _error(f"[{label}] Shape issues:")
             for iss in issues[:5]:
-                _info(iss)
+                _error(iss)
             if len(issues) > 5:
-                _info(f"  … and {len(issues) - 5} more")
+                _error(f"  … and {len(issues) - 5} more")
             all_ok = False
 
         # ── Symmetry / traceless check ───────────────────────────────────────
@@ -585,7 +604,7 @@ def _verify_one_df(df, filename, s, *, label="dataset"):
                     if passed:
                         _success(f"[{label}] {lbl}: OK  (max={mx:.2e}, mean={mn:.2e})")
                     else:
-                        _info(
+                        _error(
                             f"[{label}] {lbl}: VIOLATION  (max={mx:.2e}, mean={mn:.2e})"
                         )
                         all_ok = False
@@ -604,12 +623,13 @@ def _section_verify_dataset(s: _WizardStateTensor) -> _WizardStateTensor:
         _section,
         _info,
         _success,
+        _error,
     )
 
     _section("Dataset verification")
     if not _ask_confirm(
         "Verify dataset now? (checks columns, tensor shape & symmetry)",
-        default=False,
+        default=True,
     ):
         return s
 
@@ -633,7 +653,7 @@ def _section_verify_dataset(s: _WizardStateTensor) -> _WizardStateTensor:
         if not ok_train:
             all_ok = False
     except Exception as exc:
-        _info(f"Could not load train dataset: {exc}")
+        _error(f"Could not load train dataset: {exc}")
         all_ok = False
 
     # ── Test (separate file only) ────────────────────────────────────────────
@@ -649,13 +669,13 @@ def _section_verify_dataset(s: _WizardStateTensor) -> _WizardStateTensor:
             if not ok_test:
                 all_ok = False
         except Exception as exc:
-            _info(f"Could not load test dataset: {exc}")
+            _error(f"Could not load test dataset: {exc}")
             all_ok = False
 
     if all_ok:
         _success("All dataset checks passed!")
     else:
-        _info("Issues found — please review before running gracemaker.")
+        _error("!!! WARNING !!! Issues found — please review before running gracemaker.")
 
     return s
 
@@ -705,6 +725,7 @@ data:
 
 
 potential:
+  param_dtype: {s.param_dtype}
   preset: {s.preset}
   kwargs: {{
            compute_energy: {s.compute_energy},
@@ -774,6 +795,7 @@ def run_gen_tensor_wizard():
         ("Tensor type", _section_tensor_components),
         ("Per-structure", _section_tensor_per_structure),
         ("Model", _section_tensor_model),
+        ("Parameter precision", _section_tensor_precision),
         ("Energy & forces", _section_tensor_energy),
         ("Loss", _section_tensor_loss),
         ("Batch & training", _section_tensor_batch),
