@@ -1,5 +1,5 @@
 # News
-* 25 August 2025: Release of new [foundational GRACE potentials](https://gracemaker.readthedocs.io/en/latest/gracemaker/foundation/), parameterized on OMat24 + sAlex+MPTraj
+* 07 July 2026: [0.6.0 Release](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.0), shipping new features including uncertainty quantification for foundational models and more.
 
 # Important Note  
 
