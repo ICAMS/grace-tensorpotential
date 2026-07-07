@@ -116,22 +116,42 @@ Here `-r` flag stands for reading checkpoint with best test loss (usually, it is
 
 This will generate the `seed/1/FS_model.yaml` file, which can be used in [ASE](#gracefs) or [LAMMPS](#lammps-gracefs).
 
-#### LAMMPS Kokkos `.npz` (GRACE-1L / GRACE-2L)
+#### LAMMPS Kokkos `.npz` (GRACE-1L / GRACE-2L / GRACE-3L)
 
-For TensorFlow-free GPU/OpenMP runs with `pair_style grace/1l/kk` or `grace/2l/kk`,
-export the model weights to `.npz` using
+For TensorFlow-free GPU/OpenMP runs with `pair_style grace/1l/kk`, `grace/2l/kk`
+or `grace/3l/kk`, export the model weights to `.npz` using
 [`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style):
 
 ```bash
 grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
 ```
 
-The architecture (1L vs 2L) is auto-detected. The resulting `.npz` is loaded directly
+The architecture (1L, 2L, or 3L) is auto-detected. The resulting `.npz` is loaded directly
 by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L (Kokkos, no TensorFlow)](#lammps-grace-1l-grace-2l-kokkos-no-tensorflow).
 
 ---
 
-### Build Active Set (for GRACE/FS Only)
+### Uncertainty quantification 
+
+#### Uncertainty quantification (UQ) artifact (for GRACE-1L/2L/3L models)
+
+To equip a fitted model with a per-atom extrapolation grade (`gamma`), build a
+GMM-UQ artifact from the training set with [`grace_uq build`](../uq/#grace_uq-build):
+
+```bash
+grace_uq build --model-yaml /path/to/model.yaml \
+               --checkpoint /path/to/checkpoint/checkpoint.best_test_loss.index \
+               --train-data train.pkl.gz \
+               --artifact-path gmm_artifacts.npz
+```
+
+This writes `gmm_artifacts.npz` plus a `saved_model/` carrying the `compute_uq`
+signature next to it. See the [Uncertainty Quantification](../uq/) page for the
+full pipeline and options, and [`export_kokkos --uq-artifacts`](../utilities/#baking-in-uq-uncertainty-quantification-artifacts)
+to bake the artifact into the Kokkos `.npz` for LAMMPS.
+
+
+#### Build Active Set (for GRACE/FS Only)
 
 For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
 Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
@@ -180,13 +200,27 @@ If `min_dist` is given, calculator will raise an exception when it encounters a 
 
 ##### Aggregation engine: the `mode` argument
 
-`TPCalculator` has two neighbor-aggregation engines, selected with `mode`. There is no single winner —
-pick by your workload:
+!!! warning "Be aware: GRACE is XLA-JIT-compiled per input shape"
+    Under the hood the calculator is XLA-JIT-compiled for a **specific input shape** —
+    the padded number of atoms *and* number of neighbours. The **first** evaluation of
+    each new shape triggers a fresh compilation that takes **~20 seconds**; afterwards
+    that shape runs at full speed. If the padding settings and the order in which
+    structures are evaluated are not chosen well, the calculator keeps hitting new
+    shapes and **recompiles frequently**, which can dominate the wall-clock time and
+    make overall performance very poor — even though each individual evaluation is fast.
+
+    To avoid this, pick a strategy that keeps the shape stable (or slowly changing):
+    match the `mode` below to your workload, tune the padding (`pad_neighbors_fraction`,
+    `pad_atoms_number`), and — for heterogeneous scans — feed structures largest-first
+    (see the tips further down).
+
+`TPCalculator` has two neighbor-aggregation engines, selected with `mode`:
 
 | `mode` | Engine | Use it for | Why |
 |---|---|---|---|
-| `"uniform"` | dense (reshape) | a **single structure**, an **MD / relaxation trajectory**, or a **uniform dataset** (all evaluated structures have ~the same size) | ~1.3–1.7× faster per structure, and *order-invariant*. Pads tight from the start. |
+| `"uniform"` | dense (reshape) | a **single structure**, an **MD / relaxation trajectory**, or a **uniform dataset** (all evaluated structures have ~the same size) | up to ~1.7× faster per structure. Pads tight from the start. |
 | `"diverse"` (default) | segment_sum | scanning **many very different structures** (a heterogeneous dataset) | tolerant of size variation without exploding the number of XLA compiles |
+
 
 ```python
 # single structure / MD / relaxation / uniform dataset
@@ -196,16 +230,18 @@ calc = TPCalculator('path/to/saved_model', mode="uniform")
 calc = TPCalculator('path/to/saved_model', mode="diverse")  # the default
 ```
 
-**Why two modes (and why no automatic switch):** the dense engine is faster for any *given* structure,
-but it pads tightly, so a stream of differently-sized structures forces a fresh XLA compile per distinct
-size. segment_sum tolerates size variation with far fewer compiles. The calculator evaluates one structure
-per call and cannot see the whole sequence in advance, so it cannot reliably auto-detect the regime —
-hence an explicit, documented switch.
+!!! note "Why two modes (and no automatic switch)"
+    The dense engine is generally faster for heavy models for any *given* structure,
+     but it pads tightly, so a stream of differently-sized structures forces a fresh 
+     XLA compile per distinct size.
+     The calculator evaluates one structure per call and cannot see the whole sequence in advance, so it
+    cannot reliably auto-detect the regime.
 
-**Tip for `mode="diverse"` scans — sort by decreasing atom count.** Feeding structures **largest first**
-lets the first compiled shape cover all the rest, minimizing recompiles. Ascending (smallest first) is the
-worst case: it can mint a fresh compile at nearly every size step (an order of magnitude more compiles than
-descending). The dense (`"uniform"`) engine, by contrast, is order-invariant.
+!!! tip "Sort `diverse` scans by decreasing atom count"
+    Feeding structures **largest first** lets the first compiled shape cover all the
+    rest, minimizing recompiles. Ascending (smallest first) is the worst case: it can
+    mint a fresh compile at nearly every size step (an order of magnitude more compiles
+    than descending).
 
 **Fallback:** if the model cannot run the requested engine (an in-memory model is single-engine, fixed at
 build time; a SavedModel may export only `compute`), the calculator falls back to the available engine and

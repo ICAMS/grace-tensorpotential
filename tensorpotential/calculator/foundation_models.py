@@ -188,25 +188,6 @@ MODELS_METADATA = {
     },
     ### uqv6 (v3) OMAT 1L/2L medium+large models (12) — fp32 default + "-fp64"
     ### are generated below from _UQV6_MODEL_NAMES via _uqv6_entry().
-    #### mixed
-    "GRACE-2L-OMAT-large-mx": {
-        MODEL_URL_KEY: "https://huggingface.co/AMS-ICAMS-RUB/grace-foundation-models/resolve/kk/models/GRACE-2L-OMAT-large-mx-model.tar.gz",
-        DESCRIPTION_KEY: "A GRACE-2L large foundation model with mixed precision, fitted on OMat24.",
-        LICENSE_KEY: "Academic Software License",
-        CHECKPOINT_URL_KEY: "https://huggingface.co/AMS-ICAMS-RUB/grace-foundation-models/resolve/uq-v1/checkpoints/GRACE-2L-OMAT-large-mx-checkpoint.tar.gz",
-        PRECISION_KEY: "mixed",
-        UQ_KEY: True,  # uq-v1 era UQ checkpoint (verify with `grace_models info`)
-        PARALLEL_KEY: True,
-    },
-    "GRACE-2L-OMAT-large-mx-ft-AM": {
-        MODEL_URL_KEY: "https://huggingface.co/AMS-ICAMS-RUB/grace-foundation-models/resolve/kk/models/GRACE-2L-OMAT-large-mx-ft-AM-model.tar.gz",
-        DESCRIPTION_KEY: "A GRACE-2L large foundation model with mixed precision, fitted on OMat24 and fine-tuned on sAlex+MPTraj.",
-        LICENSE_KEY: "Academic Software License",
-        CHECKPOINT_URL_KEY: "https://huggingface.co/AMS-ICAMS-RUB/grace-foundation-models/resolve/uq-v1/checkpoints/GRACE-2L-OMAT-large-mx-ft-AM-checkpoint.tar.gz",
-        PRECISION_KEY: "mixed",
-        UQ_KEY: True,  # uq-v1 era UQ checkpoint (verify with `grace_models info`)
-        PARALLEL_KEY: True,
-    },
     ### uqv6 (v3) SMAX models (6) — fp32 default + "-fp64" are generated
     ### below from _UQV6_MODEL_NAMES via _uqv6_entry().
 }

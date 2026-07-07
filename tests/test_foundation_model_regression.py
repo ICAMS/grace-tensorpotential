@@ -472,48 +472,6 @@ REFERENCE = {
             ]
         ),
     },
-    "GRACE-2L-OMAT-large-mx": {
-        "energy": -14.960834503173828,
-        "forces": np.array(
-            [
-                [-4.05133677e-01, -3.70438821e-08, 7.45379902e-08],
-                [-4.94950518e-02, 2.12982418e-08, 2.66006215e-08],
-                [2.27314327e-01, 1.43528263e-08, -3.40524666e-08],
-                [2.27314402e-01, 1.39281404e-09, -6.70861451e-08],
-            ]
-        ),
-        "stress": np.array(
-            [
-                4.84011669e-03,
-                5.60880062e-03,
-                5.60880398e-03,
-                3.62642307e-09,
-                -5.74132853e-10,
-                -4.46865072e-10,
-            ]
-        ),
-    },
-    "GRACE-2L-OMAT-large-mx-ft-AM": {
-        "energy": -14.959999084472656,
-        "forces": np.array(
-            [
-                [-3.84997970e-01, -4.74079642e-08, 8.10342499e-09],
-                [-4.31641934e-02, 1.76087053e-08, 1.87954018e-08],
-                [2.14081091e-01, 4.33733616e-08, 2.96843016e-08],
-                [2.14081072e-01, -1.35741028e-08, -5.65831284e-08],
-            ]
-        ),
-        "stress": np.array(
-            [
-                2.90068860e-03,
-                3.61270930e-03,
-                3.61271048e-03,
-                5.01710828e-10,
-                -3.27415835e-09,
-                2.81047647e-11,
-            ]
-        ),
-    },
 }
 
 ALL_MODELS = list(REFERENCE.keys())
@@ -525,9 +483,6 @@ SMAX_MODELS = [
     "GRACE-2L-SMAX-OMAT-large",
     "GRACE-2L-SMAX-OMAT-medium",
 ]
-
-MX_MODELS = ["GRACE-2L-OMAT-large-mx", "GRACE-2L-OMAT-large-mx-ft-AM"]
-
 
 def make_test_structure():
     """Create a deterministic Al FCC test structure with one atom displaced."""
