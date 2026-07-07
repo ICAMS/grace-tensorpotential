@@ -36,6 +36,11 @@ PAD_MAX_N_STRUCTURES: Final[str] = "max_nstruct"
 PAD_MAX_N_ATOMS: Final[str] = "max_nat"
 # TODO: Possibly rename things related to n_neighbors -> n_bonds?
 PAD_MAX_N_NEIGHBORS: Final[str] = "max_nneigh"
+# Per-batch reshape width for the dense (reshape) aggregation: each atom is padded to this
+# many neighbor slots, so the dense bond count is PAD_MAX_N_ATOMS * PAD_MAX_NEIGH. Set by the
+# dense bucketing path (bucketing_split_dense) and by DensePaddingManager.get_data (single-
+# structure inference). See tensorpotential.data.dense_nbr.
+PAD_MAX_NEIGH: Final[str] = "max_neigh"
 
 
 # Properties
@@ -74,6 +79,11 @@ INPUT_FIT_LOSS_STRESS: Final[str] = "stress"
 INPUT_FIT_LOSS_VIRIAL: Final[str] = "virial"
 INPUT_POTENTIAL_REDUCE_ELEMENTS: Final[str] = "reduce_elements"
 INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL: Final[str] = "finetune_foundation_model"
+# Enable the dense (reshape) equivariant neighbor aggregation
+# (input.yaml::potential::dense_nbr). Broadcast to the model's InstructionManager and
+# to the data builder so the model runs the dense compute and data prep supplies the
+# matching per-atom-uniform bond layout. Default False.
+INPUT_POTENTIAL_DENSE_NBR: Final[str] = "dense_nbr"
 
 INPUT_REFERENCE_ENERGY: Final[str] = "reference_energy"
 

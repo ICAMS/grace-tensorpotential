@@ -1,12 +1,28 @@
+from tensorpotential.instructions.base import (
+    BondLength,
+    InstructionManager,
+    ScaledBondVector,
+    TPEquivariantInstruction,
+)
+from tensorpotential.instructions.compute import (
+    FunctionReduceN as FunctionReduce,
+    MLPRadialFunction,
+    ProductFunction,
+    RadialBasis,
+    ScalarChemicalEmbedding,
+    SphericalHarmonic,
+)
 from tensorpotential.instructions.output import (
+    ConstantScaleShiftTarget,
     CreateOutputTarget,
     LinearOut2Target,
     MLPOut2ScalarTarget,
-    ConstantScaleShiftTarget,
 )
-from tensorpotential.instructions.base import *
-from tensorpotential.instructions.compute import *
-from tensorpotential.utils import Parity
+from tensorpotential import constants
+from tensorpotential.utils import Parity, capture_init_args
+from tensorpotential.tpinstruction import TPInstruction
+from tensorpotential.layers import DenseLayer
+import tensorflow as tf
 
 
 @capture_init_args

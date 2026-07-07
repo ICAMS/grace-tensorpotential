@@ -1,5 +1,4 @@
 from tensorpotential.instructions.base import (
-    load_instructions,
     capture_init_args,
     InstructionManager,
     NoInstructionManager,
@@ -20,6 +19,7 @@ from tensorpotential.instructions.compute import (
     SingleParticleBasisFunctionScalarInd,
     SingleParticleBasisFunctionEquivariantInd,
     ProductFunction,
+    GeneralProductFunction,
     FunctionReduce,
     FunctionReduceParticular,
     FunctionReduceN,
@@ -28,8 +28,10 @@ from tensorpotential.instructions.compute import (
     CropProductFunction,
     BondSpecificRadialBasisFunction,
     MLPRadialFunction_v2,
+    SPBF,
     InvariantLayerRMSNorm,
-    InvariantPade,
+    EquivariantRMSNorm,
+    EquivariantGate,
 )
 
 from tensorpotential.instructions.instruction_graph_utils import (
@@ -48,9 +50,30 @@ from tensorpotential.instructions.output import (
     MLPOut2ScalarTarget,
     ConstantScaleShiftTarget,
     LinMLPOut2ScalarTarget,
+    LinMLPScalarReadOut,
     LinearOut2EquivarTarget,
     TrainableShiftTarget,
+    TrainableShiftTarget_v2,
 )
+
+
+def __getattr__(name: str):
+    # Old notebooks did ``from tensorpotential.instructions import
+    # read_model_metadata``; the helper moved to tensorpotential.metadata_utils
+    # but the legacy import path is kept alive (with a DeprecationWarning) so
+    # those notebooks keep working.
+    if name == "read_model_metadata":
+        import warnings
+        from tensorpotential.metadata_utils import read_model_metadata
+
+        warnings.warn(
+            "Importing read_model_metadata from tensorpotential.instructions "
+            "is deprecated; use tensorpotential.metadata_utils.read_model_metadata.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return read_model_metadata
+    raise AttributeError(f"module 'tensorpotential.instructions' has no attribute {name!r}")
 
 __all__ = [
     "capture_init_args",
@@ -69,6 +92,7 @@ __all__ = [
     "SingleParticleBasisFunctionEquivariantInd",
     "ScalarChemicalEmbedding",
     "ProductFunction",
+    "GeneralProductFunction",
     "FunctionReduce",
     "FunctionReduceParticular",
     "CreateOutputTarget",
@@ -76,6 +100,7 @@ __all__ = [
     "FSOut2ScalarTarget",
     "MLPOut2ScalarTarget",
     "LinMLPOut2ScalarTarget",
+    "LinMLPScalarReadOut",
     "ConstantScaleShiftTarget",
     "FunctionReduceN",
     "FCRight2Left",
@@ -85,10 +110,13 @@ __all__ = [
     "BondSpecificRadialBasisFunction",
     "MLPRadialFunction_v2",
     "TrainableShiftTarget",
+    "TrainableShiftTarget_v2",
     "InvariantLayerRMSNorm",
+    "EquivariantRMSNorm",
+    "EquivariantGate",
     "save_instructions_dict",
     "load_instructions",
-    'InvariantPade',
+    "SPBF",
     "get_dependencies",
     "build_dependency_graph",
     "print_dependency_tree",
@@ -98,21 +126,15 @@ __all__ = [
 ]
 
 try:
-    from tensorpotential.experimental.instructions.aux_compute import (
-        InvariantLayerDTNorm,
-        EquivariantRMSNorm,
-        MLPRadialFunction_v3,
-        MLPRadialFunction_v4,
-        MLPRadialFunction_v5,
+    from tensorpotential.experimental.instructions.aux_compute import (  # noqa: F401
+        StructuredGridProductFunction,
+        StructuredGridMessagePassing,
     )
 
     __all__.extend(
         [
-            "EquivariantRMSNorm",
-            "InvariantLayerDTNorm",
-            "MLPRadialFunction_v3",
-            "MLPRadialFunction_v4",
-            "MLPRadialFunction_v5",
+            "StructuredGridProductFunction",
+            "StructuredGridMessagePassing",
         ]
     )
 except ImportError:

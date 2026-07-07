@@ -11,6 +11,7 @@ potential:
   #  elements: ["C", "H", "O"]
   preset: "FS"
   scale: True
+  param_dtype: float64
 
 fit:
   #  strategy: mirrored

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Tuple, Set, Optional
+from typing import TYPE_CHECKING, Dict, List, Tuple, Optional
 import tensorflow as tf
 
 if TYPE_CHECKING:
-    from tensorpotential.instructions.base import TPInstruction, InstructionManager
+    from tensorpotential.instructions.base import TPInstruction
 
 
 def get_dependencies(instruction: TPInstruction) -> List[str]:
@@ -187,7 +187,6 @@ def find_non_local_keys(
     non_local_keys = []
 
     for key in communicated_keys:
-        is_non_local = False
         # Find consumers of this key
         key_consumers = consumers[key]
         for consumer in key_consumers:
@@ -259,9 +258,7 @@ def infer_communicated_keys(instructions: Dict[str, TPInstruction]) -> List[str]
                     origins = [origins]
 
             for origin in origins:
-                origin_name = (
-                    origin.name if hasattr(origin, "name") else origin
-                )
+                origin_name = origin.name if hasattr(origin, "name") else origin
                 if origin_name not in instructions:
                     continue
 
@@ -285,9 +282,9 @@ def infer_communicated_keys(instructions: Dict[str, TPInstruction]) -> List[str]
 def build_split_tpmodel(
     instructions: Dict[str, TPInstruction],
     communicated_keys: List[str],
-    float_dtype=tf.float64,
-    input_dtype=None,
-    jit_compile=True,
+    input_signature_float_dtype: tf.dtypes.DType = tf.float64,
+    param_dtype: tf.dtypes.DType = tf.float32,
+    jit_compile: bool = True,
     extra_aux_computes=None,
 ):
     """
@@ -296,8 +293,8 @@ def build_split_tpmodel(
     Args:
         instructions: Original instructions dictionary.
         communicated_keys: Keys to be passed between layers.
-        float_dtype: DType for variables/computation.
-        input_dtype: DType for inputs.
+        input_signature_float_dtype: DType for inputs.
+        param_dtype: DType for parameters.
         jit_compile: Whether to use XLA.
 
     Returns:
@@ -337,7 +334,7 @@ def build_split_tpmodel(
 
         comm_specs[key] = {
             "shape": [None, n_out, n_features],
-            "dtype": "float64" if float_dtype == tf.float64 else "float32",
+            "dtype": "float64" if param_dtype == tf.float64 else "float32",
         }
 
     l2_grad_specs = {f"grad_{k}": v for k, v in comm_specs.items()}
@@ -369,10 +366,8 @@ def build_split_tpmodel(
 
     # 4. Build Model
     m = TPModel(instructions=instructions, aux_compute=aux_computes)
-    m.build(float_dtype, jit_compile=jit_compile, input_dtype=input_dtype)
-    m.decorate_compute_function(
-        float_dtype, jit_compile=jit_compile, input_dtype=input_dtype
-    )
+    m.build(param_dtype, input_signature_float_dtype, jit_compile=jit_compile)
+    m.decorate_compute_function(input_signature_float_dtype, jit_compile=jit_compile)
 
     # this is not ideal, but it's the best we can do for now
     non_local_comm_keys = find_non_local_keys(instructions, communicated_keys)

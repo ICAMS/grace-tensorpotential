@@ -24,7 +24,23 @@ data:
   # save_dataset: False # default is True
   # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
   # max_workers: 6 # for parallel data builder
-  
+
+  ## Data pipeline mode: "in_memory" (default) or "streaming"
+  ## "streaming" computes neighbour lists on-the-fly, keeping only one batch in memory.
+  ## Recommended for large datasets that do not fit in RAM.
+  ## NOTE: weight normalization is not supported in streaming mode (normalize_weights must be False).
+  # pipeline: streaming
+  # streaming:
+  #   target_metric: 3000          # total metric value per batch (e.g. total neighbours)
+  #   metric_strategy: neighbours  # grouping metric: "neighbours", "atoms", or "structures"
+  #   num_bins: 10                 # number of parallel accumulation bins
+  #   sorting_buffer_size: 32      # sort structures every N arrivals for load balancing
+  #   growth_fraction: 0.1         # bucket growth on overflow: <1 = relative (10%), >=1 = absolute (+N slots)
+  #                                # per-axis dict also supported: {atom: 0.1, bond: 0.05, structure: 5}
+  #   outlier_strategy: expand     # "expand" (grow bucket), "warn_skip" (drop), or "error" (raise)
+  #   verbose: false               # log bucket discovery events
+  #   prefetch_queue_size: 0       # set to >0 to thread prefetcing
+
   ## Extra input/reference DataBuilder/s required for model
   # extra_components: {
   #   MagMomDataBuilder: {},
@@ -68,6 +84,13 @@ potential:
   # avg_n_neigh: 40 # Average number of neighbours. By default - automatically determined
   # float_dtype: float64 # float64, float32
   # custom ZBL core repulsion for model:  kwargs: {zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }}
+  # dense_nbr: False # Dense (reshape) equivariant neighbour aggregation. When True the model runs
+  #                  # a batched matmul over a per-atom-uniform [n_atoms*max_neigh] bond layout
+  #                  # instead of the per-bond einsum + segment_sum scatter. It is compute-bound
+  #                  # (faster on GPU, esp. deeper models / higher coordination) but materializes
+  #                  # padded neighbour slots, so it pays off only when the per-batch padding is
+  #                  # low -- tune the fit::dense_* batching knobs below. The data pipeline emits
+  #                  # the matching layout automatically. Bit-exact with the default path.
 
 ######################
 ##       FIT        ##
@@ -106,12 +129,18 @@ fit:
   # reset_epoch_and_step: False # reset epoch and step internal counters (stored in checkpoint)
   scheduler: cosine_decay # scheduler for learning-rate reduction during training 
     # available options are: reduce_on_plateau, cosine_decay, linear_decay, exponential_decay
-  scheduler_params: {"minimal_learning_rate": 0.0001}
-  #scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimal_learning_rate": 0.05}
+  scheduler_params: {"minimum_learning_rate": 0.0001}
+  #scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimum_learning_rate": 0.05}
     # If :warmup_epochs: > 0, begin optimization with :cold_learning_rate: and reach :opt_params::learning_rate:
     # within :warmup_epochs: (can be < 1). Else, begin optimization with :opt_params::learning_rate: and decay down to
     # minimum_learning_rate within :maxiter: epochs
-  # legacy format for reduce_on_plateau lr scheduler 
+    # NOTE: the correct key is `minimum_learning_rate`. Using `minimal_learning_rate` (common typo) is silently ignored
+    #       and the default (1e-4) is used instead.
+  ## reduce_on_plateau scheduler (new API)
+  # scheduler: reduce_on_plateau
+  # scheduler_params: { patience: 10, reduction_factor: 0.8, minimum_learning_rate: 5.0e-4,
+  #                     stop_at_min: False, resume_lr: True, cooldown: 0, monitor: test_loss }
+  # legacy format for reduce_on_plateau lr scheduler (DEPRECATED — uses keys `factor` and `min`)
   # learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, }
   
   
@@ -141,11 +170,42 @@ fit:
   ##   - "auto": dynamically determines the minimum number of buckets (1-32) that keeps padding overhead below `auto_bucket_max_padding`.
   ## `test_max_n_buckets`: "auto" (default) or integer. Same for test set.
   ## `auto_bucket_max_padding`: 0.3 (default). Target maximum padding overhead fraction for neighbours when using `"auto"` bucketing. 0.3 means 30%.
+  ##   NOTE: in dense mode (potential::dense_nbr: True) this knob is REPURPOSED as the unified net
+  ##   neighbour-padding target and defaults to 0.15 (see the dense batching block below).
   train_max_n_buckets: auto  ## max number of buckets in train set
   test_max_n_buckets: auto   ## same for test
 
+  ## ---- Dense (reshape) batching (only used when potential::dense_nbr: True) ----
+  ## In the dense layout the atom and neighbour axes are bound (a padding/"fake" atom occupies a
+  ## full reshape `width` of neighbour slots), and neighbour padding is what drives the wasted
+  ## compute. So a single target controls everything:
+  ## `auto_bucket_max_padding`: in dense mode this is the UNIFIED target on the NET neighbour-padding
+  ##   fraction  1 - (real neighbours) / (sum of n_atoms*max_neigh over batches).  Default 0.15.
+  ##   An adaptive search splits this budget between (a) the max_neigh "width" bucketing -- structures
+  ##   are sorted by per-atom max_neigh and cut into contiguous buckets, each padded to its OWN max
+  ##   (a DP-optimal partition of the max_neigh histogram, not fixed tiers) -- and (b) the per-atom
+  ##   (nat) bucketing (fake atoms), choosing the allocation that meets the target with the FEWEST
+  ##   distinct buffer shapes. The segment_sum path keeps the 0.3 default and pads the two axes
+  ##   independently.
+  # dense_max_shapes: 64       ## HARD cap on the number of distinct (n_atoms, max_neigh) buffer shapes
+  #                            ## == XLA recompiles (the compile budget). shapes <= this by construction;
+  #                            ## if the padding target needs more, the cap wins (padding rises) and a
+  #                            ## warning is logged. A LARGER batch_size hits the target with fewer shapes.
+  # dense_slot_budget: auto    ## max n_atoms*max_neigh per batch (caps per-batch memory / isolates
+  #                            ## high-coordination outliers). auto = batch_size*mean(nat)*mean(max_neigh).
+  # dense_n_neigh_buckets: auto ## explicit number of max_neigh width buckets (overrides the adaptive search)
+  # dense_max_neigh_cap:       ## drop structures whose per-atom max_neigh exceeds this (broken/degenerate
+  #                            ## cells); default off. Never truncates neighbours.
+  ## A run logs, per dataset: "dense bucketing: N batches, S/cap distinct shapes, net neighbour padding X%".
+
   checkpoint_freq: 10 # frequency for **REGULAR** checkpoints. 
   # save_all_regular_checkpoints: False # to store ALL regular checkpoints
+  # checkpoint_freq_steps: 500 # opt-in mid-epoch checkpoint every N training steps (Adam only).
+  #                            # A crash loses at most N steps. Overwrites the default `checkpoint`
+  #                            # file; on `-rl` restart, train_adam rewinds to the start of the
+  #                            # interrupted epoch and fast-forwards the data iterator past the
+  #                            # already-trained batches (gradients are preserved in the restored
+  #                            # optimizer state). Use `--no-intra-epoch-redo` to skip the rewind.
   # progressbar: True # show batch-evaluation progress bar
   # train_shuffle: True # shuffle train batches on every epoch
   # strategy: mirrored # or -m flag # for parallel multi-GPU parameterization

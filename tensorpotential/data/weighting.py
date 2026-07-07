@@ -15,7 +15,6 @@ from tensorpotential.data.process_df import (
     E_FORMATION_PER_ATOM,
     EFFECTIVE_ENERGY,
     E_CORRECTED_PER_ATOM_COLUMN,
-    WEIGHTS_FACTOR,
     ENERGY_CORRECTED_COL,
     FORCES_COL,
     NUMBER_OF_ATOMS,

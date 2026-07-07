@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
+import math
 import os
 import sys
 
@@ -13,7 +14,10 @@ from ase.data import chemical_symbols
 import tensorpotential
 from tensorpotential import constants as tc
 from tensorpotential.calculator.foundation_models import get_or_download_checkpoint
-from tensorpotential.cli.data import load_and_prepare_datasets, inject_or_update_atomic_shift_in_model
+from tensorpotential.cli.data import (
+    load_and_prepare_datasets,
+    inject_or_update_atomic_shift_in_model,
+)
 from tensorpotential.cli.prepare import (
     construct_model,
     convert_to_tensors_for_model,
@@ -25,18 +29,22 @@ from tensorpotential.instructions.base import (
     load_instructions,
     save_instructions_dict,
 )
-from tensorpotential.loss import *
-from tensorpotential.metrics import *
+from tensorpotential.tpmodel import TPModel
 from tensorpotential.tensorpot import TensorPotential, get_output_dir
-from tensorpotential.utils import convert_model_reduce_elements
+from tensorpotential.utils import (
+    convert_model_reduce_elements,
+    get_param_dtype_from_config,
+    is_chief,
+)
+from tensorpotential.metadata_utils import read_model_metadata
+
+import tensorflow as tf
 
 MODEL_CONFIG_YAML = "model.yaml"
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 DEFAULT_TARGET_UPDATES = {
     "Adam": {"scratch": 50_000, "finetune": 10_000},
@@ -99,6 +107,20 @@ def build_parser():
         type=str,
         dest="restart_suffix",
         help="Suffix of checkpoint to restart from, i.e. .epoch_10  (use separately from -r/-rl)",
+    )
+
+    parser.add_argument(
+        "--no-intra-epoch-redo",
+        dest="intra_epoch_redo",
+        action="store_false",
+        default=True,
+        help="When resuming from a mid-epoch checkpoint (intra_epoch_save=True), "
+        "skip the interrupted epoch's remaining batches entirely and bump the "
+        "step counter to the nominal end of that epoch. This keeps the LR "
+        "scheduler aligned with the original maxiter budget at the cost of "
+        "under-training by (nominal_end - saved_step) gradient updates. "
+        "Default is to fast-forward the iterator and train only the unseen "
+        "tail, which is usually cheaper and preserves full training amount.",
     )
 
     parser.add_argument(
@@ -187,7 +209,13 @@ def add_loaded_model_parameter(potential_file_name, args_yaml):
     with open(potential_file_name, "rt") as f:
         list_of_dict_instructions = yaml.safe_load(f)
     if isinstance(list_of_dict_instructions, dict):
-        list_of_dict_instructions = list(list_of_dict_instructions.values())
+        # New format: top-level dict with sections like "metadata" and "instructions"
+        if "instructions" in list_of_dict_instructions:
+            list_of_dict_instructions = list(
+                list_of_dict_instructions["instructions"].values()
+            )
+        else:
+            list_of_dict_instructions = list(list_of_dict_instructions.values())
 
     for ins_dict in list_of_dict_instructions:
         if "ScalarChemicalEmbedding" in ins_dict["__cls__"]:
@@ -253,13 +281,16 @@ def compute_maxiter(target_total_updates: int, num_batches: int, optimizer: str)
 
     - For Adam: updates are per-mini-batch.
     - For BFGS/L-BFGS-B: updates are per-epoch (full dataset).
+
+    Rounds up so the resulting epoch count delivers *at least*
+    ``target_total_updates`` gradient updates, never fewer.
     """
     if optimizer in ("L-BFGS-B", "BFGS"):
         raw = target_total_updates
     else:
         raw = target_total_updates / max(num_batches, 1)
 
-    rounded = int(round(raw / 10) * 10)  # round to nearest 10
+    rounded = int(math.ceil(raw))  # smallest integer that meets the target
     return max(10, min(5000, rounded))  # clamped [10, 5000]
 
 
@@ -278,7 +309,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
         args_yaml = yaml.safe_load(f)
     seed = args_parse.seed or args_yaml.get("seed", 1)
     output_dir = get_output_dir(seed=seed)
-    if "log" in args_parse:
+    if "log" in args_parse and is_chief(strategy):
         log_file_name = os.path.join(output_dir, args_parse.log)
         os.makedirs(output_dir, exist_ok=True)
         log.info("Redirecting log into file {}".format(log_file_name))
@@ -306,6 +337,15 @@ def main(argv=None, strategy=None, strategy_desc=""):
     # global strategy, strategy_desc
     if strategy is None:
         if fit_config.get("strategy") == "mirrored" or args_parse.multigpu:
+            # The auto-MWMS upgrade for single-host multi-GPU is done by
+            # scripts.gracemaker.main; it must run before any tf.config call
+            # so MWMS can configure collective ops at program startup. We
+            # only reach here in two cases:
+            #   1. NUM_VIRTUAL_DEVICES is set, which forces this fallback
+            #      (virtual device setup and MWMS are mutually exclusive at
+            #      the tf.distribute API level).
+            #   2. Someone imported cli.gracemaker.main directly, bypassing
+            #      the entry-point script.
             strategy = tf.distribute.MirroredStrategy()
             strategy_desc = "Single host/multi GPU"
         else:
@@ -327,28 +367,27 @@ def main(argv=None, strategy=None, strategy_desc=""):
         "batch_size", 8
     )  # TODO: get batch_size from stats.json for distributed dataset
     global_batch_size = batch_size * strategy.num_replicas_in_sync
-    log.info(
-        f"Global TRAIN batch size (= minibatch size * num GPUS): {global_batch_size}, "
-        f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {batch_size}"
-    )
+    if not args_parse.save_model:
+        log.info(
+            f"Global TRAIN batch size (= minibatch size * num GPUS): {global_batch_size}, "
+            f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {batch_size}"
+        )
 
     test_batch_size = fit_config.get("test_batch_size", 1)
     if test_batch_size:
         global_test_batch_size = test_batch_size * strategy.num_replicas_in_sync
-        log.info(
-            f"Global TEST batch size (= minibatch size * num GPUS): {global_test_batch_size}, "
-            f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {test_batch_size}"
-        )
+        if not args_parse.save_model:
+            log.info(
+                f"Global TEST batch size (= minibatch size * num GPUS): {global_test_batch_size}, "
+                f"num. GPUS: {strategy.num_replicas_in_sync}, minibatch size: {test_batch_size}"
+            )
 
-    float_dtype_param = potential_config.get("float_dtype", "float64")
-    float_dtype = {
-        "float64": tf.float64,
-        "float32": tf.float32,
-        "tfloat32": tf.float32,
-    }[float_dtype_param]
-    if float_dtype_param == "tfloat32":
-        tf.config.experimental.enable_tensor_float_32_execution(True)
-    log.info(f"Float dtype: {float_dtype_param}")
+    user_set_param_dtype = (
+        "param_dtype" in potential_config or "float_dtype" in potential_config
+    )
+    param_dtype, param_dtype_flag = get_param_dtype_from_config(
+        potential_config
+    )  # log deferred
 
     train_data = None
     test_data = None
@@ -356,8 +395,8 @@ def main(argv=None, strategy=None, strategy_desc=""):
     data_stats = None
 
     if args_parse.check_model:
-        check_model(args_yaml, float_dtype)
-        log.info(f"Exiting...")
+        check_model(args_yaml, param_dtype)
+        log.info("Exiting...")
         sys.exit(0)
 
     # finetuning of foundation models
@@ -385,7 +424,6 @@ def main(argv=None, strategy=None, strategy_desc=""):
 
     # no need to perform expensive data processing if mode
     if not args_parse.save_model:
-        # TODO: create a class or named tuple?
         (
             train_data,
             test_data,
@@ -457,6 +495,34 @@ def main(argv=None, strategy=None, strategy_desc=""):
             output_dir, MODEL_CONFIG_YAML
         )
 
+    # Infer param_dtype from model.yaml now that all potential_file_name sources are resolved.
+    # This must happen after the save_model fallback above, otherwise -r -s would miss the
+    # local model.yaml and default to float32, corrupting the saved model.yaml.
+    if potential_file_name and not user_set_param_dtype:
+        if os.path.exists(potential_file_name):
+            metadata = read_model_metadata(potential_file_name)
+            if "param_dtype" in metadata:
+                from tensorpotential.utils import get_dtype_by_name
+
+                param_dtype = get_dtype_by_name(metadata["param_dtype"])
+                param_dtype_flag = metadata["param_dtype"]
+                log.info(
+                    f"param_dtype={param_dtype_flag} inferred from model.yaml metadata"
+                )
+            else:
+                param_dtype = tf.float64
+                param_dtype_flag = "float64"
+                log.info(
+                    "No param_dtype in model.yaml (old model) — using float64 for backward compatibility"
+                )
+        else:
+            log.info(f"Using default model parameter dtype: {param_dtype_flag}")
+    elif user_set_param_dtype:
+        log.info(f"Model parameter dtype: {param_dtype_flag}")
+    else:
+        # Fresh fit from scratch — no model.yaml exists yet
+        log.info(f"Using default model parameter dtype: {param_dtype_flag}")
+
     checkpoint_name = args_parse.checkpoint_name or potential_config.get(
         tc.INPUT_POTENTIAL_CHECKPOINT_NAME
     )
@@ -485,6 +551,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
             checkpoint_name=checkpoint_name,
             new_potential_file_name=new_potential_file_name,
             new_checkpoint_name=new_checkpoint_name,
+            param_dtype=param_dtype,
         )
         potential_file_name = new_potential_file_name
         checkpoint_name = new_checkpoint_name
@@ -502,7 +569,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
         cut_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
         if cut_dict:
             log.info(f"User-defined cutoff dict: {cut_dict}")
-        log.info(f"Constructing model from config")
+        log.info("Constructing model from config")
         pot, _preset_communicated_keys = construct_model(
             potential_config,
             element_map=element_map,
@@ -520,19 +587,18 @@ def main(argv=None, strategy=None, strategy_desc=""):
     # Model surgery: inject FM-based atomic energy shifts before saving
     fm_shift_dict = data_stats.get("fm_shift_dict") if data_stats else None
     if fm_shift_dict is not None:
-        log.info("Applying FM energy shift correction via model surgery")
+        log.info("Injecting foundation model energy shifts into model")
         inject_or_update_atomic_shift_in_model(
             instructions_dict=pot,
             fm_shift_dict=fm_shift_dict,
             element_map=element_map,
         )
 
-    log.info(f"Saving model config to {target_potential_file_name}")
-    save_instructions_dict(target_potential_file_name, pot)
-
     # loss function spec from fit_config
     model_fns = construct_model_functions(fit_config)
-    log.info(f"Loss function: {model_fns.loss_fn}")
+
+    log.info(f"Saving model config to {target_potential_file_name}")
+    save_instructions_dict(target_potential_file_name, pot, param_dtype=param_dtype)
 
     if args_parse.eager:
         log.warning("Eager execution")
@@ -541,9 +607,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
     if args_parse.no_jit:
         log.info("--no-jit option is provided")
         jit_compile = False
-    log.info(f"JIT compilation: {jit_compile}")
     opt = fit_config.get("optimizer", "Adam")
-    log.info(f"Optimization options: {fit_config.get('opt_params')}")
+
+    if not args_parse.save_model:
+        log.info(f"Loss function: {model_fns.loss_fn}")
+        log.info(f"JIT compilation: {jit_compile}")
+        log.info(f"Optimization options: {fit_config.get('opt_params')}")
 
     tp = TensorPotential(
         potential=pot,
@@ -555,7 +624,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
         compute_metrics=model_fns.metrics_fn,
         model_train_function=model_fns.train_fn,
         model_compute_function=model_fns.compute_fn,
-        float_dtype=float_dtype,  # TODO: set up from config
+        param_dtype=param_dtype,
         eager_mode=args_parse.eager,
         jit_compile=jit_compile,
         seed=seed,
@@ -569,7 +638,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
         restart_latest=args_parse.restart_latest,
         restart_suffix=args_parse.restart_suffix,
         checkpoint_name=checkpoint_name,
-        expect_partial=False,  # True for save_model, False otherwise
+        expect_partial=args_parse.save_model,
         verbose=True,
         assert_consumed=False,
     )
@@ -629,7 +698,6 @@ def main(argv=None, strategy=None, strategy_desc=""):
             name, jit_compile=True, communicated_keys=_communicated_keys
         )
 
-    log.info("Convert data to tensors")
     train_batches, test_batches = convert_to_tensors_for_model(
         tp, train_data, test_data, strategy=strategy
     )
@@ -666,6 +734,7 @@ def main(argv=None, strategy=None, strategy_desc=""):
                 seed=seed,
                 train_grouping_df=train_grouping_df,
                 test_grouping_df=test_grouping_df,
+                intra_epoch_redo=args_parse.intra_epoch_redo,
             )
         else:
             raise ValueError(
@@ -682,12 +751,12 @@ def main(argv=None, strategy=None, strategy_desc=""):
             log.info("Exporting FS-model, please wait...")
             tp.export_to_yaml("FS_model.yaml")
             log.info("Exporting FS-model done")
-    except KeyboardInterrupt as e:
+    except KeyboardInterrupt:
         log.info("Keyboard interruption is captured")
         sys.exit(0)
 
 
-def check_model(args_yaml, float_dtype):
+def check_model(args_yaml, param_dtype):
     rcut = args_yaml["cutoff"]
     potential_config = args_yaml["potential"]
 
@@ -700,7 +769,7 @@ def check_model(args_yaml, float_dtype):
         potential_config, element_map=element_map, rcut=rcut, cutoff_dict=cut_dict
     )
     model = TPModel(pot)
-    model.build(float_dtype=float_dtype)
+    model.build(param_dtype=param_dtype)
     init_flat_vars = model.get_flat_trainable_variables()
     log.info("Model is constructed")
     log.info(f"Number of trainable parameters: {len(init_flat_vars)}")

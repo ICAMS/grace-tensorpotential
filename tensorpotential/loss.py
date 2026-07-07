@@ -3,12 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import tensorflow as tf
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 from tensorpotential import constants
+from tensorpotential.metrics import ForceMetrics
 from tensorpotential.tpmodel import TPModel
-from tensorpotential.metrics import ForceMetrics, VirialMetrics
+
 
 
 def energy_offset_error(e_true, e_pred, e_weight=None):
@@ -65,6 +64,43 @@ def huber(error: tf.Tensor, delta=1.0):
         abs_error <= delta,
         half * tf.math.square(error),
         delta * abs_error - half * tf.math.square(delta),
+    )
+
+
+def piecewise_linear(
+    abs_x: tf.Tensor,
+    delta_1,
+    delta_2,
+    beta_1,
+    beta_2,
+    beta_3,
+):
+    """Three-region piecewise-linear loss with progressively damped slope.
+
+    L(x) = beta_1 * x                                 if x <= delta_1
+           c1 + beta_2 * (x - delta_1)                if delta_1 < x <= delta_2
+           c2 + beta_3 * (x - delta_2)                if x > delta_2
+    with c1 = beta_1 * delta_1, c2 = c1 + beta_2 * (delta_2 - delta_1)
+    so the loss is C0-continuous at the boundaries.
+
+    Argument abs_x must be non-negative (caller's responsibility).
+    """
+    dtype = abs_x.dtype
+    delta_1 = tf.convert_to_tensor(delta_1, dtype=dtype)
+    delta_2 = tf.convert_to_tensor(delta_2, dtype=dtype)
+    beta_1 = tf.convert_to_tensor(beta_1, dtype=dtype)
+    beta_2 = tf.convert_to_tensor(beta_2, dtype=dtype)
+    beta_3 = tf.convert_to_tensor(beta_3, dtype=dtype)
+    c1 = beta_1 * delta_1
+    c2 = c1 + beta_2 * (delta_2 - delta_1)
+    return tf.where(
+        abs_x <= delta_1,
+        beta_1 * abs_x,
+        tf.where(
+            abs_x <= delta_2,
+            c1 + beta_2 * (abs_x - delta_1),
+            c2 + beta_3 * (abs_x - delta_2),
+        ),
     )
 
 
@@ -190,7 +226,7 @@ class HuberLoss(LossComponent, ABC):
     def __repr__(self):
         try:
             val = self.delta.numpy()
-        except:
+        except (AttributeError, ValueError):
             val = self.delta
         return super().__repr__() + f"(delta={val})"
 
@@ -360,6 +396,73 @@ class WeightedMAEEPALoss(LossComponent):
 
         delta_epa = compute_energy_per_atom_error(input_data, predictions)
         loss_e = tf.reduce_sum(e_weight * tf.abs(delta_epa + self.epsilon))
+        if self.normalize_by_samples:
+            loss_e /= tf.reduce_sum(e_weight)
+        return loss_e
+
+
+class WeightedPiecewiseLinearEnergyPerAtomLoss(LossComponent):
+    """Three-region piecewise-linear loss on per-atom energy error.
+
+    Same shape as WeightedPiecewiseLinearForceLoss but applied to the scalar
+    per-structure quantity |E_pred/N − E_true/N|. No vector coupling needed
+    (target is already a scalar), so no use_l2_norm flag.
+
+    Defaults are scaled to typical per-atom energy errors (~meV/atom):
+        delta_1 = 1e-3 eV/atom (1 meV)
+        delta_2 = 5e-2 eV/atom (50 meV)
+    """
+
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_ENERGY_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.N_STRUCTURES_BATCH_TOTAL: {"shape": [], "dtype": "int"},
+        constants.ATOMS_TO_STRUCTURE_MAP: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        delta_1: float = 1e-3,
+        delta_2: float = 5e-2,
+        beta_1: float = 1.0,
+        beta_2: float = 0.1,
+        beta_3: float = 0.01,
+        name: str = "PiecewiseLinearEnergyPerAtomLoss",
+        normalize_by_samples: bool = True,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        assert 0 < delta_1 < delta_2, "require 0 < delta_1 < delta_2"
+        assert beta_1 >= beta_2 >= beta_3 > 0, (
+            "slopes must satisfy beta_1 >= beta_2 >= beta_3 > 0"
+        )
+        self.delta_1 = delta_1
+        self.delta_2 = delta_2
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.beta_3 = beta_3
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        e_weight = input_data[constants.DATA_ENERGY_WEIGHTS]
+        delta_epa = compute_energy_per_atom_error(input_data, predictions)
+        per_struct = piecewise_linear(
+            tf.abs(delta_epa),
+            self.delta_1,
+            self.delta_2,
+            self.beta_1,
+            self.beta_2,
+            self.beta_3,
+        )
+        loss_e = tf.reduce_sum(e_weight * per_struct)
         if self.normalize_by_samples:
             loss_e /= tf.reduce_sum(e_weight)
         return loss_e
@@ -622,6 +725,92 @@ class WeightedMAEStressLoss(LossComponent):
         return loss_v
 
 
+class WeightedPiecewiseLinearStressLoss(LossComponent):
+    """Three-region piecewise-linear loss on stress (virial / volume).
+
+    Mirrors the design of WeightedPiecewiseLinearForceLoss applied to the
+    Voigt 6-component stress tensor. Two kernel modes:
+
+        use_frobenius_norm=False (default): piecewise on each |Δσ_i| component.
+        use_frobenius_norm=True: piecewise on ||Δσ||_F per structure
+                                 (single rotation-invariant scalar).
+
+    Defaults are scaled to typical eV/Å^3 stress magnitudes:
+        delta_1 = 1e-3, delta_2 = 5e-2.
+    """
+
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_VIRIAL: {"shape": [None, 6], "dtype": "float"},
+        constants.DATA_VIRIAL_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+        constants.DATA_VOLUME: {"shape": [None, 1], "dtype": "float"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        delta_1: float = 1e-3,
+        delta_2: float = 5e-2,
+        beta_1: float = 1.0,
+        beta_2: float = 0.1,
+        beta_3: float = 0.01,
+        name: str = "PiecewiseLinearStressLoss",
+        normalize_by_samples: bool = True,
+        use_frobenius_norm: bool = False,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        assert 0 < delta_1 < delta_2, "require 0 < delta_1 < delta_2"
+        assert beta_1 >= beta_2 >= beta_3 > 0, (
+            "slopes must satisfy beta_1 >= beta_2 >= beta_3 > 0"
+        )
+        self.delta_1 = delta_1
+        self.delta_2 = delta_2
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.beta_3 = beta_3
+        self.use_frobenius_norm = use_frobenius_norm
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        volume = input_data[constants.DATA_VOLUME]
+        v_true = input_data[constants.DATA_REFERENCE_VIRIAL]
+        v_weight = input_data[constants.DATA_VIRIAL_WEIGHTS]
+        v_pred = predictions[constants.PREDICT_VIRIAL]
+
+        delta_stress = (v_pred - v_true) / volume               # [N_struct, 6]
+
+        if self.use_frobenius_norm:
+            abs_x = tf.sqrt(
+                tf.reduce_sum(delta_stress**2, axis=-1, keepdims=True) + self.epsilon
+            )                                                    # [N_struct, 1]
+        else:
+            abs_x = tf.abs(delta_stress)                         # [N_struct, 6]
+
+        per_elem = piecewise_linear(
+            abs_x,
+            self.delta_1,
+            self.delta_2,
+            self.beta_1,
+            self.beta_2,
+            self.beta_3,
+        )
+        loss_v = tf.reduce_sum(v_weight * per_elem)
+
+        if self.normalize_by_samples:
+            denom = tf.reduce_sum(v_weight)
+            if not self.use_frobenius_norm:
+                denom = denom * 6                                # 6 Voigt components
+            loss_v /= denom
+        return loss_v
+
+
 class WeightedHuberEnergyPerAtomLoss(HuberLoss):
     input_tensor_spec = {
         constants.DATA_REFERENCE_ENERGY: {"shape": [None, 1], "dtype": "float"},
@@ -688,6 +877,7 @@ class WeightedHuberForceLoss(HuberLoss):
         compute_norm: bool = False,
         scale_w_by_norm: bool = False,
         norm_threshold: float = 25.0,
+        use_l2_norm: bool = False,
     ):
         super().__init__(
             loss_component_weight=loss_component_weight,
@@ -698,6 +888,12 @@ class WeightedHuberForceLoss(HuberLoss):
         self.compute_norm = compute_norm
         self.scale_w_by_norm = scale_w_by_norm
         self.norm_threshold = norm_threshold
+        self.use_l2_norm = use_l2_norm
+        if self.use_l2_norm and self.compute_norm:
+            raise ValueError(
+                "use_l2_norm=True already couples force components; "
+                "compute_norm=True is incompatible. Pick one."
+            )
 
     def build(self, float_dtype):
         super().build(float_dtype)
@@ -728,6 +924,14 @@ class WeightedHuberForceLoss(HuberLoss):
             )
 
         error = tf.math.subtract(f_pred, f_true)
+
+        if self.use_l2_norm:
+            # Huber on the L2 norm of the per-atom residual vector — couples
+            # the three components into one rotation-invariant scalar per atom.
+            error = tf.sqrt(
+                tf.reduce_sum(error**2, axis=-1, keepdims=True) + self.epsilon
+            )
+
         h_loss = huber(error, delta=self.delta)
         loss_f = tf.reduce_sum(f_weight * h_loss)
 
@@ -744,7 +948,98 @@ class WeightedHuberForceLoss(HuberLoss):
             loss_f += tf.reduce_mean(3.0 * f_weight * v_h_loss)
 
         if self.normalize_by_samples:
-            loss_f /= tf.reduce_sum(f_weight) * 3  # divide by real number of atoms * 3
+            # componentwise: N atoms × 3 components; vector-Huber: N atoms
+            denom = tf.reduce_sum(f_weight)
+            if not self.use_l2_norm:
+                denom = denom * 3
+            loss_f /= denom
+        return loss_f
+
+
+class WeightedPiecewiseLinearForceLoss(LossComponent):
+    """Three-region piecewise-linear force loss with progressively damped slope.
+
+    Region 1 ("important", |x| <= delta_1): full slope beta_1.
+    Region 2 ("intermediate", delta_1 < |x| <= delta_2): slope beta_2.
+    Region 3 ("unimportant", |x| > delta_2): slope beta_3.
+
+    Slopes typically satisfy beta_1 >= beta_2 >= beta_3 > 0 — no region is
+    fully cut off, contributions are progressively damped. Loss values are
+    C0-continuous at boundaries; gradient is piecewise constant.
+
+    Two kernel modes via use_l2_norm:
+        False (default): piecewise applied to each |F_pred_i - F_true_i| component.
+        True:            piecewise applied to ||F_pred - F_true||_2 per atom
+                         (rotation-invariant; couples the three components).
+    """
+
+    input_tensor_spec = {
+        constants.DATA_REFERENCE_FORCES: {"shape": [None, 3], "dtype": "float"},
+        constants.DATA_FORCE_WEIGHTS: {"shape": [None, 1], "dtype": "float"},
+    }
+
+    def __init__(
+        self,
+        loss_component_weight,
+        delta_1: float = 0.1,
+        delta_2: float = 0.5,
+        beta_1: float = 1.0,
+        beta_2: float = 0.1,
+        beta_3: float = 0.01,
+        name: str = "PiecewiseLinearForceLoss",
+        normalize_by_samples: bool = True,
+        use_l2_norm: bool = False,
+    ):
+        super().__init__(
+            loss_component_weight=loss_component_weight,
+            name=name,
+            normalize_by_samples=normalize_by_samples,
+        )
+        assert 0 < delta_1 < delta_2, "require 0 < delta_1 < delta_2"
+        assert beta_1 >= beta_2 >= beta_3 > 0, (
+            "slopes must satisfy beta_1 >= beta_2 >= beta_3 > 0"
+        )
+        self.delta_1 = delta_1
+        self.delta_2 = delta_2
+        self.beta_1 = beta_1
+        self.beta_2 = beta_2
+        self.beta_3 = beta_3
+        self.use_l2_norm = use_l2_norm
+
+    def compute_loss_component(
+        self,
+        input_data: dict[str, tf.Tensor],
+        predictions: dict[str, tf.Tensor],
+        **kwargs,
+    ) -> tf.Tensor:
+        f_true = input_data[constants.DATA_REFERENCE_FORCES]
+        f_pred = predictions[constants.PREDICT_FORCES]
+        f_weight = input_data[constants.DATA_FORCE_WEIGHTS]
+
+        error = tf.math.subtract(f_pred, f_true)
+
+        if self.use_l2_norm:
+            abs_x = tf.sqrt(
+                tf.reduce_sum(error**2, axis=-1, keepdims=True) + self.epsilon
+            )
+        else:
+            abs_x = tf.abs(error)
+
+        per_elem = piecewise_linear(
+            abs_x,
+            self.delta_1,
+            self.delta_2,
+            self.beta_1,
+            self.beta_2,
+            self.beta_3,
+        )
+        loss_f = tf.reduce_sum(f_weight * per_elem)
+
+        if self.normalize_by_samples:
+            denom = tf.reduce_sum(f_weight)
+            if not self.use_l2_norm:
+                denom = denom * 3
+            loss_f /= denom
         return loss_f
 
 

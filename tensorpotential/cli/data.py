@@ -14,6 +14,9 @@ from ase.calculators.calculator import PropertyNotImplementedError
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from tensorpotential.utils import get_dtype_by_name
+from tqdm import tqdm
+
 
 from tensorpotential import constants as tc
 from tensorpotential.data.databuilder import (
@@ -34,11 +37,34 @@ from tensorpotential.data.process_df import (
     E_CHULL_DIST_PER_ATOM,
 )
 from tensorpotential.data.weighting import EnergyBasedWeightingPolicy
-from tensorpotential.tensorpot import get_output_dir
+from tensorpotential.tensorpot import TensorPotential, get_output_dir
+from tensorpotential.calculator.asecalculator import TPCalculator
+from tensorpotential.instructions.base import load_instructions
+from tensorpotential.metadata_utils import read_model_metadata
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
+
+
+def _log_dense_padding_report(padding_stats, tag):
+    """Log dense (reshape) batching efficiency: % padded neighbors/atoms/structures of the
+    complete dataset, warning when neighbor padding exceeds the 15% target."""
+    from tensorpotential.data.dense_nbr import dense_padding_fractions
+
+    f = dense_padding_fractions(padding_stats)
+    log.info(
+        f"[{tag}] dense padding (of total): "
+        f"neighbors {f['neigh'] * 1e2:.1f}% | atoms {f['atoms'] * 1e2:.1f}% | "
+        f"structures {f['struct'] * 1e2:.1f}%"
+    )
+    if f["neigh"] > 0.15:
+        log.warning(
+            f"[{tag}] dense neighbor padding {f['neigh'] * 1e2:.1f}% exceeds the 15% target. "
+            f"Lower fit::auto_bucket_max_padding (the unified dense net-padding target), raise "
+            f"fit::dense_max_shapes (more XLA recompiles), or use a larger batch_size; "
+            f"intra-structure spread is the irreducible floor."
+        )
 
 
 TRAINING_SET_FNAME = "training_set.pkl.gz"
@@ -179,7 +205,7 @@ def apply_weighting(fit_config, train_df, test_df):
     weighting_kwargs = fit_config["weighting"].copy()
     weighting_type = weighting_kwargs["type"]
     if weighting_type == "energy_based":
-        log.info(f"Applying energy based weighting")
+        log.info("Applying energy based weighting")
         weighting_kwargs.pop("type")
         weighting = EnergyBasedWeightingPolicy(**weighting_kwargs)
         train_df = weighting.generate_weights(train_df)
@@ -267,6 +293,11 @@ class FutureDistributedDataset:
         # option to have single-stream dataset
         self.distribute_values = self.data_config.get("distribute_values", False)
 
+        # When True, hand tf.data.AUTOTUNE to dataset.prefetch() so the runtime
+        # picks the buffer size based on observed throughput. Default False
+        # preserves the legacy fixed buffer of 16.
+        self.prefetch_autotune = self.data_config.get("prefetch_autotune", False)
+
     def __len__(self):
         if self.stats is not None:
             return self.stats.get("total_num_of_batches", 0)
@@ -278,6 +309,10 @@ class FutureDistributedDataset:
 
         # imitation of single-GPU context for distribute-values fit
         single_context = MyInputContext(input_pipeline_id=0, num_input_pipelines=1)
+
+        prefetch_buffer = tf.data.AUTOTUNE if self.prefetch_autotune else 16
+        if self.prefetch_autotune:
+            log.info("Data prefetch buffer: tf.data.AUTOTUNE")
 
         def dataset_fn(
             context, shard_filenames, n_take=None, n_skip=None, n_take2=None
@@ -305,7 +340,7 @@ class FutureDistributedDataset:
             # Add repeat BEFORE prefetch for training datasets
             # For training, you almost always want to repeat indefinitely, then limit with steps_per_epoch
             dataset = dataset.repeat()  # Repeat indefinitely for training
-            dataset = dataset.prefetch(16)
+            dataset = dataset.prefetch(prefetch_buffer)
             return dataset
 
         test_ds = None
@@ -610,26 +645,42 @@ def compute_fm_energy_shift_auto(
     Solves: A @ x = (E_DFT - E_FM), where A is composition matrix.
     Returns {element_symbol: shift_eV}.
     """
-    from tensorpotential.calculator.asecalculator import TPCalculator
-    from tensorpotential.tensorpot import TensorPotential
-    from tensorpotential.instructions.base import load_instructions
 
-    log.info(f"FM shift auto: selecting up to {max_structures} representative structures")
+    log.info(
+        f"Foundation model energy alignment: selecting up to {max_structures} representative structures"
+    )
     selected_atoms, selected_idx = select_representative_structures(
         train_df, max_structures=max_structures, seed=seed
     )
-    log.info(f"FM shift auto: selected {len(selected_atoms)} structures")
+    log.info(
+        f"Foundation model energy alignment: selected {len(selected_atoms)} structures"
+    )
 
     model_path = os.path.join(checkpoint_folder, "model.yaml")
     ckpt_prefix = os.path.join(checkpoint_folder, "checkpoint")
-    log.info(f"FM shift auto: loading FM from {model_path}")
+    log.info(
+        f"Foundation model energy alignment: loading foundation model from {model_path}"
+    )
 
-    with tf.device("/cpu:0"):
-        instructions = load_instructions(model_path)
-        tp = TensorPotential(potential=instructions)
-        tp.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
-        calc = TPCalculator(tp.model)
-        e_fm = np.array([calc.get_potential_energy(at.copy()) for at in selected_atoms])
+    instructions = load_instructions(model_path)
+    _meta = read_model_metadata(model_path)
+    _param_dtype = (
+        get_dtype_by_name(_meta["param_dtype"])
+        if "param_dtype" in _meta
+        else tf.float64
+    )
+    tp = TensorPotential(potential=instructions, param_dtype=_param_dtype)
+    tp.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
+    tp.model.decorate_compute_function()
+    calc = TPCalculator(tp.model)
+    e_fm_list = []
+    pbar = tqdm(selected_atoms, desc="Computing FM energies")
+    for at in pbar:
+        pbar.set_description(
+            f"Computing FM energies (N_atoms={len(at)}, comp={at.get_chemical_formula()})"
+        )
+        e_fm_list.append(calc.get_potential_energy(at.copy()))
+    e_fm = np.array(e_fm_list)
 
     e_dft = train_df.loc[selected_idx, "energy_corrected"].values
 
@@ -642,13 +693,21 @@ def compute_fm_energy_shift_auto(
     composition_matrix = build_composition_matrix(selected_atoms, elements)
     energy_diff = e_dft - e_fm
 
-    log.info(f"FM shift auto: solving least-squares for {len(elements)} elements")
-    shifts, residuals, rank, _ = np.linalg.lstsq(composition_matrix, energy_diff, rcond=None)
+    log.info(
+        f"Foundation model energy alignment: solving least-squares for {len(elements)} elements"
+    )
+    shifts, residuals, rank, _ = np.linalg.lstsq(
+        composition_matrix, energy_diff, rcond=None
+    )
 
     shift_dict = {el: float(shifts[i]) for i, el in enumerate(elements)}
-    log.info(f"FM shift auto: per-element shifts (eV): {shift_dict}")
+    log.info(
+        f"Foundation model energy alignment: per-element shifts (eV): {shift_dict}"
+    )
     if len(residuals) > 0:
-        log.info(f"FM shift auto: residual norm = {np.sqrt(residuals[0]):.3e} eV")
+        log.info(
+            f"Foundation model energy alignment: residual norm = {np.sqrt(residuals[0]):.3e} eV"
+        )
 
     return shift_dict
 
@@ -664,19 +723,30 @@ def inject_or_update_atomic_shift_in_model(
     existing atomic_shift_map. Creates a new instruction if none exists.
     Modifies instructions_dict in-place.
     """
-    from tensorpotential.instructions.output import ConstantScaleShiftTarget, CreateOutputTarget
+    from tensorpotential.instructions.output import (
+        ConstantScaleShiftTarget,
+        CreateOutputTarget,
+    )
     import tensorpotential.constants as _tc
 
     # {element: shift} -> {mu_index: shift}
-    mu_shift_map = {element_map[el]: shift for el, shift in fm_shift_dict.items() if el in element_map}
-    log.info(f"FM model surgery: mu_index shift map = {mu_shift_map}")
+    mu_shift_map = {
+        element_map[el]: shift
+        for el, shift in fm_shift_dict.items()
+        if el in element_map
+    }
+    log.info(
+        f"Injecting foundation model energy shifts: per-element (mu-index) map = {mu_shift_map}"
+    )
 
     # Find existing ConstantScaleShiftTarget
     const_shift_inst = None
     for name, ins in instructions_dict.items():
         if isinstance(ins, ConstantScaleShiftTarget):
             const_shift_inst = ins
-            log.info(f"FM model surgery: found existing ConstantScaleShiftTarget '{name}'")
+            log.info(
+                f"Injecting foundation model energy shifts: found existing ConstantScaleShiftTarget '{name}'"
+            )
             break
 
     if const_shift_inst is not None:
@@ -697,21 +767,30 @@ def inject_or_update_atomic_shift_in_model(
             new_array[mu] = val
         const_shift_inst.atomic_shift_map = new_array
         const_shift_inst.apply_shift = True
-        log.info("FM model surgery: updated existing ConstantScaleShiftTarget")
+        log.info(
+            "Injecting foundation model energy shifts: updated existing ConstantScaleShiftTarget"
+        )
 
     else:
         # Create new ConstantScaleShiftTarget wrapping CreateOutputTarget for atomic energy
-        log.info("FM model surgery: no existing ConstantScaleShiftTarget, creating new one")
+        log.info(
+            "Injecting foundation model energy shifts: no existing ConstantScaleShiftTarget, creating new one"
+        )
         output_target = None
         for name, ins in instructions_dict.items():
-            if isinstance(ins, CreateOutputTarget) and ins.name == _tc.PREDICT_ATOMIC_ENERGY:
+            if (
+                isinstance(ins, CreateOutputTarget)
+                and ins.name == _tc.PREDICT_ATOMIC_ENERGY
+            ):
                 output_target = ins
-                log.info(f"FM model surgery: wrapping CreateOutputTarget '{name}'")
+                log.info(
+                    f"Injecting foundation model energy shifts: wrapping CreateOutputTarget '{name}'"
+                )
                 break
 
         if output_target is None:
             raise ValueError(
-                f"FM model surgery: could not find CreateOutputTarget for '{_tc.PREDICT_ATOMIC_ENERGY}'"
+                f"Injecting foundation model energy shifts: could not find CreateOutputTarget for '{_tc.PREDICT_ATOMIC_ENERGY}'"
             )
 
         new_inst = ConstantScaleShiftTarget(
@@ -722,7 +801,9 @@ def inject_or_update_atomic_shift_in_model(
             name="ConstantScaleShiftTarget_FM_auto",
         )
         instructions_dict[new_inst.name] = new_inst
-        log.info(f"FM model surgery: created new ConstantScaleShiftTarget '{new_inst.name}'")
+        log.info(
+            f"Injecting foundation model energy shifts: created new ConstantScaleShiftTarget '{new_inst.name}'"
+        )
 
 
 def load_and_prepare_datasets(
@@ -731,7 +812,7 @@ def load_and_prepare_datasets(
     test_batch_size=None,
     seed=1234,
     strategy=None,
-    float_dtype: str = "float64",
+    data_float_dtype: str = "float64",
 ):
     # TODO: Need to use constants module.
     #  Too many strings are in here....
@@ -839,7 +920,9 @@ def load_and_prepare_datasets(
     esa_dict = None
     shift_option = potential_config.get("shift", False)
     if shift_option:
-        is_finetuning = potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+        is_finetuning = potential_config.get(
+            tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL
+        )
         if shift_option == "auto" and is_finetuning:
             # FM-based shift: computed after element_map is available (deferred below)
             pass
@@ -930,7 +1013,9 @@ def load_and_prepare_datasets(
     log.info(f"Elements mapping: {element_map}")
 
     # Deferred FM-based shift computation (needs element_map)
-    if shift_option == "auto" and potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL):
+    if shift_option == "auto" and potential_config.get(
+        tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL
+    ):
         checkpoint_name = potential_config.get(tc.INPUT_POTENTIAL_CHECKPOINT_NAME, "")
         checkpoint_folder = os.path.dirname(checkpoint_name) if checkpoint_name else ""
         if not checkpoint_folder:
@@ -943,7 +1028,9 @@ def load_and_prepare_datasets(
             checkpoint_folder=checkpoint_folder,
             seed=seed,
         )
-        log.info(f"FM-based per-element shifts (will be applied via model surgery): {esa_dict}")
+        log.info(
+            f"Foundation model energy alignment: per-element shifts to inject = {esa_dict}"
+        )
 
     # apply E,F weights (i.e. energy-based weights)
     if fit_config.get("weighting") is not None:
@@ -966,13 +1053,30 @@ def load_and_prepare_datasets(
     user_cutoff_dict = args_yaml.get(tc.INPUT_CUTOFF_DICT)
 
     # instantiate DataBuilders class (with optional parameters); HARDCODED, but rarely changes
-    data_builders = [
+    # dense_nbr mirrors the model knob (input.yaml::potential::dense_nbr): when set,
+    # emit the padded neighbor->bond index the dense-aggregation SPBF consumes. Must
+    # match the model — sourced from the same potential_config key.
+    dense_nbr = potential_config.get(tc.INPUT_POTENTIAL_DENSE_NBR, False)
+    dense_slot_budget = fit_config.get("dense_slot_budget", "auto")
+    dense_n_neigh_buckets = fit_config.get("dense_n_neigh_buckets", "auto")
+    # In dense mode auto_bucket_max_padding is the UNIFIED net neighbor-padding target (atom and
+    # neighbor axes are bound), defaulting to 0.15; the seg path keeps its own 0.3 default above.
+    dense_net_padding = fit_config.get("auto_bucket_max_padding", 0.15)
+    dense_max_shapes = fit_config.get("dense_max_shapes", 64)
+    dense_max_neigh_cap = fit_config.get("dense_max_neigh_cap", None)
+    data_builders: list = [
         GeometricalDataBuilder(
             element_map,
             cutoff=rcut,
             cutoff_dict=user_cutoff_dict,
             is_fit_stress=is_fit_stress,
-            float_dtype=float_dtype,
+            float_dtype=data_float_dtype,
+            dense_nbr=dense_nbr,
+            dense_slot_budget=dense_slot_budget,
+            dense_n_neigh_buckets=dense_n_neigh_buckets,
+            dense_net_padding=dense_net_padding,
+            dense_max_shapes=dense_max_shapes,
+            dense_max_neigh_cap=dense_max_neigh_cap,
         ),
     ]
     if (
@@ -987,7 +1091,7 @@ def load_and_prepare_datasets(
                 ),
                 is_fit_stress=is_fit_stress,
                 stress_units=stress_units,
-                float_dtype=float_dtype,
+                float_dtype=data_float_dtype,
             ),
         )
     extras = data_config.get("extra_components", None)
@@ -1002,7 +1106,9 @@ def load_and_prepare_datasets(
             mod_exp = None
 
         try:
-            mod_extra = importlib.import_module("tensorpotential.extra.extra_data_builders")
+            mod_extra = importlib.import_module(
+                "tensorpotential.extra.extra_data_builders"
+            )
         except ImportError:
             mod_extra = None
 
@@ -1010,8 +1116,111 @@ def load_and_prepare_datasets(
             db = getattr(mod_exp, db_name, None) or getattr(mod_extra, db_name, None)
             if db is None:
                 raise NameError(f"Could not find data builder {db_name}")
-            data_builders.append(db(**db_config, float_dtype=float_dtype))
+            data_builders.append(db(**db_config, float_dtype=data_float_dtype))
 
+    # ---- streaming pipeline branch ----
+    pipeline_mode = data_config.get("pipeline", "in_memory")
+    if pipeline_mode == "streaming":
+        from tensorpotential.data.streaming import (
+            StreamingConfig,
+            StreamingDatasetWrapper,
+        )
+
+        streaming_params = data_config.get("streaming", {})
+        streaming_config = StreamingConfig(**streaming_params)
+
+        log.info(
+            f"Streaming pipeline: target_metric={streaming_config.target_metric}, "
+            f"metric_strategy={streaming_config.metric_strategy}, "
+            f"num_bins={streaming_config.num_bins}"
+        )
+
+        train_shuffle = fit_config.get("train_shuffle", True)
+        train_batches = StreamingDatasetWrapper(
+            train_df,
+            data_builders,
+            streaming_config,
+            shuffle=train_shuffle,
+            name="train",
+            seed=seed,
+        )
+
+        # avg_n_neigh: use provided value or estimate from density
+        avg_n_neigh = potential_config.get("avg_n_neigh")
+        if avg_n_neigh is None:
+            log.info("Streaming mode: estimating avg_n_neigh from density...")
+            total_neigh, total_atoms = 0, 0
+            for row_idx in range(len(train_df)):
+                atoms = train_df.iloc[row_idx][tc.COLUMN_ASE_ATOMS]
+                n_at = len(atoms)
+                total_atoms += n_at
+                if atoms.pbc.any() and atoms.get_volume() > 0:
+                    vol = atoms.get_volume()
+                    density = n_at / vol
+                else:
+                    density = 1.0  # fallback for non-periodic
+                sphere_vol = 4.0 / 3.0 * np.pi * rcut**3
+                total_neigh += int(n_at * density * sphere_vol)
+            avg_n_neigh = total_neigh / total_atoms if total_atoms > 0 else 40
+            log.info(f"Estimated avg_n_neigh: {avg_n_neigh:.1f}")
+        else:
+            log.info(f"Average number of neighbors (provided): {avg_n_neigh}")
+
+        if has_test_set:
+            test_shuffle = fit_config.get("test_shuffle", False)
+            test_batches = StreamingDatasetWrapper(
+                test_df,
+                data_builders,
+                streaming_config,
+                shuffle=test_shuffle,
+                name="test",
+                seed=seed,
+            )
+        else:
+            test_batches = None
+
+        # Build data_stats and grouping info, then return early
+        _is_fm_auto_shift = (
+            shift_option == "auto"
+            and potential_config.get(tc.INPUT_POTENTIAL_FINETUNE_FOUNDATION_MODEL)
+            and esa_dict is not None
+        )
+        if _is_fm_auto_shift:
+            fm_shift_dict = esa_dict
+            atomic_shift_map = None
+        else:
+            fm_shift_dict = None
+            atomic_shift_map = (
+                {element_map[el]: e0 for el, e0 in esa_dict.items()}
+                if esa_dict is not None
+                else None
+            )
+        data_stats = {
+            "avg_n_neigh": avg_n_neigh,
+            "constant_out_shift": shift,
+            "constant_out_scale": scale,
+            "atomic_shift_map": atomic_shift_map,
+            "fm_shift_dict": fm_shift_dict,
+        }
+        test_grouping_df = None
+        train_grouping_df = None
+        if E_CHULL_DIST_PER_ATOM in train_df.columns:
+            train_df["group__low"] = train_df[E_CHULL_DIST_PER_ATOM] <= 1.0
+            train_grouping_df = get_group_mapping_df(train_df)
+            if test_df is not None:
+                test_df["group__low"] = test_df[E_CHULL_DIST_PER_ATOM] <= 1.0
+                test_grouping_df = get_group_mapping_df(test_df)
+
+        return (
+            train_batches,
+            test_batches,
+            element_map,
+            data_stats,
+            train_grouping_df,
+            test_grouping_df,
+        )
+
+    # ---- in-memory pipeline (default) ----
     # preprocess data
     log.info("Train set processing")
     max_padding_fraction = fit_config.get("auto_bucket_max_padding", 0.3)
@@ -1038,11 +1247,13 @@ def load_and_prepare_datasets(
         )
     else:
         logging.info(f"[TRAIN] dataset stats:  num. batches: {len(train_batches)}")
+    if dense_nbr and padding_stats:
+        _log_dense_padding_report(padding_stats, "TRAIN")
     # compute average number of neighbours over TRAIN set
     avg_n_neigh = potential_config.get("avg_n_neigh")
     if avg_n_neigh is None:
-        total_number_neigh = sum(b[tc.N_NEIGHBORS_REAL] for b in train_batches)
-        total_number_atoms = sum(b[tc.N_ATOMS_BATCH_REAL] for b in train_batches)
+        total_number_neigh = sum((int(b[tc.N_NEIGHBORS_REAL]) for b in train_batches))
+        total_number_atoms = sum((int(b[tc.N_ATOMS_BATCH_REAL]) for b in train_batches))
         avg_n_neigh = total_number_neigh / total_number_atoms
         logging.info(f"Average number of neighbors (computed): {avg_n_neigh}")
     else:
@@ -1072,6 +1283,8 @@ def load_and_prepare_datasets(
             )
         else:
             logging.info(f"[TEST] dataset stats:  num. batches: {len(test_batches)}")
+        if dense_nbr and test_padding_stats:
+            _log_dense_padding_report(test_padding_stats, "TEST")
 
     else:
         # tuple_of_test_datasets = None

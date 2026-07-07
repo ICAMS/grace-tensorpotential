@@ -9,6 +9,7 @@ potential:
   #  elements: ["C", "H", "O"]
   preset: "LINEAR"
 #  scale: False
+  param_dtype: float64
 
 fit:
   #  strategy: mirrored

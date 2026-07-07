@@ -9,6 +9,7 @@ Covers:
 - compute_fm_energy_shift_auto (parametrized over 1L / 2L)
 - inject_or_update_atomic_shift_in_model (parametrized over 1L / 2L)
 """
+
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -22,7 +23,9 @@ import tensorflow as tf
 from ase import Atoms
 from ase.build import bulk
 from ase.calculators.emt import EMT
-
+from tensorpotential.calculator.asecalculator import TPCalculator
+from tensorpotential.tensorpot import TensorPotential
+from tensorpotential.instructions.base import load_instructions
 from tensorpotential.cli.data import (
     build_composition_matrix,
     compute_fm_energy_shift_auto,
@@ -121,9 +124,9 @@ def _build_checkpoint(preset_name, folder):
     ckpt_prefix = str(folder / "checkpoint")
 
     instructions = _build_preset(preset_name)
-    save_instructions_dict(model_yaml, instructions)
+    save_instructions_dict(model_yaml, instructions, param_dtype=tf.float32)
 
-    tp = TensorPotential(potential=instructions)
+    tp = TensorPotential(potential=instructions, param_dtype=tf.float32)
     calc = TPCalculator(tp.model)
     # trigger variable initialization via a forward pass
     calc.get_potential_energy(bulk("Cu", cubic=True).copy())
@@ -160,7 +163,9 @@ def preset_name(request):
 
 
 def test_select_structures_covers_all_elements(train_df):
-    selected_atoms, selected_idx = select_representative_structures(train_df, max_structures=50)
+    selected_atoms, selected_idx = select_representative_structures(
+        train_df, max_structures=50
+    )
 
     selected_elements = set()
     for at in selected_atoms:
@@ -198,7 +203,7 @@ def test_select_structures_reproducible(train_df):
 def test_build_composition_matrix_shape():
     atoms_list = [
         Atoms("Cu2Al", positions=np.random.rand(3, 3) * 3, pbc=False),
-        Atoms("Al3",   positions=np.random.rand(3, 3) * 3, pbc=False),
+        Atoms("Al3", positions=np.random.rand(3, 3) * 3, pbc=False),
     ]
     mat = build_composition_matrix(atoms_list, ["Al", "Cu"])
     assert mat.shape == (2, 2)
@@ -207,7 +212,7 @@ def test_build_composition_matrix_shape():
 def test_build_composition_matrix_values():
     atoms_list = [
         Atoms("Cu2Al", positions=np.random.rand(3, 3) * 3, pbc=False),
-        Atoms("Al3",   positions=np.random.rand(3, 3) * 3, pbc=False),
+        Atoms("Al3", positions=np.random.rand(3, 3) * 3, pbc=False),
     ]
     mat = build_composition_matrix(atoms_list, ["Al", "Cu"])
     np.testing.assert_array_equal(mat[0], [1, 2])
@@ -250,9 +255,6 @@ def test_compute_fm_energy_shift_values_are_finite(fm_checkpoint_folder, train_d
 
 def test_compute_fm_energy_shift_reduces_residual(fm_checkpoint_folder, train_df):
     """After applying computed shifts, per-structure energy residual should decrease."""
-    from tensorpotential.calculator.asecalculator import TPCalculator
-    from tensorpotential.tensorpot import TensorPotential
-    from tensorpotential.instructions.base import load_instructions
 
     shift_dict = compute_fm_energy_shift_auto(
         train_df=train_df,
@@ -263,7 +265,7 @@ def test_compute_fm_energy_shift_reduces_residual(fm_checkpoint_folder, train_df
     model_yaml = os.path.join(fm_checkpoint_folder, "model.yaml")
     ckpt_prefix = os.path.join(fm_checkpoint_folder, "checkpoint")
     instructions = load_instructions(model_yaml)
-    tp = TensorPotential(potential=instructions)
+    tp = TensorPotential(potential=instructions, param_dtype=tf.float32)
     tp.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
     calc = TPCalculator(tp.model)
 
@@ -280,9 +282,9 @@ def test_compute_fm_energy_shift_reduces_residual(fm_checkpoint_folder, train_df
         e_fm_corrected[i] += correction
 
     residual_after = np.mean((e_dft - e_fm_corrected) ** 2)
-    assert residual_after < residual_before, (
-        f"Shift correction did not reduce residual: before={residual_before:.4f}, after={residual_after:.4f}"
-    )
+    assert (
+        residual_after < residual_before
+    ), f"Shift correction did not reduce residual: before={residual_before:.4f}, after={residual_after:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +300,9 @@ def test_inject_adds_shifts_when_none_exist(preset_name):
 
     inject_or_update_atomic_shift_in_model(instructions, fm_shift_dict, ELEMENT_MAP)
 
-    inst = next(v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget))
+    inst = next(
+        v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget)
+    )
     saved = inst._init_args["atomic_shift_map"]
     assert saved[ELEMENT_MAP["Al"]] == pytest.approx(-1.0)
     assert saved[ELEMENT_MAP["Cu"]] == pytest.approx(-0.5)
@@ -317,7 +321,9 @@ def test_inject_accumulates_with_existing_shifts(preset_name):
         instructions, {"Al": -0.7, "Cu": -0.3}, ELEMENT_MAP
     )
 
-    inst = next(v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget))
+    inst = next(
+        v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget)
+    )
     saved = inst._init_args["atomic_shift_map"]
     assert saved[ELEMENT_MAP["Al"]] == pytest.approx(-1.0)
     assert saved[ELEMENT_MAP["Cu"]] == pytest.approx(-0.5)
@@ -327,9 +333,13 @@ def test_inject_numpy_array_consistent_with_init_args(preset_name):
     from tensorpotential.instructions.output import ConstantScaleShiftTarget
 
     instructions = _build_preset(preset_name)
-    inject_or_update_atomic_shift_in_model(instructions, {"Al": -1.0, "Cu": -0.5}, ELEMENT_MAP)
+    inject_or_update_atomic_shift_in_model(
+        instructions, {"Al": -1.0, "Cu": -0.5}, ELEMENT_MAP
+    )
 
-    inst = next(v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget))
+    inst = next(
+        v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget)
+    )
     saved = inst._init_args["atomic_shift_map"]
     arr = inst.atomic_shift_map
 
@@ -351,8 +361,10 @@ def test_inject_model_predictions_change_after_surgery(fm_checkpoint_folder):
 
     # Energy before surgery
     instructions_before = load_instructions(model_yaml)
-    tp_before = TensorPotential(potential=instructions_before)
-    tp_before.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
+    tp_before = TensorPotential(potential=instructions_before, param_dtype=tf.float32)
+    tp_before.load_checkpoint(
+        checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False
+    )
     calc_before = TPCalculator(tp_before.model)
     e_before = calc_before.get_potential_energy(at.copy())
 
@@ -361,8 +373,10 @@ def test_inject_model_predictions_change_after_surgery(fm_checkpoint_folder):
     inject_or_update_atomic_shift_in_model(
         instructions_before, {"Cu": cu_shift, "Al": -1.0}, ELEMENT_MAP
     )
-    tp_after = TensorPotential(potential=instructions_before)
-    tp_after.load_checkpoint(checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False)
+    tp_after = TensorPotential(potential=instructions_before, param_dtype=tf.float32)
+    tp_after.load_checkpoint(
+        checkpoint_name=ckpt_prefix, expect_partial=True, verbose=False
+    )
     calc_after = TPCalculator(tp_after.model)
     e_after = calc_after.get_potential_energy(at.copy())
 
@@ -375,9 +389,13 @@ def test_inject_skips_unknown_elements(preset_name):
     from tensorpotential.instructions.output import ConstantScaleShiftTarget
 
     instructions = _build_preset(preset_name)
-    inject_or_update_atomic_shift_in_model(instructions, {"Al": -1.0, "Zr": -99.0}, ELEMENT_MAP)
+    inject_or_update_atomic_shift_in_model(
+        instructions, {"Al": -1.0, "Zr": -99.0}, ELEMENT_MAP
+    )
 
-    inst = next(v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget))
+    inst = next(
+        v for v in instructions.values() if isinstance(v, ConstantScaleShiftTarget)
+    )
     saved = inst._init_args["atomic_shift_map"]
     assert ELEMENT_MAP["Al"] in saved
     assert -99.0 not in saved.values()

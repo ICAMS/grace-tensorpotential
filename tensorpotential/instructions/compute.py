@@ -7,9 +7,6 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
-
 
 from ase.data import atomic_numbers
 from ase.units import _eps0, _e
@@ -37,6 +34,7 @@ from tensorpotential.functions.radial import (
     compute_cheb_radial_basis,
     compute_sin_bessel_radial_basis,
     cutoff_func_p_order_poly,
+    chebvander,
 )
 from tensorpotential.functions.spherical_harmonics import SphericalHarmonics
 from tensorpotential.instructions.base import (
@@ -45,6 +43,7 @@ from tensorpotential.instructions.base import (
     capture_init_args,
     ElementsReduceInstructionMixin,
     LORAInstructionMixin,
+    active_dense_nbr,
 )
 from tensorpotential.poly import (
     Monomial,
@@ -54,6 +53,79 @@ from tensorpotential.poly import (
     normalize_poly,
 )
 from tensorpotential.utils import process_cutoff_dict
+
+# Compute equivariant SPBF CG couple as dense matmul instead of sparce elemwise.
+# Wastes FLOPS, but forces XLA to a better layout of the backward pass.
+# The larger the model, the better the trade off
+_USE_GEMM_COUPLE = True
+
+
+def _dense_reshape_einsum(a_nl, bond_I, n_atoms):
+    """Dense neighbor aggregation with NO in-graph gather: ``a_nl``/``bond_I`` are
+    already in per-atom-uniform ``[n_atoms*max_neigh, n_rad, lm]`` order (data prep
+    pre-pads each atom's bonds to ``max_neigh``; padded slots zeroed by the cutoff
+    envelope). The dense layout is a ``reshape``, the sum a batched matmul over the
+    neighbor axis. Requires ``n_bonds == n_atoms * max_neigh``.
+    """
+    nb = tf.shape(a_nl)[0]
+    mn = nb // n_atoms
+    n_rad = tf.shape(a_nl)[1]
+    a_d = tf.reshape(a_nl, [n_atoms, mn, n_rad, tf.shape(a_nl)[2]])
+    b_d = tf.reshape(bond_I, [n_atoms, mn, n_rad, tf.shape(bond_I)[2]])
+    return tf.einsum("amnl,amnr->anlr", a_d, b_d)  # [atoms, n_rad, lm_y, lm_ind]
+
+
+def _resolve_dense_nbr(dense_nbr):
+    """Resolve the `dense_nbr` bool (None -> the active InstructionManager default)."""
+    raw = active_dense_nbr() if dense_nbr is None else dense_nbr
+    return bool(raw)
+
+
+def _equiv_cg_couple(prod, lr_inds, cg, m_sum_ind, nfunc, lm_first, name):
+    """Clebsch-Gordan couple the spherical-harmonic ⊗ indicator product.
+
+    ``prod`` is ``[atoms, n, lm_y, lm_ind]``. The coupling combines ``n_cg``
+    ``(lm_y, lm_ind)`` pairs weighted by ``cg``, summed into ``nfunc`` output
+    channels (``m_sum_ind`` maps each pair to its channel). Returns
+    ``[atoms, n, nfunc]`` (or ``[nfunc, atoms, n]`` if ``lm_first``).
+
+    Default (``_USE_GEMM_COUPLE``): a dense GEMM ``prod_flat @ W`` where
+    ``W[lm_y*lm_ind, nfunc]`` is the (constant, XLA-folded) CG matrix. No gather
+    indexes the angular axes, so XLA keeps ``prod`` atom/bond-major instead of
+    forcing the lm-major layout that otherwise propagates into the upstream
+    einsum backward. Fallback: the original ``transpose([2,3,0,1]) + gather_nd +
+    segment_sum`` lm-major couple (bit-identical math).
+    """
+    if _USE_GEMM_COUPLE:
+        lm_y = int(prod.shape[2])
+        lm_ind = int(prod.shape[3])
+        P = lm_y * lm_ind
+        nf = int(nfunc) if not tf.is_tensor(nfunc) else nfunc
+        # row-major flat index into (lm_y, lm_ind): left * lm_ind + right
+        lr_flat = lr_inds[:, 0] * lm_ind + lr_inds[:, 1]  # [n_cg]
+        # Dense CG matrix W[lm_y*lm_ind, nfunc]; constant -> XLA folds it.
+        W = tf.scatter_nd(
+            tf.stack([lr_flat, m_sum_ind], axis=1),
+            tf.reshape(tf.cast(cg, prod.dtype), [-1]),
+            tf.stack([P, tf.cast(nf, tf.int32)]),
+        )
+        batch = tf.shape(prod)[:2]
+        prod_flat = tf.reshape(prod, tf.concat([batch, [P]], axis=0))
+        out = tf.einsum("anp,pf->anf", prod_flat, W)  # [atoms, n, nfunc]
+        if lm_first:
+            return tf.transpose(out, [2, 0, 1], name=f"trans_201{name}")
+        return out
+
+    # Fallback: original lm-major gather couple.
+    tnsr = tf.transpose(prod, [2, 3, 0, 1])  # [lm_y, lm_ind, atoms, n]
+    prod_g = tf.gather_nd(params=tnsr, indices=lr_inds)  # [n_cg, atoms, n]
+    prod_g = prod_g * tf.cast(cg, prod_g.dtype)
+    prod_g = tf.math.unsorted_segment_sum(
+        prod_g, m_sum_ind, num_segments=nfunc, name=f"sum_cg_{name}"
+    )
+    if lm_first:
+        return prod_g  # already [lm, atoms, n]
+    return tf.transpose(prod_g, [1, 2, 0], name=f"trans_120{name}")
 
 
 @capture_init_args
@@ -134,18 +206,19 @@ class ScaledBondVector(TPInstruction):
                 self.bonds = bonds
         else:
             self.bonds = constants.BOND_VECTOR
-        self.epsilon = None
+        # self.epsilon = None
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
-            self.epsilon = tf.constant(1e-10, dtype=float_dtype)
+            # self.epsilon = tf.constant(1e-10, dtype=tf.float32)
             self.is_built = True
 
     def frwrd(self, input_data: dict, training=False, local=False):
         r_ij = input_data[self.bonds]
         d_ij = input_data[self.bond_length]
-        return r_ij / (d_ij + self.epsilon)
+        # return r_ij / (d_ij + self.epsilon)
+        return r_ij / d_ij
 
 
 @capture_init_args
@@ -223,6 +296,9 @@ class BondAvgSphericalHarmonic(TPEquivariantInstruction):
         self.inv_avg_n_neigh = 1.0 / avg_n_neigh
         self.n_out = n_out
 
+    def get_cutoff(self) -> float | None:
+        return float(np.array(self.rcut))
+
     def build(self, float_dtype):
         if not self.is_built:
             self.inv_avg_n_neigh = tf.constant(
@@ -230,6 +306,9 @@ class BondAvgSphericalHarmonic(TPEquivariantInstruction):
                 dtype=float_dtype,
             )
             self.rcut = tf.constant(self.rcut, dtype=float_dtype)
+            self.rc = tf.Variable(
+                self._init_args["rcut"], dtype=tf.float64, trainable=False, name="rc"
+            )
             self.is_built = True
 
     def frwrd(self, input_data: dict, training=False, local=False):
@@ -237,8 +316,8 @@ class BondAvgSphericalHarmonic(TPEquivariantInstruction):
         r = input_data[self.bonds.name]
         # cut_func = self.cutoff_func(r / self.rcut, self.p)
         # cut_func = tf.where(r > self.rcut, tf.zeros_like(r, dtype=r.dtype), cut_func)
-
-        y = tf.where(r > self.rcut, tf.zeros_like(y), y)
+        rcut = tf.cast(self.rcut, dtype=r.dtype)
+        y = tf.where(r > rcut, tf.zeros_like(y), y)
         # zy = tf.einsum("bn,bl->bnl", cut_func, y)
         zy = tf.math.unsorted_segment_sum(
             y,
@@ -300,11 +379,20 @@ class RadialBasis(TPInstruction):
             raise ValueError(f"Unknown type of the radial basis, {basis_type}")
         self.nfunc = self.basis_function.nfunc
 
+    def get_cutoff(self) -> float | None:
+        # `rc` (a tf.Variable) is only created in basis_function.build(); fall back
+        # to the plain `rcut` float set in __init__ when the basis isn't built yet
+        # (e.g. when grace_uq inspects instructions loaded from model.yaml).
+        bf = self.basis_function
+        if hasattr(bf, "rc"):
+            return float(bf.rc.numpy())
+        return float(np.array(bf.rcut))
+
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if hasattr(self.basis_function, "build"):
             self.basis_function.build(float_dtype)
-            # self.norm = tf.cast(np.sqrt(self.basis_function.nfunc), dtype=float_dtype)
+        self.rc = self.basis_function.rc
 
     @tf.Module.with_name_scope
     def frwrd(self, input_data: dict, training=False, local=False):
@@ -397,6 +485,12 @@ class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMi
             self.scales = np.ones_like(self.grid) * init_gamma
             self.trainable = trainable
 
+    def get_cutoff(self) -> float | None:
+        return float(np.max(np.array(self.bond_cutoff_map)))
+
+    def get_bond_cutoff_map(self) -> np.ndarray | None:
+        return np.array(self.bond_cutoff_map)
+
     def build(self, float_dtype):
         if not self.is_built:
             self.bond_cutoff_map = tf.Variable(
@@ -422,7 +516,7 @@ class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMi
         ]
         return {
             "bond_cutoff_map": tf.Variable(
-                new_bond_cutoff_map.reshape(-1, 1).astype(np.float64)
+                new_bond_cutoff_map.reshape(-1, 1)  # .astype(np.float32)
             )
         }
 
@@ -462,7 +556,15 @@ class BondSpecificRadialBasisFunction(TPInstruction, ElementsReduceInstructionMi
                 normalized=self.normalize,
             )
         elif self.basis_type == "Gaussian":
-            basis = tf.math.exp(-(self.scales**2) * (d - self.grid) ** 2)
+            if self.scales.dtype != d.dtype:
+                scales = tf.cast(self.scales, dtype=d.dtype)
+            else:
+                scales = self.scales
+            if self.grid.dtype != d.dtype:
+                grid = tf.cast(self.grid, dtype=d.dtype)
+            else:
+                grid = self.grid
+            basis = tf.math.exp(-(scales**2) * (d - grid) ** 2)
             basis *= cutoff_func_p_order_poly(d / cutoff, self.cutoff_function_param)
         else:
             raise NotImplementedError("Cheb or RadSinBessel basis only for now")
@@ -500,13 +602,16 @@ class LinearRadialFunction(TPInstruction):
             self.basis_name = basis
             assert (
                 input_shape is not None
-            ), f"Need to provide shape if basis is not TPInstruction"
+            ), "Need to provide shape if basis is not TPInstruction"
             self.input_shape = input_shape
         elif basis is not None:
             raise ValueError(f"Unknown {basis = }")
 
         self.l_tile = tf.cast(
-            tf.concat([tf.ones((2 * l + 1)) * l for l in range(self.lmax + 1)], axis=0),
+            tf.concat(
+                [tf.ones((2 * l_idx + 1)) * l_idx for l_idx in range(self.lmax + 1)],
+                axis=0,
+            ),
             tf.int32,
         )
         self.init = init
@@ -519,7 +624,7 @@ class LinearRadialFunction(TPInstruction):
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
-            self.norm = tf.convert_to_tensor(1, dtype=float_dtype)
+            # self.norm = tf.convert_to_tensor(1, dtype=float_dtype)
             if self.init == "random":
                 limit = np.sqrt(2 / float(self.n_rad_max + self.input_shape))
                 # limit = 1.
@@ -547,8 +652,9 @@ class LinearRadialFunction(TPInstruction):
     def frwrd(self, input_data, training=False, local=False):
         basis = input_data[self.basis_name]
 
-        y = tf.einsum("nlk,ak->anl", self.crad, basis)
-        y *= self.norm
+        crad = tf.cast(self.crad, dtype=basis.dtype)
+        y = tf.einsum("nlk,ak->anl", crad, basis)
+        # y *= self.norm
         y_l = tf.gather(y, self.l_tile, axis=-1)
 
         return y_l
@@ -594,7 +700,7 @@ class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
             self.basis_name = basis
             assert (
                 input_shape is not None
-            ), f"Need to provide shape if basis is not TPInstruction"
+            ), "Need to provide shape if basis is not TPInstruction"
             self.input_shape = input_shape
         elif isinstance(basis, TPInstruction):
             self.basis_name = basis.name
@@ -604,10 +710,12 @@ class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
         elif basis is None:
             assert (
                 input_shape is not None
-            ), f"Need to provide shape if basis is not TPInstruction"
+            ), "Need to provide shape if basis is not TPInstruction"
             self.input_shape = input_shape
         self.chemical_embedding_i = chemical_embedding_i
         self.chemical_embedding_j = chemical_embedding_j
+        self.chem_i_is_per_atom = getattr(chemical_embedding_i, "is_per_atom", False)
+        self.chem_j_is_per_atom = getattr(chemical_embedding_j, "is_per_atom", False)
 
         if self.chemical_embedding_i is not None:
             self.input_shape += self.chemical_embedding_i.embedding_size
@@ -615,7 +723,10 @@ class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
             self.input_shape += self.chemical_embedding_j.embedding_size
 
         self.l_tile = tf.cast(
-            tf.concat([tf.ones((2 * l + 1)) * l for l in range(self.lmax + 1)], axis=0),
+            tf.concat(
+                [tf.ones((2 * l_idx + 1)) * l_idx for l_idx in range(self.lmax + 1)],
+                axis=0,
+            ),
             tf.int32,
         )
         if activation is None:
@@ -673,22 +784,29 @@ class MLPRadialFunction(TPInstruction, LORAInstructionMixin):
 
         if self.chemical_embedding_i is not None:
             z = input_data[self.chemical_embedding_i.name]
-            mu_i = input_data[constants.BOND_MU_I]
-            bond_z_i = tf.gather(z, mu_i, axis=0)
+            z = tf.cast(z, basis.dtype)
+            if self.chem_i_is_per_atom:
+                bond_z_i = tf.gather(z, input_data[constants.BOND_IND_I], axis=0)
+            else:
+                bond_z_i = tf.gather(z, input_data[constants.BOND_MU_I], axis=0)
             basis = tf.concat([basis, bond_z_i], axis=1)
 
         if self.chemical_embedding_j is not None:
             z = input_data[self.chemical_embedding_j.name]
-            mu_j = input_data[constants.BOND_MU_J]
-            bond_z_j = tf.gather(z, mu_j, axis=0)
+            z = tf.cast(z, basis.dtype)
+            if self.chem_j_is_per_atom:
+                bond_z_j = tf.gather(z, input_data[constants.BOND_IND_J], axis=0)
+            else:
+                bond_z_j = tf.gather(z, input_data[constants.BOND_MU_J], axis=0)
             basis = tf.concat([basis, bond_z_j], axis=1)
 
         y = self.mlp(basis)
         if self.norm:
             variance = tf.math.reduce_variance(y, axis=-1, keepdims=True, name=None)
-            inv = tf.math.rsqrt(variance + self.epsilon)
-
-            y = y * inv * self.gamma
+            epsilon = tf.cast(self.epsilon, y.dtype)
+            inv = tf.math.rsqrt(variance + epsilon)
+            gamma = tf.cast(self.gamma, y.dtype)
+            y = y * inv * gamma
 
         y = tf.reshape(y, [-1, self.n_rad_max, self.lmax + 1])
         y_l = tf.gather(y, self.l_tile, axis=-1)
@@ -744,7 +862,7 @@ class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
             self.basis_name = basis
             assert (
                 input_shape is not None
-            ), f"Need to provide shape if basis is not TPInstruction"
+            ), "Need to provide shape if basis is not TPInstruction"
             self.input_shape = input_shape
         elif isinstance(basis, TPInstruction):
             self.basis_name = basis.name
@@ -754,11 +872,14 @@ class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
         elif basis is None:
             assert (
                 input_shape is not None
-            ), f"Need to provide shape if basis is not TPInstruction"
+            ), "Need to provide shape if basis is not TPInstruction"
             self.input_shape = input_shape
 
         self.l_tile = tf.cast(
-            tf.concat([tf.ones((2 * l + 1)) * l for l in range(self.lmax + 1)], axis=0),
+            tf.concat(
+                [tf.ones((2 * l_idx + 1)) * l_idx for l_idx in range(self.lmax + 1)],
+                axis=0,
+            ),
             tf.int32,
         )
         total_shapes = (
@@ -797,7 +918,6 @@ class MLPRadialFunction_v2(TPInstruction, LORAInstructionMixin):
                 layer.build(float_dtype)
             if self.chem_embedding is not None:
                 self.embed_transform.build(float_dtype)
-
             if self.lora_config:
                 self.enable_lora_adaptation(self.lora_config)
 
@@ -885,6 +1005,12 @@ class ScalarChemicalEmbedding(
         self.embedding_size = embedding_size
         self.is_trainable = is_trainable
         self.init = init
+
+    def get_element_map(self) -> tuple[np.ndarray, np.ndarray] | None:
+        return (
+            self.element_map_symbols.numpy().astype(str),
+            self.element_map_index.numpy(),
+        )
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
@@ -1012,7 +1138,9 @@ class SingleParticleBasisFunctionScalarInd(
         avg_n_neigh: float | dict = 1.0,
         lora_config: dict[str, Any] = None,
         lmax: int = None,
+        lm_first: bool = False,
     ):
+        self.lm_first = lm_first
         if lmax is not None:
             assert (
                 angular.lmax >= lmax
@@ -1037,6 +1165,7 @@ class SingleParticleBasisFunctionScalarInd(
         else:
             raise TypeError("avg_n_neigh must be float or dict")
 
+        self.indicator_is_per_atom = getattr(indicator, "is_per_atom", False)
         self.indicator_l_depend = indicator_l_depend
         if self.indicator is None:
             self.lin_transform = None
@@ -1091,19 +1220,31 @@ class SingleParticleBasisFunctionScalarInd(
         if self.slice_angular is not None:
             y = y[:, : self.slice_angular]
 
+        if r.dtype != y.dtype:
+            y = tf.cast(y, r.dtype)
         a_nl = tf.einsum("jnl,jl->jnl", r, y)
         if self.indicator is not None:
             z = input_data[self.indicator.name]
-            mu_j = input_data[constants.BOND_MU_J]
+            z = tf.cast(z, r.dtype)
 
             z_tr = self.lin_transform(z)
+            if z_tr.dtype != a_nl.dtype:
+                a_nl = tf.cast(a_nl, z_tr.dtype)
+
+            # Per-atom indicators: gather by neighbour atom index.
+            # Per-element indicators: gather by type.
+            if self.indicator_is_per_atom:
+                gather_idx = input_data[constants.BOND_IND_J]
+            else:
+                gather_idx = input_data[constants.BOND_MU_J]
+
             if self.indicator_l_depend:
                 z_tr = tf.reshape(z_tr, [-1, self.radial.n_rad_max, self.lmax + 1])
                 z_tr = tf.gather(z_tr, self.radial.l_tile, axis=2)
-                bond_z_tr = tf.gather(z_tr, mu_j, axis=0)
+                bond_z_tr = tf.gather(z_tr, gather_idx, axis=0)
                 a_nl = tf.einsum("jnl,jnl->jnl", a_nl, bond_z_tr)
             else:
-                bond_z_tr = tf.gather(z_tr, mu_j, axis=0)
+                bond_z_tr = tf.gather(z_tr, gather_idx, axis=0)
                 a_nl = tf.einsum("jnl,jn->jnl", a_nl, bond_z_tr)
 
         if self.sum_neighbors:
@@ -1117,19 +1258,22 @@ class SingleParticleBasisFunctionScalarInd(
                 a_nl, segment_ids=ind_i, num_segments=batch_tot_nat
             )
             if self.inv_avg_n_neigh is not None:
+                inv_avg_n_neigh = tf.cast(self.inv_avg_n_neigh, a_nl.dtype)
                 if self.per_specie_n_neigh:
                     if local:
                         raise NotImplementedError()
                     nneigh_norm = tf.gather(
-                        self.inv_avg_n_neigh,
+                        inv_avg_n_neigh,
                         input_data[constants.ATOMIC_MU_I],
                         axis=0,
                     )
                     a_nl *= nneigh_norm[:, :, tf.newaxis]
                     pass
                 else:
-                    a_nl *= self.inv_avg_n_neigh
+                    a_nl *= inv_avg_n_neigh
 
+        if self.lm_first:
+            a_nl = tf.transpose(a_nl, [2, 0, 1])  # [lm, atoms, n]
         return a_nl
 
     @tf.Module.with_name_scope
@@ -1171,12 +1315,18 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         normalize: bool = False,
         radial_basis: RadialBasis | TPInstruction = None,
         hidden_layers: list[int] = None,
+        chemical_embedding: ScalarChemicalEmbedding = None,
+        lm_first: bool = False,
+        dense_nbr: bool = None,
         **kwargs,
     ):
+        self.lm_first = lm_first
         super().__init__(name=name, lmax=Lmax)
         self.angular = angular
         self.indicator = indicator
         self.radial = radial
+        self.chemical_embedding = chemical_embedding
+        self.chem_emb_is_per_atom = getattr(chemical_embedding, "is_per_atom", False)
 
         self.n_out = self.radial.n_rad_max
 
@@ -1187,6 +1337,27 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
 
         assert self.angular.coupling_meta_data is not None
         assert self.indicator.coupling_meta_data is not None
+
+        if self.chemical_embedding is not None:
+            self.input_tensor_spec = {
+                **self.input_tensor_spec,
+                constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
+            }
+            # Find L=0, m=0, parity=+1 index in indicator's coupling metadata
+            meta = self.indicator.coupling_meta_data
+            l0_mask = (meta["l"] == 0) & (meta["m"] == 0) & (meta["parity"] == 1)
+            l0_idx = meta.index[l0_mask].tolist()
+            assert len(l0_idx) == 1, (
+                "Expected exactly one L=0,m=0,p=+1 component in indicator, "
+                f"found {len(l0_idx)}"
+            )
+            self.chem_l0_idx = l0_idx[0]
+            self.n_lm_indicator = len(meta)
+            self.chem_linear = Linear(
+                n_in=self.chemical_embedding.embedding_size,
+                n_out=self.indicator.n_out,
+                name=f"{self.name}_ChemProj",
+            )
 
         if self.angular.lmax > lmax:
             assert self.radial.lmax == lmax, (
@@ -1203,9 +1374,9 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
 
         if keep_parity is None:
             plist = []
-            for l in range(Lmax + 1):
-                p = 1 if l % 2 == 0 else -1
-                plist.append([l, p])
+            for l_val in range(Lmax + 1):
+                p = 1 if l_val % 2 == 0 else -1
+                plist.append([l_val, p])
         else:
             plist = keep_parity
 
@@ -1219,6 +1390,7 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             max_sum_l=max_sum_l,
             keep_parity=plist,
             normalize=normalize,
+            optimize_ms_comb=False,
         )
         self.coupling_origin = [self.angular.name, self.indicator.name]
 
@@ -1248,6 +1420,16 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
 
         init_coupling_symbols(self)
 
+        # Dense neighbor aggregation (reshape): default mode of this equivariant SPBF.
+        # True -> the dense reshape compute (needs the per-atom-uniform bond layout);
+        # False -> segment_sum. Resolve `dense_nbr=None` against the active
+        # InstructionManager default; record it for serialization. Adds NO input
+        # (same signature as segment_sum); `dense_capable` flags it for the dual
+        # `compute`/`compute_dense` SavedModel export.
+        self.dense_nbr = _resolve_dense_nbr(dense_nbr)
+        self.dense_capable = True
+        self._init_args["dense_nbr"] = self.dense_nbr
+
     @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
@@ -1257,6 +1439,13 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
             )
 
             self.cg = tf.constant(self.cg, dtype=float_dtype)
+            if self.chemical_embedding is not None:
+                self.chem_linear.build(float_dtype)
+                self.chem_l0_mask = tf.one_hot(
+                    self.chem_l0_idx,
+                    depth=self.n_lm_indicator,
+                    dtype=float_dtype,
+                )
             self.is_built = True
 
     def frwrd(self, input_data: dict, training=False, local=False):
@@ -1264,14 +1453,34 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
         ind_j = input_data[constants.BOND_IND_J]
         y = input_data[self.angular.name]
 
-        I = input_data[self.indicator.name]
-        bond_I = tf.gather(I, ind_j, axis=0)
+        indicator_data = input_data[self.indicator.name]
+        # Indicator may be in [lm, atoms, n] layout — convert to [atoms, n, lm]
+        # for bond-level operations
+        if self.lm_first:
+            indicator_data = tf.transpose(indicator_data, [1, 2, 0])
+        bond_I = tf.gather(indicator_data, ind_j, axis=0)
+
+        if self.chemical_embedding is not None:
+            z = input_data[self.chemical_embedding.name]
+            z = tf.cast(z, bond_I.dtype)
+            z_proj = self.chem_linear(z)  # [n_types or n_atoms, n_channels]
+            if self.chem_emb_is_per_atom:
+                bond_z = tf.gather(z_proj, ind_j, axis=0)
+            else:
+                mu_j = input_data[constants.BOND_MU_J]
+                bond_z = tf.gather(z_proj, mu_j, axis=0)  # [n_bonds, n_channels]
+            chem_l0_mask = tf.cast(self.chem_l0_mask, bond_I.dtype)
+            bond_I = (
+                bond_I
+                + bond_z[:, :, tf.newaxis] * chem_l0_mask[tf.newaxis, tf.newaxis, :]
+            )
 
         r = input_data[self.radial.name]
         if self.slice_angular is not None:
             y = y[:, : self.slice_angular]
+        if r.dtype != y.dtype:
+            y = tf.cast(y, dtype=r.dtype)
         bond_RY_nl = tf.einsum("jnl,jl->jnl", r, y)
-        prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
 
         if self.sum_neighbors:
             batch_tot_nat = (
@@ -1279,28 +1488,523 @@ class SingleParticleBasisFunctionEquivariantInd(TPEquivariantInstruction):
                 if local
                 else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
             )
-            prod = tf.math.unsorted_segment_sum(
-                prod,
-                segment_ids=ind_i,
-                num_segments=batch_tot_nat,
-                name=f"sum_nei_{self.name}",
-            )
+            if self.dense_nbr:
+                prod = _dense_reshape_einsum(bond_RY_nl, bond_I, batch_tot_nat)
+            else:
+                prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
+                prod = tf.math.unsorted_segment_sum(
+                    prod,
+                    segment_ids=ind_i,
+                    num_segments=batch_tot_nat,
+                    name=f"sum_nei_{self.name}",
+                )
             if self.inv_avg_n_neigh is not None:
-                prod *= self.inv_avg_n_neigh
+                inv_avg_n_neigh = tf.cast(self.inv_avg_n_neigh, dtype=prod.dtype)
+                prod *= inv_avg_n_neigh
+        else:
+            prod = tf.einsum("jnl,jnr->jnlr", bond_RY_nl, bond_I)
 
-        tnsr = tf.transpose(prod, [2, 3, 0, 1])  # tf.roll
-
-        prod_g = tf.gather_nd(params=tnsr, indices=self.lr_inds)
-        prod_g = prod_g * self.cg
-        prod_g = tf.math.unsorted_segment_sum(
-            prod_g,
+        # CG coupling: prod is [atoms, n, lm_y, lm_ind]
+        return _equiv_cg_couple(
+            prod,
+            self.lr_inds,
+            self.cg,
             self.m_sum_ind,
-            num_segments=self.nfunc,
-            name=f"sum_cg_{self.name}",
+            self.nfunc,
+            self.lm_first,
+            self.name,
         )
-        prod = tf.transpose(prod_g, [1, 2, 0], name=f"trans_120{self.name}")
 
-        return prod
+
+@capture_init_args
+class SPBF(TPEquivariantInstruction):
+    """
+    Single Particle Basis Function.
+
+    Combines Chebyshev radial basis, MLP radial function, and angular coupling
+    into a single instruction. The cutoff envelope is applied after the
+    radial x angular product, right before neighbor reduction, which allows
+    using biases in the MLP hidden layers.
+
+    The MLP radial function is always conditioned on chemistry via concatenation:
+
+        R_{nl}(r, mu_i, mu_j) = MLP([cheb(r), Z(mu_i), Z(mu_j)])[n, l]
+
+    where Z is a learnable per-species embedding provided by ``chemical_embedding``.
+
+    Additionally, when the indicator is not a ScalarChemicalEmbedding (i.e.,
+    indicator is None or a TPEquivariantInstruction), the chemical embedding
+    also provides a skip-add species-dependent modulation of the radial-angular
+    product (scalar mode) or L=0 injection into the indicator (equivariant mode).
+
+    Supports two modes based on the indicator type:
+    - Scalar indicator (None or ScalarChemicalEmbedding)
+    - Equivariant indicator (TPEquivariantInstruction)
+    """
+
+    input_tensor_spec = {
+        constants.BOND_IND_I: {"shape": [None], "dtype": "int"},
+        constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
+        constants.BOND_MU_I: {"shape": [None], "dtype": "int"},
+        constants.BOND_MU_J: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        name: str,
+        bonds: TPInstruction | str,
+        angular: SphericalHarmonic,
+        chemical_embedding: ScalarChemicalEmbedding,
+        n_rad_max: int,
+        n_rad_basis: int,
+        rcut: float,
+        lmax: int = None,
+        p: int = 5,
+        hidden_layers: list[int] = None,
+        activation: str | list[str] = "silu",
+        # Indicator — determines scalar vs equivariant mode
+        indicator: ScalarChemicalEmbedding | TPEquivariantInstruction = None,
+        # Equivariant indicator parameters
+        Lmax: int = None,
+        keep_parity: list[list] = None,
+        history_drop_list: list = None,
+        l_max_ind: int = None,
+        max_sum_l: int = None,
+        normalize_cg: bool = False,
+        # Neighbor averaging
+        avg_n_neigh: float | dict = 1.0,
+        sum_neighbors: bool = True,
+        lm_first: bool = False,
+        dense_nbr: bool = None,
+        **kwargs,
+    ):
+        # Determine mode
+        self.equivariant_mode = isinstance(indicator, TPEquivariantInstruction)
+        self.scalar_mode = not self.equivariant_mode
+
+        # Angular lmax for radial-angular coupling
+        if lmax is None:
+            lmax = angular.lmax
+        else:
+            assert angular.lmax >= lmax
+        self._lmax = lmax
+
+        # Output lmax
+        if self.equivariant_mode:
+            assert Lmax is not None, "Lmax must be specified for equivariant indicator"
+            output_lmax = Lmax
+        else:
+            output_lmax = lmax
+
+        super().__init__(name=name, lmax=output_lmax)
+
+        # Bond distances reference
+        if isinstance(bonds, TPInstruction):
+            self.bonds_name = bonds.name
+        elif isinstance(bonds, str):
+            self.bonds_name = bonds
+        else:
+            raise ValueError(f"Unknown entry for bonds: {bonds}")
+
+        self.angular = angular
+        self.indicator = indicator
+        self.chemical_embedding = chemical_embedding
+        self.n_rad_max = n_rad_max
+        self.n_rad_basis = n_rad_basis
+        self._rcut = rcut
+        self.p = p
+        self.sum_neighbors = sum_neighbors
+        self.n_out = n_rad_max
+        self.lm_first = lm_first
+
+        # MLP setup
+        if hidden_layers is None:
+            hidden_layers = [64, 64]
+        self.hidden_layers = hidden_layers
+
+        if isinstance(activation, str):
+            self.activation = [activation] * len(self.hidden_layers)
+        else:
+            assert len(activation) == len(self.hidden_layers)
+            self.activation = activation
+
+        # l_tile: maps (lmax+1) radial channels to (lmax+1)^2 via l index
+        self.l_tile = tf.cast(
+            tf.concat(
+                [tf.ones((2 * l + 1)) * l for l in range(self._lmax + 1)],
+                axis=0,
+            ),
+            tf.int32,
+        )
+
+        # MLP input: chebyshev basis + Z(mu_i) + Z(mu_j) (always chemistry-conditioned)
+        self.mlp_emb_size = chemical_embedding.embedding_size
+        mlp_input_size = n_rad_basis + 2 * self.mlp_emb_size
+
+        # MLP layers: hidden layers have bias, output layer does not
+        layer_sizes = (
+            [mlp_input_size] + self.hidden_layers + [n_rad_max * (self._lmax + 1)]
+        )
+        n_layers = len(layer_sizes) - 1
+        self.mlp_layers = []
+        for i in range(n_layers):
+            is_output_layer = i == n_layers - 1
+            self.mlp_layers.append(
+                Linear(
+                    layer_sizes[i],
+                    layer_sizes[i + 1],
+                    name=f"{self.name}_Linear_{i}",
+                    use_bias=not is_output_layer,
+                    init_type="normal",
+                    normalize=True,
+                )
+            )
+
+        # Neighbor averaging
+        if isinstance(avg_n_neigh, float):
+            self.per_specie_n_neigh = False
+            self.inv_avg_n_neigh = 1.0 / avg_n_neigh
+        elif isinstance(avg_n_neigh, dict):
+            self.per_specie_n_neigh = True
+            self.inv_avg_n_neigh = np.zeros((len(avg_n_neigh), 1))
+            for k, v in avg_n_neigh.items():
+                val = v if v > 0 else 1.0
+                self.inv_avg_n_neigh[k] = 1.0 / val
+        else:
+            raise TypeError("avg_n_neigh must be float or dict")
+
+        # Slice angular if angular.lmax > coupling lmax
+        if self.angular.lmax > self._lmax:
+            self.slice_angular = (self._lmax + 1) ** 2
+        else:
+            self.slice_angular = None
+
+        # CG coupling metadata
+        if keep_parity is None:
+            plist = []
+            for l_val in range(output_lmax + 1):
+                p_val = 1 if l_val % 2 == 0 else -1
+                plist.append([l_val, p_val])
+        else:
+            plist = keep_parity
+        self.plist = plist
+        # --- Scalar mode setup ---
+        if self.scalar_mode:
+            if isinstance(self.indicator, ScalarChemicalEmbedding):
+                # R * Y * Z: indicator provides species-dependent modulation
+                self.lin_transform = Linear(
+                    n_in=self.indicator.embedding_size,
+                    n_out=n_rad_max,
+                    name=self.name + "_ChemIndTransf",
+                )
+            else:
+                # R * Y only (no indicator, chemistry is in the MLP)
+                self.lin_transform = None
+
+            # Coupling metadata from angular
+            if self.slice_angular is not None:
+                self.coupling_meta_data = self.angular.coupling_meta_data.query(
+                    f"l <= {self._lmax}"
+                )
+            else:
+                self.coupling_meta_data = self.angular.coupling_meta_data
+            self.coupling_origin = self.angular.coupling_origin
+
+        # --- Equivariant mode setup ---
+        else:
+            self.chem_emb_is_per_atom = getattr(
+                chemical_embedding, "is_per_atom", False
+            )
+
+            # Need BOND_IND_J to gather indicator at neighbor sites
+            self.input_tensor_spec = {
+                **self.input_tensor_spec,
+                constants.BOND_IND_J: {"shape": [None], "dtype": "int"},
+            }
+
+            # L=0 injection: project chemical_embedding → indicator n_out,
+            # inject into all L=0,m=0,p=+1 components of the indicator
+            meta = self.indicator.coupling_meta_data
+            l0_mask = (meta["l"] == 0) & (meta["m"] == 0) & (meta["parity"] == 1)
+            l0_idx = meta.index[l0_mask].tolist()
+            assert len(l0_idx) >= 1, (
+                "Expected at least one L=0,m=0,p=+1 component in indicator, "
+                f"found {len(l0_idx)}"
+            )
+            self.chem_l0_indices = l0_idx
+            self.n_lm_indicator = len(meta)
+            self.chem_linear = Linear(
+                n_in=self.chemical_embedding.embedding_size,
+                n_out=self.indicator.n_out,
+                name=f"{self.name}_ChemProj",
+            )
+
+            angular_meta = (
+                self.angular.coupling_meta_data.query(f"l <= {self._lmax}")
+                if self.slice_angular is not None
+                else self.angular.coupling_meta_data
+            )
+            self.coupling_meta_data = real_coupling_metainformation(
+                A=angular_meta,
+                B=self.indicator.coupling_meta_data,
+                lmax=self._lmax,
+                lmax_B=l_max_ind,
+                Lmax=output_lmax,
+                history_drop_list=history_drop_list,
+                max_sum_l=max_sum_l,
+                keep_parity=self.plist,
+                normalize=normalize_cg,
+                optimize_ms_comb=False,
+            )
+            self.coupling_origin = [self.angular.name, self.indicator.name]
+
+            # Pre-compute CG indices and coefficients
+            self.lr_inds = tf.constant(
+                np.concatenate(
+                    [
+                        np.concatenate(self.coupling_meta_data["left_inds"]).reshape(
+                            -1, 1
+                        ),
+                        np.concatenate(self.coupling_meta_data["right_inds"]).reshape(
+                            -1, 1
+                        ),
+                    ],
+                    axis=1,
+                ),
+                dtype=tf.int32,
+            )
+
+            cgs = self.coupling_meta_data["cg_list"]
+            sum_ind = []
+            for i, cg in enumerate(cgs):
+                sum_ind.append([i] * len(cg))
+            sum_ind = np.concatenate(sum_ind)
+            self.m_sum_ind = tf.constant(sum_ind, dtype=tf.int32)
+            nfunc = np.max(sum_ind) + 1
+            self.nfunc = tf.constant(nfunc, dtype=tf.int32)
+            self.cg = np.concatenate(cgs).reshape(-1, 1, 1)
+
+        init_coupling_symbols(self)
+
+        # Dense neighbor aggregation (reshape): only the equivariant path forms the
+        # per-atom 4-D product, so dense_nbr is a no-op (masked off) in scalar mode.
+        # True -> dense reshape compute; False -> segment_sum. Adds NO input (same
+        # signature); `dense_capable` flags the equivariant case for the dual
+        # compute/compute_dense SavedModel export.
+        self.dense_nbr = _resolve_dense_nbr(dense_nbr) and self.equivariant_mode
+        self.dense_capable = self.equivariant_mode
+        self._init_args["dense_nbr"] = self.dense_nbr
+
+    def get_cutoff(self) -> float | None:
+        return float(self._rcut)
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype):
+        if not self.is_built:
+            # MLP layers
+            for layer in self.mlp_layers:
+                layer.build(float_dtype)
+
+            # Cutoff radius as non-trainable variable
+            self.rc = tf.Variable(
+                self._rcut, dtype=tf.float64, trainable=False, name="rcut"
+            )
+
+            self.inv_avg_n_neigh = tf.constant(
+                self.inv_avg_n_neigh,
+                dtype=float_dtype,
+            )
+
+            if self.scalar_mode:
+                if self.lin_transform is not None:
+                    self.lin_transform.build(float_dtype)
+            else:
+                self.cg = tf.constant(self.cg, dtype=float_dtype)
+                self.chem_linear.build(float_dtype)
+                self.chem_l0_mask = tf.reduce_sum(
+                    tf.one_hot(
+                        self.chem_l0_indices,
+                        depth=self.n_lm_indicator,
+                        dtype=float_dtype,
+                    ),
+                    axis=0,
+                )
+
+            self.is_built = True
+
+    def _compute_radial_basis(self, r):
+        """Chebyshev basis (kind=1, reversed=False) without envelope."""
+        rc = tf.cast(self.rc, r.dtype)
+        r_rescale = 2.0 * (1.0 - tf.abs(1.0 - r / rc)) - 1.0
+        # Clamp to [-1, 1] so padded bonds (r >> rc) don't blow up Chebyshev
+        r_rescale = tf.clip_by_value(r_rescale, -1.0, 1.0)
+        basis = chebvander(r_rescale, self.n_rad_basis + 1, kind=1)[:, 1:]
+        return basis
+
+    def _compute_envelope(self, r):
+        """Polynomial cutoff envelope, zeroed for r >= rc."""
+        rc = tf.cast(self.rc, r.dtype)
+        env = cutoff_func_p_order_poly(r / rc, self.p)
+        # Hard zero for bonds beyond cutoff (padding safety)
+        env = tf.where(r < rc, env, tf.zeros_like(env))
+        return env
+
+    def _mlp_forward(self, basis, z_i, z_j):
+        """MLP: [n_bonds, n_rad_basis + 2*emb] -> [n_bonds, n_rad_max, (lmax+1)^2]."""
+        x = tf.concat([basis, z_i, z_j], axis=-1)
+        for act_name, layer in zip(self.activation, self.mlp_layers[:-1]):
+            act_fn = ACTIVATION_DICT[act_name]
+            x = act_fn(layer(x))
+        x = self.mlp_layers[-1](x)
+        # [n_bonds, n_rad_max * (lmax+1)] -> [n_bonds, n_rad_max, lmax+1]
+        x = tf.reshape(x, [-1, self.n_rad_max, self._lmax + 1])
+        # Gather by l: [n_bonds, n_rad_max, (lmax+1)^2]
+        x = tf.gather(x, self.l_tile, axis=-1)
+        return x
+
+    def frwrd(self, input_data: dict, training=False, local=False):
+        # Bond distances
+        r = input_data[self.bonds_name]  # [n_bonds, 1]
+
+        # Chebyshev basis (no envelope)
+        basis = self._compute_radial_basis(r)  # [n_bonds, n_rad_basis]
+
+        # Chemical embeddings for MLP: [gk, Z(mu_i), Z(mu_j)]
+        z = input_data[self.chemical_embedding.name]
+        z = tf.cast(z, basis.dtype)
+        z_i = tf.gather(z, input_data[constants.BOND_MU_I], axis=0)
+        z_j = tf.gather(z, input_data[constants.BOND_MU_J], axis=0)
+
+        # MLP radial function
+        R = self._mlp_forward(basis, z_i, z_j)  # [n_bonds, n_rad_max, (lmax+1)^2]
+
+        # Spherical harmonics
+        y = input_data[self.angular.name]  # [n_bonds, (angular_lmax+1)^2]
+        if self.slice_angular is not None:
+            y = y[:, : self.slice_angular]
+
+        if R.dtype != y.dtype:
+            y = tf.cast(y, R.dtype)
+
+        # Radial x Angular product
+        a_nl = tf.einsum("jnl,jl->jnl", R, y)
+
+        # Envelope (applied before neighbor reduction)
+        envelope = self._compute_envelope(r)  # [n_bonds, 1]
+        envelope = tf.cast(envelope, a_nl.dtype)
+
+        if self.scalar_mode:
+            return self._frwrd_scalar(input_data, a_nl, envelope, local=local)
+        else:
+            return self._frwrd_equivariant(input_data, a_nl, envelope, local=local)
+
+    def _frwrd_scalar(self, input_data, a_nl, envelope, local=False):
+        # R * Y * Z when indicator is ScalarChemicalEmbedding
+        if self.lin_transform is not None:
+            z = input_data[self.indicator.name]
+            z = tf.cast(z, a_nl.dtype)
+            mu_j = input_data[constants.BOND_MU_J]
+            z_tr = self.lin_transform(z)
+            if z_tr.dtype != a_nl.dtype:
+                a_nl = tf.cast(a_nl, z_tr.dtype)
+            bond_z_tr = tf.gather(z_tr, mu_j, axis=0)
+            a_nl = tf.einsum("jnl,jn->jnl", a_nl, bond_z_tr)
+
+        # Apply envelope: [n_bonds, 1, 1] broadcasts with [n_bonds, n_rad, nlm]
+        a_nl = a_nl * envelope[:, :, tf.newaxis]
+
+        # Sum over neighbors
+        if self.sum_neighbors:
+            ind_i = input_data[constants.BOND_IND_I]
+            batch_tot_nat = (
+                tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+                if local
+                else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+            )
+            a_nl = tf.math.unsorted_segment_sum(
+                a_nl, segment_ids=ind_i, num_segments=batch_tot_nat
+            )
+
+            if self.inv_avg_n_neigh is not None:
+                inv_avg_n_neigh = tf.cast(self.inv_avg_n_neigh, a_nl.dtype)
+                if self.per_specie_n_neigh:
+                    if local:
+                        raise NotImplementedError()
+                    nneigh_norm = tf.gather(
+                        inv_avg_n_neigh,
+                        input_data[constants.ATOMIC_MU_I],
+                        axis=0,
+                    )
+                    a_nl *= nneigh_norm[:, :, tf.newaxis]
+                else:
+                    a_nl *= inv_avg_n_neigh
+        if self.lm_first:
+            a_nl = tf.transpose(a_nl, [2, 0, 1])  # [lm, atoms, n]
+        return a_nl
+
+    def _frwrd_equivariant(self, input_data, a_nl, envelope, local=False):
+        ind_i = input_data[constants.BOND_IND_I]
+        ind_j = input_data[constants.BOND_IND_J]
+
+        # Gather indicator at neighbor sites
+        indicator_data = input_data[self.indicator.name]
+        # Indicator may be in [lm, atoms, n] layout — convert to [atoms, n, lm]
+        # for bond-level operations
+        if self.lm_first:
+            indicator_data = tf.transpose(indicator_data, [1, 2, 0])
+        bond_I = tf.gather(indicator_data, ind_j, axis=0)
+
+        # L=0 injection from chemical_embedding
+        z = input_data[self.chemical_embedding.name]
+        z = tf.cast(z, bond_I.dtype)
+        z_proj = self.chem_linear(z)
+        if self.chem_emb_is_per_atom:
+            bond_z = tf.gather(z_proj, ind_j, axis=0)
+        else:
+            mu_j = input_data[constants.BOND_MU_J]
+            bond_z = tf.gather(z_proj, mu_j, axis=0)
+        chem_l0_mask = tf.cast(self.chem_l0_mask, bond_I.dtype)
+        bond_I = (
+            bond_I + bond_z[:, :, tf.newaxis] * chem_l0_mask[tf.newaxis, tf.newaxis, :]
+        )
+
+        # Apply envelope before 4-tensor product
+        a_nl = a_nl * envelope[:, :, tf.newaxis]
+
+        batch_tot_nat = (
+            tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+            if local
+            else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+        )
+
+        # Form the per-atom 4-D product summed over neighbors.
+        if self.sum_neighbors:
+            if self.dense_nbr:
+                prod = _dense_reshape_einsum(a_nl, bond_I, batch_tot_nat)
+            else:
+                prod = tf.einsum("jnl,jnr->jnlr", a_nl, bond_I)
+                prod = tf.math.unsorted_segment_sum(
+                    prod,
+                    segment_ids=ind_i,
+                    num_segments=batch_tot_nat,
+                    name=f"sum_nei_{self.name}",
+                )
+            if self.inv_avg_n_neigh is not None:
+                inv_avg_n_neigh = tf.cast(self.inv_avg_n_neigh, dtype=prod.dtype)
+                prod *= inv_avg_n_neigh
+        else:
+            prod = tf.einsum("jnl,jnr->jnlr", a_nl, bond_I)
+
+        # CG coupling: prod is [atoms, n, lm_y, lm_ind]
+        return _equiv_cg_couple(
+            prod,
+            self.lr_inds,
+            self.cg,
+            self.m_sum_ind,
+            self.nfunc,
+            self.lm_first,
+            self.name,
+        )
 
 
 @capture_init_args
@@ -1326,9 +2030,11 @@ class ProductFunction(TPEquivariantInstruction):
         max_sum_l: int = None,
         keep_parity: list[list] = None,
         normalize: bool = False,
+        lm_first: bool = False,
         **kwargs,
     ):
         super().__init__(name=name, lmax=Lmax)
+        self.lm_first = lm_first
         self.left = left
         self.right = right
 
@@ -1348,9 +2054,9 @@ class ProductFunction(TPEquivariantInstruction):
 
         if keep_parity is None:
             plist = []
-            for l in range(Lmax + 1):
-                p = 1 if l % 2 == 0 else -1
-                plist.append([l, p])
+            for l_val in range(Lmax + 1):
+                p = 1 if l_val % 2 == 0 else -1
+                plist.append([l_val, p])
         else:
             plist = keep_parity
         self.plist = plist
@@ -1391,6 +2097,7 @@ class ProductFunction(TPEquivariantInstruction):
             max_sum_l=self.max_sum_l,
             keep_parity=self.plist,
             normalize=self.normalize,
+            legacy_format=True,
         )
         assert len(
             self.coupling_meta_data
@@ -1410,7 +2117,12 @@ class ProductFunction(TPEquivariantInstruction):
         sum_ind = np.concatenate(sum_ind)
         self.m_sum_ind = tf.constant(sum_ind, dtype=tf.int32)
 
-        self.cg = np.concatenate(cgs).reshape(1, 1, -1)
+        # cg broadcasts against the gathered product: [n_cg,1,1] for lm_first
+        # ([n_cg, atoms, n]) or [1,1,n_cg] for standard ([atoms, n, n_cg]).
+        cg_flat = np.concatenate(cgs)
+        self.cg = (
+            cg_flat.reshape(-1, 1, 1) if self.lm_first else cg_flat.reshape(1, 1, -1)
+        )
 
         nfunc = np.max(sum_ind) + 1
         self.nfunc = tf.constant(nfunc, dtype=tf.int32)
@@ -1425,17 +2137,21 @@ class ProductFunction(TPEquivariantInstruction):
         left = input_data[self.left.name]
         right = input_data[self.right.name]
 
-        lft = tf.gather(left, self.left_ind, axis=2)
-        rght = tf.gather(right, self.right_ind, axis=2)
+        ax = 0 if self.lm_first else 2
+        lft = tf.gather(left, self.left_ind, axis=ax)
+        rght = tf.gather(right, self.right_ind, axis=ax)
 
-        prod = lft * rght
+        prod = lft * rght * self.cg
 
-        prod = prod * self.cg
+        if self.lm_first:
+            # prod is [n_cg, atoms, n]; reduce m on axis 0 -> [nfunc, atoms, n]
+            return tf.math.unsorted_segment_sum(
+                prod, self.m_sum_ind, num_segments=self.nfunc
+            )
         prod = tf.transpose(prod, [2, 0, 1])
         prod = tf.math.unsorted_segment_sum(
             prod, self.m_sum_ind, num_segments=self.nfunc
         )
-
         return tf.transpose(prod, [1, 2, 0])
 
     def __repr__(self):
@@ -1466,8 +2182,10 @@ class CropProductFunction(TPEquivariantInstruction):
         max_sum_l: int = None,
         keep_parity: list[list] = None,
         normalize: bool = True,
+        lm_first: bool = False,
     ):
         super().__init__(name=name, lmax=Lmax)
+        self.lm_first = lm_first
         self.left = left
         self.right = right
 
@@ -1489,9 +2207,9 @@ class CropProductFunction(TPEquivariantInstruction):
 
         if keep_parity is None:
             plist = []
-            for l in range(Lmax + 1):
-                p = 1 if l % 2 == 0 else -1
-                plist.append([l, p])
+            for l_val in range(Lmax + 1):
+                p = 1 if l_val % 2 == 0 else -1
+                plist.append([l_val, p])
         else:
             plist = keep_parity
         self.plist = plist
@@ -1528,6 +2246,7 @@ class CropProductFunction(TPEquivariantInstruction):
             max_sum_l=self.max_sum_l,
             keep_parity=self.plist,
             normalize=self.normalize,
+            legacy_format=True,
         )
         assert len(
             self.coupling_meta_data
@@ -1547,7 +2266,12 @@ class CropProductFunction(TPEquivariantInstruction):
         sum_ind = np.concatenate(sum_ind)
         self.m_sum_ind = tf.constant(sum_ind, dtype=tf.int32)
 
-        self.cg = np.concatenate(cgs).reshape(1, 1, -1)
+        # cg broadcasts against the gathered product: [n_cg,1,1] for lm_first
+        # ([n_cg, atoms, n]) or [1,1,n_cg] for standard ([atoms, n, n_cg]).
+        cg_flat = np.concatenate(cgs)
+        self.cg = (
+            cg_flat.reshape(-1, 1, 1) if self.lm_first else cg_flat.reshape(1, 1, -1)
+        )
 
         nfunc = np.max(sum_ind) + 1
         self.nfunc = tf.constant(nfunc, dtype=tf.int32)
@@ -1558,27 +2282,555 @@ class CropProductFunction(TPEquivariantInstruction):
             self.cg = tf.constant(self.cg, dtype=float_dtype)
             self.is_built = True
 
+    def _crop(self, x):
+        # crop the n_out (feature) axis: axis 2 for lm_first [lm, atoms, n],
+        # axis 1 for standard [atoms, n, lm].
+        return x[:, :, : self.n_out] if self.lm_first else x[:, : self.n_out, :]
+
     def frwrd(self, input_data, training=False, local=False):
-        left = input_data[self.left.name]
-        left = left[:, : self.n_out, :]
+        left = self._crop(input_data[self.left.name])
 
         if self.is_left_right_equal:
             right = left
         else:
-            right = input_data[self.right.name]
-            right = right[:, : self.n_out, :]
+            right = self._crop(input_data[self.right.name])
 
-        lft = tf.gather(left, self.left_ind, axis=2)
-        rght = tf.gather(right, self.right_ind, axis=2)
-        prod = lft * rght
+        ax = 0 if self.lm_first else 2
+        lft = tf.gather(left, self.left_ind, axis=ax)
+        rght = tf.gather(right, self.right_ind, axis=ax)
+        prod = lft * rght * self.cg
 
-        prod = prod * self.cg
+        if self.lm_first:
+            # prod is [n_cg, atoms, n]; reduce m on axis 0 -> [nfunc, atoms, n]
+            return tf.math.unsorted_segment_sum(
+                prod, self.m_sum_ind, num_segments=self.nfunc
+            )
         prod = tf.transpose(prod, [2, 0, 1])
         prod = tf.math.unsorted_segment_sum(
             prod, self.m_sum_ind, num_segments=self.nfunc
         )
-
         return tf.transpose(prod, [1, 2, 0])
+
+
+@capture_init_args
+class GeneralProductFunction(TPEquivariantInstruction):
+    """
+    Generalized tensor product with optional trainable n-channel coupling via CP decomposition.
+
+    Extends ProductFunction to support full tensor product on n-channels
+    (not just element-wise), using low-rank (CP) decomposition to keep
+    the parameter count tractable.
+
+    Four modes are supported:
+
+    mode="elementwise":
+        Numerically equivalent to ProductFunction. Element-wise product on
+        n-channels, CG coupling on angular channels. No trainable parameters.
+        Requires left.n_out == right.n_out. The internal coupling table
+        differs from ProductFunction's: symmetric (m1, m2) pairs are kept as
+        separate rows (optimize_ms_comb=False) because merging them is only
+        valid when the product commutes, which does not hold for CP modes.
+
+    mode="cp":
+        CP decomposition with global U, V matrices (shared across all angular channels).
+        U: [R, n_L], V: [R, n_R], optional S: [n_out, R].
+
+    mode="cp_l":
+        CP decomposition where U depends on (l, hist, parity) of the left input channel,
+        and V depends on (l, hist, parity) of the right input channel.
+        U: [G_L, R, n_L], V: [G_R, R, n_R], optional S: [n_out, R].
+
+    mode="cp_lL":
+        Like cp_l but U also depends on output L, and V also depends on output L.
+        U: [G_U, R, n_L], V: [G_V, R, n_R], optional S: [n_out, R].
+
+    Parameters
+    ----------
+    left, right : TPEquivariantInstruction
+        Input equivariant tensors of shape [atoms, n_left, l_m] and [atoms, n_right, l_m].
+    name : str
+        Name of this instruction.
+    lmax : int
+        Maximum l for input angular channels.
+    Lmax : int
+        Maximum L for output angular channels.
+    mode : str
+        One of "elementwise", "cp", "cp_l", "cp_lL".
+    n_out : int, optional
+        Output n-channel dimension. Required for cp/cp_l/cp_lL modes.
+        If None in cp modes, n_out = rank.
+    rank : int, optional
+        CP decomposition rank R. Required for cp/cp_l/cp_lL modes.
+    use_S : bool
+        Whether to use the output projection matrix S. If False, rank must equal n_out.
+    """
+
+    input_tensor_spec = {
+        constants.ATOMIC_MU_I: {"shape": [None], "dtype": "int"},
+    }
+
+    def __init__(
+        self,
+        left: TPEquivariantInstruction,
+        right: TPEquivariantInstruction,
+        name: str,
+        lmax: int,
+        Lmax: int,
+        mode: str = "elementwise",
+        n_out: int = None,
+        rank: int = None,
+        use_S: bool = True,
+        is_left_right_equal: bool = None,
+        lmax_left: int = None,
+        lmax_right: int = None,
+        lmax_hist: int = None,
+        lmax_hist_left: int = None,
+        lmax_hist_right: int = None,
+        history_drop_list: list = None,
+        max_sum_l: int = None,
+        keep_parity: list[list] = None,
+        normalize: bool = False,
+        lm_first: bool = False,
+        **kwargs,
+    ):
+        self.lm_first = lm_first
+        super().__init__(name=name, lmax=Lmax)
+        self.left = left
+        self.right = right
+        self.mode = mode
+
+        assert self.left.coupling_meta_data is not None
+        assert self.right.coupling_meta_data is not None
+        if is_left_right_equal is None:
+            is_left_right_equal = left.name == right.name
+        self.is_left_right_equal = is_left_right_equal
+
+        # Validate mode and set n_out
+        assert mode in (
+            "elementwise",
+            "cp",
+            "cp_l",
+            "cp_lL",
+        ), f"Unknown mode '{mode}', expected one of: elementwise, cp, cp_l, cp_lL"
+
+        if mode == "elementwise":
+            assert (
+                self.left.n_out == self.right.n_out
+            ), "elementwise mode requires left.n_out == right.n_out"
+            self.n_out = self.left.n_out
+            self.rank = None
+            self.use_S = False
+        else:
+            assert rank is not None, f"rank is required for mode='{mode}'"
+            self.rank = rank
+            self.use_S = use_S
+            if n_out is None:
+                n_out = rank
+            self.n_out = n_out
+            if not use_S:
+                assert (
+                    rank == n_out
+                ), f"When use_S=False, rank must equal n_out, got {rank=} and {n_out=}"
+
+        self.n_left = self.left.n_out
+        self.n_right = self.right.n_out
+
+        if keep_parity is None:
+            plist = []
+            for l_val in range(Lmax + 1):
+                p = 1 if l_val % 2 == 0 else -1
+                plist.append([l_val, p])
+        else:
+            plist = keep_parity
+        self.plist = plist
+        self.normalize = normalize
+        self.max_sum_l = max_sum_l
+
+        input_lmax = lmax
+        output_Lmax = Lmax
+        self.lmax_A = lmax_left
+        self.lmax_B = lmax_right
+        self.lmax_hist = lmax_hist
+        self.lmax_hist_A = lmax_hist_left
+        self.lmax_hist_B = lmax_hist_right
+        self.coupling_origin = [self.left.name, self.right.name]
+        self.history_drop_list = history_drop_list
+        self.init_coupling(input_lmax, output_Lmax)
+
+        # Build group assignment tensors for cp_l and cp_lL modes
+        if mode in ("cp_l", "cp_lL"):
+            self._build_group_assignments()
+
+    def init_coupling(self, input_lmax=None, output_Lmax=None):
+        """Initialize CG coupling metadata. Same as ProductFunction."""
+        if input_lmax is None:
+            input_lmax = self.lmax
+        if output_Lmax is None:
+            output_Lmax = self.lmax
+
+        self.coupling_meta_data = real_coupling_metainformation(
+            A=self.left.coupling_meta_data,
+            B=self.right.coupling_meta_data,
+            lmax=input_lmax,
+            lmax_A=self.lmax_A,
+            lmax_B=self.lmax_B,
+            lmax_hist=self.lmax_hist,
+            lmax_hist_A=self.lmax_hist_A,
+            lmax_hist_B=self.lmax_hist_B,
+            Lmax=output_Lmax,
+            is_A_B_equal=self.is_left_right_equal,
+            history_drop_list=self.history_drop_list,
+            max_sum_l=self.max_sum_l,
+            keep_parity=self.plist,
+            normalize=self.normalize,
+            optimize_ms_comb=False,
+        )
+        assert len(
+            self.coupling_meta_data
+        ), f"No coupling channels found between {self.left.name} and {self.right.name}"
+
+        self.left_ind = tf.constant(
+            np.concatenate(self.coupling_meta_data["left_inds"]), dtype=tf.int32
+        )
+        self.right_ind = tf.constant(
+            np.concatenate(self.coupling_meta_data["right_inds"]), dtype=tf.int32
+        )
+
+        cgs = self.coupling_meta_data["cg_list"]
+        sum_ind = []
+        for i, cg in enumerate(cgs):
+            sum_ind.append([i] * len(cg))
+        sum_ind = np.concatenate(sum_ind)
+        self.m_sum_ind = tf.constant(sum_ind, dtype=tf.int32)
+
+        cg_flat = np.concatenate(cgs)
+        if self.lm_first:
+            self.cg = cg_flat.reshape(-1, 1, 1)
+        else:
+            self.cg = cg_flat.reshape(1, 1, -1)
+
+        nfunc = np.max(sum_ind) + 1
+        self.nfunc = tf.constant(nfunc, dtype=tf.int32)
+
+    def _build_group_assignments(self):
+        """Build group index mappings for cp_l and cp_lL modes.
+
+        For cp_l:
+            - group_left: [l_m_left] -> group index based on (l, hist, parity) of left input
+            - group_right: [l_m_right] -> group index based on (l, hist, parity) of right input
+
+        For cp_lL:
+            - cg_u_group: [n_cg] -> group index based on (l1, hist1, parity1, L) per CG pair
+            - cg_v_group: [n_cg] -> group index based on (l2, hist2, parity2, L) per CG pair
+        """
+        left_cmd = self.left.coupling_meta_data
+        right_cmd = self.right.coupling_meta_data
+
+        # Build left input channel -> (l, hist, parity) group mapping
+        left_groups = left_cmd.groupby(["l", "hist", "parity"]).indices
+        left_group_keys = list(left_groups.keys())
+        left_group_map = {}  # channel_index -> group_id
+        for gid, (key, indices) in enumerate(left_groups.items()):
+            for idx in indices:
+                left_group_map[idx] = gid
+
+        # Build right input channel -> (l, hist, parity) group mapping
+        right_groups = right_cmd.groupby(["l", "hist", "parity"]).indices
+        right_group_keys = list(right_groups.keys())
+        right_group_map = {}
+        for gid, (key, indices) in enumerate(right_groups.items()):
+            for idx in indices:
+                right_group_map[idx] = gid
+
+        if self.mode == "cp_l":
+            # For cp_l: assign each input angular channel to its (l, hist, parity) group
+            n_lm_left = len(left_cmd)
+            n_lm_right = len(right_cmd)
+            group_left = np.array(
+                [left_group_map[i] for i in range(n_lm_left)], dtype=np.int32
+            )
+            group_right = np.array(
+                [right_group_map[i] for i in range(n_lm_right)], dtype=np.int32
+            )
+            self.group_left = tf.constant(group_left, dtype=tf.int32)
+            self.group_right = tf.constant(group_right, dtype=tf.int32)
+            self.n_groups_left = len(left_group_keys)
+            self.n_groups_right = len(right_group_keys)
+
+        elif self.mode == "cp_lL":
+            # For cp_lL: assign each CG pair to its (l, hist, parity, L) group
+            # We need to walk through coupling_meta_data to find what (l1, hist1, p1, L)
+            # each CG pair belongs to
+            left_inds_list = self.coupling_meta_data["left_inds"].values
+            right_inds_list = self.coupling_meta_data["right_inds"].values
+            output_L_list = self.coupling_meta_data["l"].values
+
+            u_group_keys = []  # unique (l1, hist1, p1, L) keys
+            u_group_key_to_id = {}
+            v_group_keys = []
+            v_group_key_to_id = {}
+
+            cg_u_groups = []
+            cg_v_groups = []
+
+            for row_idx in range(len(self.coupling_meta_data)):
+                l_inds = left_inds_list[row_idx]
+                r_inds = right_inds_list[row_idx]
+                out_L = output_L_list[row_idx]
+
+                for li, ri in zip(l_inds, r_inds):
+                    # Left: (l1, hist1, parity1) group + output L
+                    left_base_gid = left_group_map[li]
+                    u_key = (left_group_keys[left_base_gid], out_L)
+                    if u_key not in u_group_key_to_id:
+                        u_group_key_to_id[u_key] = len(u_group_keys)
+                        u_group_keys.append(u_key)
+                    cg_u_groups.append(u_group_key_to_id[u_key])
+
+                    # Right: (l2, hist2, parity2) group + output L
+                    right_base_gid = right_group_map[ri]
+                    v_key = (right_group_keys[right_base_gid], out_L)
+                    if v_key not in v_group_key_to_id:
+                        v_group_key_to_id[v_key] = len(v_group_keys)
+                        v_group_keys.append(v_key)
+                    cg_v_groups.append(v_group_key_to_id[v_key])
+
+            self.cg_u_group = tf.constant(cg_u_groups, dtype=tf.int32)
+            self.cg_v_group = tf.constant(cg_v_groups, dtype=tf.int32)
+            self.n_groups_u = len(u_group_keys)
+            self.n_groups_v = len(v_group_keys)
+
+            # The per-CG-pair weight depends on
+            # the pair only via (group, lm-channel), so project on the D distinct
+            # (group, lm) pairs then gather D->n_cg. cg_u_groups[c] aligns with
+            # left_inds flattened in the same row-major order (both walk the
+            # coupling rows in order), so they pair element-wise.
+            left_flat = np.concatenate(self.coupling_meta_data["left_inds"]).astype(
+                np.int64
+            )
+            right_flat = np.concatenate(self.coupling_meta_data["right_inds"]).astype(
+                np.int64
+            )
+            ug = np.asarray(cg_u_groups, dtype=np.int64)
+            vg = np.asarray(cg_v_groups, dtype=np.int64)
+            uniq_u, dinv_u = np.unique(
+                np.stack([ug, left_flat], 1), axis=0, return_inverse=True
+            )
+            uniq_v, dinv_v = np.unique(
+                np.stack([vg, right_flat], 1), axis=0, return_inverse=True
+            )
+            self.cpll_pg_u = tf.constant(uniq_u[:, 0].astype(np.int32))
+            self.cpll_pc_u = tf.constant(uniq_u[:, 1].astype(np.int32))
+            self.cpll_dinv_u = tf.constant(
+                np.asarray(dinv_u).reshape(-1).astype(np.int32)
+            )
+            self.cpll_pg_v = tf.constant(uniq_v[:, 0].astype(np.int32))
+            self.cpll_pc_v = tf.constant(uniq_v[:, 1].astype(np.int32))
+            self.cpll_dinv_v = tf.constant(
+                np.asarray(dinv_v).reshape(-1).astype(np.int32)
+            )
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype):
+        if not self.is_built:
+            self.cg = tf.constant(self.cg, dtype=float_dtype)
+
+            # Runtime normalization factors (1/sqrt of contraction dim)
+            self.norm_u = tf.constant(1.0 / np.sqrt(self.n_left), dtype=float_dtype)
+            self.norm_v = tf.constant(1.0 / np.sqrt(self.n_right), dtype=float_dtype)
+            if self.use_S:
+                self.norm_s = tf.constant(1.0 / np.sqrt(self.rank), dtype=float_dtype)
+
+            if self.mode == "cp":
+                self.U = tf.Variable(
+                    tf.random.normal([self.rank, self.n_left], dtype=float_dtype),
+                    name="U_cp",
+                )
+                self.V = tf.Variable(
+                    tf.random.normal([self.rank, self.n_right], dtype=float_dtype),
+                    name="V_cp",
+                )
+                if self.use_S:
+                    self.S = tf.Variable(
+                        tf.random.normal(
+                            [self.n_out, self.rank],
+                            dtype=float_dtype,
+                        ),
+                        name="S_cp",
+                    )
+
+            elif self.mode == "cp_l":
+                self.U = tf.Variable(
+                    tf.random.normal(
+                        [self.n_groups_left, self.rank, self.n_left],
+                        dtype=float_dtype,
+                    ),
+                    name="U_cp_l",
+                )
+                self.V = tf.Variable(
+                    tf.random.normal(
+                        [self.n_groups_right, self.rank, self.n_right],
+                        dtype=float_dtype,
+                    ),
+                    name="V_cp_l",
+                )
+                if self.use_S:
+                    self.S = tf.Variable(
+                        tf.random.normal(
+                            [self.n_out, self.rank],
+                            dtype=float_dtype,
+                        ),
+                        name="S_cp_l",
+                    )
+
+            elif self.mode == "cp_lL":
+                self.U = tf.Variable(
+                    tf.random.normal(
+                        [self.n_groups_u, self.rank, self.n_left],
+                        dtype=float_dtype,
+                    ),
+                    name="U_cp_lL",
+                )
+                self.V = tf.Variable(
+                    tf.random.normal(
+                        [self.n_groups_v, self.rank, self.n_right],
+                        dtype=float_dtype,
+                    ),
+                    name="V_cp_lL",
+                )
+                if self.use_S:
+                    self.S = tf.Variable(
+                        tf.random.normal(
+                            [self.n_out, self.rank],
+                            dtype=float_dtype,
+                        ),
+                        name="S_cp_lL",
+                    )
+
+            self.is_built = True
+
+    def _cg_coupling(self, lft, rght):
+        """Apply CG coupling: element-wise product, CG weighting, and reduction.
+
+        Args:
+            lft: gathered left tensor, shape depends on layout:
+                standard: [atoms, n, n_cg]
+                lm_first: [n_cg, atoms, n]
+            rght: gathered right tensor, same shape as lft
+
+        Returns:
+            Coupled tensor:
+                standard: [atoms, n, n_output_lm]
+                lm_first: [n_output_lm, atoms, n]
+        """
+        prod = lft * rght * tf.cast(self.cg, lft.dtype)
+        if self.lm_first:
+            # prod is [n_cg, atoms, n], segment_sum on axis 0
+            return tf.math.unsorted_segment_sum(
+                prod, self.m_sum_ind, num_segments=self.nfunc
+            )
+        else:
+            prod = tf.transpose(prod, [2, 0, 1])
+            prod = tf.math.unsorted_segment_sum(
+                prod, self.m_sum_ind, num_segments=self.nfunc
+            )
+            return tf.transpose(prod, [1, 2, 0])
+
+    def _gather_axis(self):
+        """Return the axis for angular gathers: 0 for lm_first, 2 for standard."""
+        return 0 if self.lm_first else 2
+
+    def _apply_S(self, prod):
+        """Optional output projection S [n_out, R] over the rank axis."""
+        if not self.use_S:
+            return prod
+        eq = "kr,war->wak" if self.lm_first else "kr,arL->akL"
+        return tf.einsum(eq, self.S, prod) * self.norm_s
+
+    def _frwrd_elementwise(self, left, right):
+        """Mode 'elementwise': identical to ProductFunction."""
+        ax = self._gather_axis()
+        lft = tf.gather(left, self.left_ind, axis=ax)
+        rght = tf.gather(right, self.right_ind, axis=ax)
+        return self._cg_coupling(lft, rght)
+
+    def _frwrd_cp(self, left, right):
+        """Mode 'cp': global CP decomposition."""
+        U = self.U
+        V = self.V
+        if self.lm_first:
+            # left: [lm, atoms, n_L] → project: [lm, atoms, R]
+            left_proj = tf.einsum("rn,wan->war", U, left) * self.norm_u
+            right_proj = tf.einsum("rn,wan->war", V, right) * self.norm_v
+        else:
+            left_proj = tf.einsum("rn,anl->arl", U, left) * self.norm_u
+            right_proj = tf.einsum("rn,anl->arl", V, right) * self.norm_v
+
+        ax = self._gather_axis()
+        lft = tf.gather(left_proj, self.left_ind, axis=ax)
+        rght = tf.gather(right_proj, self.right_ind, axis=ax)
+        prod = self._cg_coupling(lft, rght)
+        return self._apply_S(prod)
+
+    def _frwrd_cp_l(self, left, right):
+        """Mode 'cp_l': CP with U depending on (l1, hist1), V on (l2, hist2)."""
+        U_tiled = tf.gather(self.U, self.group_left, axis=0)  # [lm, R, n]
+        V_tiled = tf.gather(self.V, self.group_right, axis=0)
+
+        if self.lm_first:
+            left_proj = tf.einsum("wrn,wan->war", U_tiled, left) * self.norm_u
+            right_proj = tf.einsum("wrn,wan->war", V_tiled, right) * self.norm_v
+        else:
+            left_proj = tf.einsum("wrn,anw->arw", U_tiled, left) * self.norm_u
+            right_proj = tf.einsum("wrn,anw->arw", V_tiled, right) * self.norm_v
+
+        ax = self._gather_axis()
+        lft = tf.gather(left_proj, self.left_ind, axis=ax)
+        rght = tf.gather(right_proj, self.right_ind, axis=ax)
+        prod = self._cg_coupling(lft, rght)
+        return self._apply_S(prod)
+
+    def _frwrd_cp_lL(self, left, right):
+        """Mode 'cp_lL': CP with U depending on (l1, hist1, L), V on (l2, hist2, L)."""
+        # Project on the D distinct (group, lm) channels, then expand D -> n_cg.
+        # ax = lm/coupling axis (0 lm_first, 2 standard); subscript picks the layout.
+        ax = self._gather_axis()
+        eq = "drn,dan->dar" if self.lm_first else "drn,and->ard"
+
+        def project(x, pc, W, pg, dinv, norm):
+            xd = tf.gather(x, pc, axis=ax)  # lm -> D distinct channels
+            Wd = tf.gather(W, pg, axis=0)  # [D, R, n]
+            proj = tf.einsum(eq, Wd, xd) * norm
+            return tf.gather(proj, dinv, axis=ax)  # expand D -> n_cg
+
+        lft_proj = project(
+            left, self.cpll_pc_u, self.U, self.cpll_pg_u, self.cpll_dinv_u, self.norm_u
+        )
+        rght_proj = project(
+            right, self.cpll_pc_v, self.V, self.cpll_pg_v, self.cpll_dinv_v, self.norm_v
+        )
+        prod = self._cg_coupling(lft_proj, rght_proj)
+        return self._apply_S(prod)
+
+    def frwrd(self, input_data, training=False, local=False):
+        left = input_data[self.left.name]
+        right = input_data[self.right.name]
+
+        if self.mode == "elementwise":
+            return self._frwrd_elementwise(left, right)
+        elif self.mode == "cp":
+            return self._frwrd_cp(left, right)
+        elif self.mode == "cp_l":
+            return self._frwrd_cp_l(left, right)
+        elif self.mode == "cp_lL":
+            return self._frwrd_cp_lL(left, right)
+
+    def __repr__(self):
+        return (
+            f"GeneralProductFunction(name={self.name}, "
+            f"origin={' x '.join(self.coupling_origin)}, "
+            f"l_max={self.lmax}, mode={self.mode})"
+        )
 
 
 @capture_init_args
@@ -1600,9 +2852,11 @@ class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
         init_vars: Literal["random", "zeros"] = "random",
         init_target_value: Literal["zeros", "ones"] = "zeros",
         simplify: bool = False,
+        lm_first: bool = False,
         **kwargs,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
+        self.lm_first = lm_first
         self.instructions = instructions
         if isinstance(ls_max, int):
             ls_max = [ls_max] * len(instructions)
@@ -1632,12 +2886,11 @@ class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
 
         collector_data = []
         for p in [-1, 1]:
-            for l in range(self.lmax + 1):
-                if [l, p] in self.allowed_l_p:
-                    for m in range(-l, l + 1):
-                        lbl = 0 if p > 0 else 1
+            for l_idx in range(self.lmax + 1):
+                if [l_idx, p] in self.allowed_l_p:
+                    for m in range(-l_idx, l_idx + 1):
                         # TODO: rethink how to define history here. Then, possibly move to the base class method
-                        collector_data.append([l, m, f"", p, l])
+                        collector_data.append([l_idx, m, "", p, l_idx])
         cdf = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
@@ -1780,27 +3033,33 @@ class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
             init_func = tf.zeros
         else:
             init_func = tf.ones
-        collection = init_func(
-            [
-                self.coupling_meta_data.shape[0],
-                input_data[constants.N_ATOMS_BATCH_TOTAL],
-                self.n_out,
-            ],
-            dtype=self.float_dtype,
-        )
+        # lm_first: equivariant inputs are [lm, atoms, n] (gather lm on axis 0,
+        # einsum reads A_r as "wan"); standard: [atoms, n, lm] (axis 2, "anw").
+        gather_ax = 0 if self.lm_first else 2
+        collection = None
         for instr in self.instructions:
             instruction_collection = self.collector[instr.name]
             A_r = tf.gather(
                 input_data[instr.name],
                 instruction_collection["func_collect_ind"],
-                axis=2,
+                axis=gather_ax,
             )
+            w = getattr(self, f"reducing_{instr.name}")
+            if A_r.dtype != w.dtype:
+                A_r = tf.cast(A_r, w.dtype)
+            if collection is None:
+                collection = init_func(
+                    [
+                        self.coupling_meta_data.shape[0],
+                        input_data[constants.N_ATOMS_BATCH_TOTAL],
+                        self.n_out,
+                    ],
+                    dtype=w.dtype,
+                )
             if self.is_central_atom_type_dependent:
-                w = getattr(self, f"reducing_{instr.name}")
-                eq = "aknw,anw->wak"
+                eq = "aknw,wan->wak" if self.lm_first else "aknw,anw->wak"
             else:
-                w = getattr(self, f"reducing_{instr.name}")
-                eq = "knw,anw->wak"
+                eq = "knw,wan->wak" if self.lm_first else "knw,anw->wak"
             w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             # For performance
             if self.is_central_atom_type_dependent:
@@ -1813,9 +3072,11 @@ class FunctionReduce(TPEquivariantInstruction, ElementsReduceInstructionMixin):
                 collection, instruction_collection["total_sum_ind"], pr
             )
 
-        collection = tf.transpose(collection, [1, 2, 0])
-
-        return collection  # * self.n_instr
+        # collection is [n_cg_out, atoms, n_out] (already lm-first); standard
+        # consumers want [atoms, n_out, lm].
+        if self.lm_first:
+            return collection  # [lm, atoms, n_out]  # * self.n_instr
+        return tf.transpose(collection, [1, 2, 0])  # * self.n_instr
 
     def prepare_variables_for_selected_elements(self, index_to_select):
         if self.is_central_atom_type_dependent:
@@ -1856,18 +3117,24 @@ class FunctionReduceN(
         simplify: bool = False,
         scale=1.0,
         lora_config: dict[str, Any] = None,
+        lm_first: bool = False,
         **kwargs,
     ):
+        self.lm_first = lm_first
         super().__init__(name=name, lmax=np.max(ls_max))
         LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
         self.instructions = instructions
         if isinstance(ls_max, int):
             ls_max = [ls_max] * len(instructions)
         self.ls_max = ls_max
+        self.only_invar = False
+        if np.all(np.array(ls_max) == 0):
+            self.only_invar = True
         self.n_out = n_out
         self.out_norm = out_norm
         # enforce conversion to list of lists
         self.allowed_l_p = [list(lp) for lp in allowed_l_p]
+        self.plist = self.allowed_l_p
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
         self.n_instr = len(self.instructions)
@@ -1895,13 +3162,12 @@ class FunctionReduceN(
 
         collector_data = []
         for p in [-1, 1]:
-            for l in range(self.lmax + 1):
-                if [l, p] in self.allowed_l_p:
-                    for m in range(-l, l + 1):
-                        lbl = 0 if p > 0 else 1
+            for l_idx in range(self.lmax + 1):
+                if [l_idx, p] in self.allowed_l_p:
+                    for m in range(-l_idx, l_idx + 1):
                         # TODO:  possibly move to the base class method
-                        collector_data.append([l, m, f"", p, l])
-                        # collector_data.append([l, m, f"({lbl},0)", p, l])
+                        collector_data.append([l_idx, m, "", p, l_idx])
+                        # collector_data.append([l_idx, m, f"({lbl},0)", p, l_idx])
         cdf = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
@@ -2101,23 +3367,44 @@ class FunctionReduceN(
             if local
             else input_data[constants.ATOMIC_MU_I]
         )
+
+        # Determine gather axis and einsum based on layout
+        if self.lm_first:
+            gather_ax = 0
+            eq_base = "knw,wan->wak"
+            eq_elem_base = "aknw,wan->wak"
+        else:
+            gather_ax = 2
+            eq_base = "knw,anw->wak"
+            eq_elem_base = "aknw,anw->wak"
+
         for instr in self.instructions:
             instruction_collection = self.collector[instr.name]
             A_r = tf.gather(
                 input_data[instr.name],
                 instruction_collection["func_collect_ind"],
-                axis=2,
+                axis=gather_ax,
             )
+            w = getattr(self, f"reducing_{instr.name}")
+
+            A_r = tf.cast(A_r, w.dtype)
             if collection is None:
-                collection = init_func(
-                    [
+                if self.only_invar:
+                    collect_shape = [
+                        1,
+                        tf.shape(atomic_mu_i)[0],
+                        self.n_out,
+                    ]
+                else:
+                    collect_shape = [
                         self.coupling_meta_data.shape[0],
                         tf.shape(atomic_mu_i)[0],
                         self.n_out,
-                    ],
-                    dtype=self.float_dtype,
+                    ]
+                collection = init_func(
+                    collect_shape,
+                    dtype=A_r.dtype,
                 )
-            w = getattr(self, f"reducing_{instr.name}")
             # lora
             if self.lora:
                 lora_tensors = getattr(self, f"reducing_{instr.name}_lora_tensors")
@@ -2125,22 +3412,32 @@ class FunctionReduceN(
 
             w = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             if self.is_central_atom_type_dependent:
-                eq = "aknw,anw->wak"
+                eq = eq_elem_base
                 w = tf.gather(w, atomic_mu_i, axis=0)
-                A_r = A_r[: tf.shape(atomic_mu_i)[0]]
+                if not self.lm_first:
+                    A_r = A_r[: tf.shape(atomic_mu_i)[0]]
+                else:
+                    A_r = A_r[:, : tf.shape(atomic_mu_i)[0], :]
             else:
-                eq = "knw,anw->wak"
+                eq = eq_base
 
             norm = getattr(self, f"norm_{instr.name}")
             pr = tf.einsum(eq, w, A_r, name=f"ein_{instr.name}") * norm
 
-            collection = tf.tensor_scatter_nd_add(
-                collection, instruction_collection["total_sum_ind"], pr
-            )
+            if self.only_invar:
+                collection += tf.reduce_sum(pr, axis=0, keepdims=True)
+            else:
+                collection = tf.tensor_scatter_nd_add(
+                    collection, instruction_collection["total_sum_ind"], pr
+                )
         collection *= self.norm_map
-        collection = tf.transpose(collection, [1, 2, 0])
 
-        return collection
+        # lm_first consumers get [lm, atoms, n_out] regardless of only_invar.
+        # Scalar readout consumers (InvariantLayerRMSNorm, LinMLPOut2ScalarTarget)
+        # must detect lm_first on the upstream and transpose themselves.
+        if self.lm_first:
+            return collection  # [lm, atoms, n_out]
+        return tf.transpose(collection, [1, 2, 0])
 
     def prepare_variables_for_selected_elements(self, index_to_select):
         if self.is_central_atom_type_dependent:
@@ -2169,6 +3466,7 @@ class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin
         instructions: list[TPEquivariantInstruction],
         name: str,
         ls_max: list[int] | int,
+        lm_first: bool = False,
         # n_out: int,
         # allowed_l_p: list[list],
         # out_norm: bool = False,
@@ -2178,6 +3476,7 @@ class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin
         # scale=1.0,
     ):
         super().__init__(name=name, lmax=np.max(ls_max))
+        self.lm_first = lm_first
         self.instructions = instructions
 
         if isinstance(ls_max, int):
@@ -2212,11 +3511,10 @@ class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin
 
         collector_data = []
         for p in [-1, 1]:
-            for l in range(self.lmax + 1):
-                if [l, p] in self.allowed_l_p:
-                    for m in range(-l, l + 1):
-                        lbl = 0 if p > 0 else 1
-                        collector_data.append([l, m, f"", p, l])
+            for l_idx in range(self.lmax + 1):
+                if [l_idx, p] in self.allowed_l_p:
+                    for m in range(-l_idx, l_idx + 1):
+                        collector_data.append([l_idx, m, "", p, l_idx])
         self.coupling_meta_data = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
@@ -2292,14 +3590,21 @@ class CollectInvarBasis(TPEquivariantInstruction, ElementsReduceInstructionMixin
             self.is_built = True
 
     def frwrd(self, input_data, training=False, local=False):
+        # lm_first inputs are [lm, atoms, n]; gather lm on axis 0, then transpose
+        # to [atoms, n, lm] so the flatten order matches the standard layout.
+        gather_ax = 0 if self.lm_first else 2
         collection = []
         for instr in self.instructions:
             instruction_collection = self.collector[instr.name]
             A = tf.gather(
                 input_data[instr.name],
                 instruction_collection["func_collect_ind"],
-                axis=2,
+                axis=gather_ax,
             )
+            if self.lm_first:
+                A = tf.transpose(
+                    A, [1, 2, 0]
+                )  # [collected, atoms, n]->[atoms, n, collected]
             shp = tf.shape(A)
             A = tf.reshape(A, [-1, shp[1] * shp[2]])
             # rms = tf.math.rsqrt(tf.reduce_mean(A**2, axis=-1, keepdims=True) + 1e-16)
@@ -2339,7 +3644,7 @@ class FCRight2Left(
         left: TPEquivariantInstruction,
         right: TPEquivariantInstruction,
         name: str,
-        n_out: int,
+        n_out: int = None,
         left_coefs: bool = True,
         is_central_atom_type_dependent: list[bool] | bool = None,
         number_of_atom_types: int = None,
@@ -2347,17 +3652,22 @@ class FCRight2Left(
         normalize: bool = True,
         norm_out: bool = False,
         lora_config: dict[str, Any] = None,
+        lm_first: bool = False,
+        **kwargs,
     ):
+        self.lm_first = lm_first
         super().__init__(name=name, lmax=left.lmax)
         LORAInstructionMixin.__init__(self, lora_config)  # explicitly call
 
         self.left = left
         self.right = right
         self.left_coefs = left_coefs
-
-        # if not self.left_coefs:
-        # assert left.n_out == n_out
-        self.n_out = n_out
+        if n_out is not None:
+            self.n_out = n_out
+        else:
+            self.n_out = self.left.n_out
+        if not self.left_coefs:
+            assert left.n_out == self.n_out
 
         if is_central_atom_type_dependent is None:
             self.is_central_atom_type_dependent = [False, False]
@@ -2375,6 +3685,11 @@ class FCRight2Left(
                     f" {type(is_central_atom_type_dependent)} in"
                     f" {self.__class__.__name__}_{self.name}"
                 )
+        if any(self.is_central_atom_type_dependent):
+            assert number_of_atom_types is not None, (
+                "number_of_atom_types cannot be None"
+                " if is_central_atom_type_dependent is True"
+            )
         self.number_of_atom_types = number_of_atom_types
         self.norm_out = norm_out
         assert init_vars in [
@@ -2470,7 +3785,7 @@ class FCRight2Left(
                         tf.random.normal(
                             c_shape_left, stddev=init_value, dtype=float_dtype
                         ),
-                        name=f"w_left_FC",
+                        name="w_left_FC",
                     )
                 elif self.init_vars == "uniform":
                     self.w_left = tf.Variable(
@@ -2480,12 +3795,12 @@ class FCRight2Left(
                             shape=c_shape_left,
                             dtype=float_dtype,
                         ),
-                        name=f"w_left_FC",
+                        name="w_left_FC",
                     )
                 elif self.init_vars == "zeros":
                     self.w_left = tf.Variable(
                         tf.zeros(shape=c_shape_left, dtype=float_dtype),
-                        name=f"w_left_FC",
+                        name="w_left_FC",
                     )
                 else:
                     raise NotImplementedError(
@@ -2504,7 +3819,7 @@ class FCRight2Left(
                     tf.random.normal(
                         c_shape_right, stddev=init_value, dtype=float_dtype
                     ),
-                    name=f"w_right_FC",
+                    name="w_right_FC",
                 )
             elif self.init_vars == "uniform":
                 self.w_right = tf.Variable(
@@ -2514,14 +3829,14 @@ class FCRight2Left(
                         shape=c_shape_right,
                         dtype=float_dtype,
                     ),
-                    name=f"w_right_FC",
+                    name="w_right_FC",
                 )
             elif self.init_vars == "zeros":
                 self.w_right = tf.Variable(
                     tf.random.normal(
                         c_shape_right, stddev=init_value, dtype=float_dtype
                     ),
-                    name=f"w_right_FC",
+                    name="w_right_FC",
                 )
             else:
                 raise NotImplementedError(
@@ -2586,6 +3901,16 @@ class FCRight2Left(
             if local
             else input_data[constants.ATOMIC_MU_I]
         )
+
+        if self.lm_first:
+            eq = "knw,wan->wak"
+            eq_elem = "aknw,wan->wak"
+            gather_ax = 0  # angular is axis 0
+        else:
+            eq = self.eq  # "knw,anw->wak"
+            eq_elem = self.eq_elem  # "aknw,anw->wak"
+            gather_ax = -1  # angular is last axis
+
         if self.left_coefs:
             w_left = self.w_left
             # LORA
@@ -2597,17 +3922,18 @@ class FCRight2Left(
             if self.is_central_atom_type_dependent[0]:
                 w_left = tf.gather(w_left, atomic_mu_i, axis=0)
                 left = (
-                    tf.einsum(self.eq_elem, w_left, left, name=f"ein_left")
-                    * self.norm_left
+                    tf.einsum(eq_elem, w_left, left, name="ein_left") * self.norm_left
                 )
             else:
-                left = (
-                    tf.einsum(self.eq, w_left, left, name=f"ein_left") * self.norm_left
-                )
+                left = tf.einsum(eq, w_left, left, name="ein_left") * self.norm_left
         else:
-            left = tf.transpose(left, [2, 0, 1])
+            if not self.lm_first:
+                left = tf.transpose(left, [2, 0, 1])
+            # lm_first: left is already [lm, atoms, n], no transpose needed
 
-        right = tf.gather(input_data[self.right.name], self.collect_from, axis=-1)
+        right = tf.gather(
+            input_data[self.right.name], self.collect_from, axis=gather_ax
+        )
         w_right = self.w_right
         # LORA
         if self.lora:
@@ -2617,23 +3943,20 @@ class FCRight2Left(
         w_right = tf.gather(w_right, self.w_tile_right, axis=-1)
         if self.is_central_atom_type_dependent[1]:
             w_right = tf.gather(w_right, atomic_mu_i, axis=0)
-            # w_right = tf.cast(w_right, dtype=right.dtype)
             right = (
-                tf.einsum(self.eq_elem, w_right, right, name=f"ein_right")
-                * self.norm_right
+                tf.einsum(eq_elem, w_right, right, name="ein_right") * self.norm_right
             )
         else:
-            # w_right = tf.cast(w_right, dtype=right.dtype)
-            right = (
-                tf.einsum(self.eq, w_right, right, name=f"ein_right") * self.norm_right
-            )
+            right = tf.einsum(eq, w_right, right, name="ein_right") * self.norm_right
 
         left = tf.tensor_scatter_nd_add(
-            left, tf.reshape(self.collect_to, [-1, 1]), right, name=f"add_right_to_left"
+            left, tf.reshape(self.collect_to, [-1, 1]), right, name="add_right_to_left"
         )
         if self.norm_out:
             left *= self.norm_out_factor
 
+        if self.lm_first:
+            return left  # already [lm, atoms, n_out]
         return tf.transpose(left, [1, 2, 0])
 
     def prepare_variables_for_selected_elements(self, index_to_select):
@@ -2708,6 +4031,9 @@ class InvariantLayerRMSNorm(TPInstruction):
 
     def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
         x = input_data[self.input.name]
+        if getattr(self.input, "lm_first", False):
+            # [lm, atoms, n_out] -> [atoms, n_out, lm]
+            x = tf.transpose(x, [1, 2, 0])
 
         n_at_b_total = (
             tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
@@ -2720,53 +4046,525 @@ class InvariantLayerRMSNorm(TPInstruction):
             tf.range(n_at_b_total, delta=1, dtype=tf.int32, name="r_map"), [-1, 1, 1]
         )
         if self.type == "full":
-            rms = tf.math.rsqrt(
-                tf.reduce_mean(x**2, axis=1, keepdims=True) + self.epsilon
-            )
+            epsilon = tf.cast(self.epsilon, x.dtype)
+            rms = tf.math.rsqrt(tf.reduce_mean(x**2, axis=1, keepdims=True) + epsilon)
             rms = tf.where(r_map < n_at_b_real, rms, tf.zeros_like(rms))
-            return x * rms * self.scale
+            return x * rms * tf.cast(self.scale, x.dtype)
         elif self.type == "only_nonlin":
             lin = x[:, 0, :]
         elif self.type == "sep_lin_gate":
-            lin = x[:, 0, :] * self.lin_scale
+            lin = x[:, 0, :] * tf.cast(self.lin_scale, x.dtype)
         nonlin = x[:, 1:, :]
         nl_rms = tf.math.rsqrt(
-            tf.reduce_mean(nonlin**2, axis=1, keepdims=True) + self.epsilon
+            tf.reduce_mean(nonlin**2, axis=1, keepdims=True)
+            + tf.cast(self.epsilon, x.dtype)
         )
         nl_rms = tf.where(
-            r_map < n_at_b_real, nonlin * nl_rms * self.scale, tf.zeros_like(nl_rms)
+            r_map < n_at_b_real,
+            nonlin * nl_rms * tf.cast(self.scale, x.dtype),
+            tf.zeros_like(nl_rms),
         )
         return tf.concat([lin[:, tf.newaxis, :], nl_rms], axis=1)
 
 
 @capture_init_args
-class InvariantPade(TPInstruction):
+class EquivariantRMSNorm(TPEquivariantInstruction):
+    """
+    Equivariant RMS normalization with degree-balanced weighting.
+
+    Computes a single per-atom RMS across all angular channels, weighting each
+    degree l equally regardless of its (2l+1) multiplicity or number of history
+    groups. Applies per-(l, parity, hist) learnable scale.
+
+    Preserves equivariance because the degree-balanced sum of squares is
+    rotationally invariant, and the per-(l, parity, hist) scale is shared
+    across all m-components within each group.
+
+    Parameters
+    ----------
+    input : TPEquivariantInstruction
+        The equivariant instruction to normalize.
+    name : str
+        Name of this instruction.
+    center_l0 : bool
+        If True, subtract the feature-mean from L=0 channels before computing
+        the norm (mean over the n_features axis, per angular position).
+    center_l0_bias : bool
+        If True and center_l0 is True, add a learnable per-channel bias to L=0
+        features after normalization. Off by default: a bias shifts all atoms'
+        L=0 features uniformly, which can corrupt meaningfully-zero features.
+    balance_degrees : bool
+        If True, weight each degree l equally in the norm computation
+        (each m-component gets weight 1 / (count_of_channels_with_same_l * n_degrees)).
+        If False, simple mean over all angular channels.
+    normalize_l0_only : bool
+        If True, compute RMS only from l=0 channels and apply normalization
+        only to l=0 features, leaving higher-l channels unchanged.
+    split_norm : bool
+        If True, compute separate RMS for l=0 and l>0 channels, so each group
+        is normalized by its own scale. Preserves equivariance (both norms are
+        rotationally invariant). Off by default to keep a single global norm.
+    init : str
+        Initialization for affine scale: "zeros" or "ones".
+    """
+
     input_tensor_spec = {
         constants.N_ATOMS_BATCH_REAL: {"shape": [], "dtype": "int"},
     }
 
     def __init__(
         self,
-        num: TPInstruction,
-        denum: TPInstruction,
+        input: TPEquivariantInstruction,
         name: str,
+        center_l0: bool = False,
+        center_l0_bias: bool = False,
+        balance_degrees: bool = True,
+        normalize_l0_only: bool = False,
+        split_norm: bool = False,
+        init: str = "zeros",
+        lm_first: bool = False,
         **kwargs,
     ):
-        super().__init__(name=name)
-        self.num = num.name
-        self.denum = denum.name
-        self.n_out = num.n_out
+        self.lm_first = lm_first
+        super().__init__(name=name, lmax=input.lmax)
+        self.input = input
+        self.n_out = input.n_out
+        self.coupling_meta_data = input.coupling_meta_data.copy()
+        if hasattr(input, "coupling_origin"):
+            self.coupling_origin = input.coupling_origin
 
+        self.center_l0 = center_l0
+        self.center_l0_bias = center_l0_bias
+        self.balance_degrees = balance_degrees
+        self.normalize_l0_only = normalize_l0_only
+        self.split_norm = split_norm
+        assert init in ["zeros", "ones"]
+        self.init = init
+
+        # Precompute degree-balanced weights from coupling_meta_data
+        l_values = self.coupling_meta_data["l"].values
+        n_angular = len(l_values)
+
+        if self.balance_degrees:
+            unique_ls = np.unique(l_values)
+            n_degrees = len(unique_ls)
+            weights = np.zeros(n_angular, dtype=np.float64)
+            for l_val in unique_ls:
+                mask = l_values == l_val
+                count = mask.sum()
+                weights[mask] = 1.0 / (count * n_degrees)
+        else:
+            weights = np.ones(n_angular, dtype=np.float64) / n_angular
+        self._degree_weights_np = weights
+
+        # Build (l, parity, hist) group index for affine weight
+        lph_groups = self.coupling_meta_data.groupby(["l", "parity", "hist"]).indices
+        lph_keys = list(lph_groups.keys())
+        self.n_lph_groups = len(lph_keys)
+        expand_idx = np.zeros(n_angular, dtype=np.int32)
+        for gid, (key, indices) in enumerate(lph_groups.items()):
+            for idx in indices:
+                expand_idx[idx] = gid
+        self._expand_index_np = expand_idx
+
+        # Split norm: separate weights for l=0 and l>0
+        if self.split_norm:
+            l0_mask = l_values == 0
+            lgt0_mask = ~l0_mask
+            # l=0 weights: uniform (all l=0 components are m=0 scalars)
+            n_l0 = l0_mask.sum()
+            n_lgt0 = lgt0_mask.sum()
+            self._split_l0_weights_np = np.zeros(n_angular, dtype=np.float64)
+            self._split_lgt0_weights_np = np.zeros(n_angular, dtype=np.float64)
+            if n_l0 > 0:
+                self._split_l0_weights_np[l0_mask] = 1.0 / n_l0
+            if n_lgt0 > 0:
+                if self.balance_degrees:
+                    # Balance within l>0 channels only
+                    unique_lgt0 = np.unique(l_values[lgt0_mask])
+                    n_deg_gt0 = len(unique_lgt0)
+                    for l_val in unique_lgt0:
+                        mask = l_values == l_val
+                        count = mask.sum()
+                        self._split_lgt0_weights_np[mask] = 1.0 / (count * n_deg_gt0)
+                else:
+                    self._split_lgt0_weights_np[lgt0_mask] = 1.0 / n_lgt0
+            self._split_l0_mask_np = l0_mask
+            self._split_lgt0_mask_np = lgt0_mask
+
+        # L=0 mask (used by center_l0 and normalize_l0_only)
+        if self.center_l0 or self.normalize_l0_only:
+            l0_mask = l_values == 0
+            self._l0_mask_np = l0_mask
+
+        # Precompute l0-only weights for norm computation
+        if self.normalize_l0_only:
+            l0_mask = l_values == 0
+            n_l0 = l0_mask.sum()
+            self._l0_norm_weights_np = np.zeros(n_angular, dtype=np.float64)
+            self._l0_norm_weights_np[l0_mask] = 1.0 / n_l0
+            # Non-l0 mask for passthrough
+            self._non_l0_mask_np = ~l0_mask
+
+    @tf.Module.with_name_scope
     def build(self, float_dtype):
         if not self.is_built:
-            pass
-        self.is_built = True
+            if self.lm_first:
+                dw_shape = (-1, 1, 1)
+            else:
+                dw_shape = (1, 1, -1)
+            self.degree_weights = tf.constant(
+                self._degree_weights_np.reshape(dw_shape), dtype=float_dtype
+            )
+            self.expand_index = tf.constant(self._expand_index_np, dtype=tf.int32)
+            eps_val = 1e-8 if float_dtype == tf.float32 else 1e-12
+            self.epsilon = tf.constant(eps_val, dtype=float_dtype)
 
-    def frwrd(self, input_data: dict, training: bool = False, local: bool = False):
-        num = input_data[self.num]
-        denum = input_data[self.denum]
+            # Per-(l, parity, hist) affine scale
+            shape = [self.n_lph_groups, self.n_out]
+            if self.init == "zeros":
+                self.affine_weight = tf.Variable(
+                    tf.zeros(shape, dtype=float_dtype), name="affine_weight"
+                )
+            elif self.init == "ones":
+                self.affine_weight = tf.Variable(
+                    tf.ones(shape, dtype=float_dtype), name="affine_weight"
+                )
 
-        return num / denum
+            # Split norm tensors
+            if self.split_norm:
+                self.split_l0_weights = tf.constant(
+                    self._split_l0_weights_np.reshape(dw_shape), dtype=float_dtype
+                )
+                self.split_lgt0_weights = tf.constant(
+                    self._split_lgt0_weights_np.reshape(dw_shape), dtype=float_dtype
+                )
+                self.split_l0_mask = tf.constant(
+                    self._split_l0_mask_np.reshape(dw_shape)
+                )
+                self.split_lgt0_mask = tf.constant(
+                    self._split_lgt0_mask_np.reshape(dw_shape)
+                )
+
+            # L=0 mask (shared by center_l0 and normalize_l0_only)
+            if self.center_l0 or self.normalize_l0_only:
+                self.l0_mask_f = tf.constant(
+                    self._l0_mask_np.reshape(dw_shape).astype(np.float64),
+                    dtype=float_dtype,
+                )
+
+            # L=0-only normalization weights and masks
+            if self.normalize_l0_only:
+                self.l0_norm_weights = tf.constant(
+                    self._l0_norm_weights_np.reshape(dw_shape), dtype=float_dtype
+                )
+                self.non_l0_mask = tf.constant(self._non_l0_mask_np.reshape(dw_shape))
+
+            # L=0 centering bias (optional)
+            # Variable shape always [1, n_out, n_angular] for checkpoint compat;
+            # transposed at runtime when lm_first=True.
+            if self.center_l0 and self.center_l0_bias:
+                n_angular = len(self._expand_index_np)
+                self.l0_bias = tf.Variable(
+                    tf.zeros([1, self.n_out, n_angular], dtype=float_dtype),
+                    name="l0_bias",
+                )
+
+            self.is_built = True
+
+    def frwrd(self, input_data, training=False, local=False):
+        x = input_data[self.input.name]
+        # x shape: [atoms, n_features, n_angular] (standard)
+        #      or: [n_angular, atoms, n_features] (lm_first)
+
+        n_at_b_total = (
+            tf.shape(input_data[constants.ATOMIC_MU_I_LOCAL])[0]
+            if local
+            else tf.shape(input_data[constants.ATOMIC_MU_I])[0]
+        )
+        n_at_b_real = input_data[constants.N_ATOMS_BATCH_REAL]
+
+        # Axis assignments based on layout
+        if self.lm_first:
+            angular_ax = 0
+            feat_ax = 2
+        else:
+            angular_ax = 2
+            feat_ax = 1
+
+        # 1. Optional L=0 centering
+        if self.center_l0:
+            l0_mask_f = tf.cast(self.l0_mask_f, x.dtype)
+            l0_mean = tf.reduce_mean(x, axis=feat_ax, keepdims=True) * l0_mask_f
+            x = x - l0_mean
+
+        # 2. Degree-balanced RMS
+        x_sq = x**2
+        eps = tf.cast(self.epsilon, x.dtype)
+
+        if self.normalize_l0_only:
+            l0_weights = tf.cast(self.l0_norm_weights, x.dtype)
+            weighted = x_sq * l0_weights
+            norm = tf.reduce_sum(weighted, axis=angular_ax, keepdims=True)
+            norm = tf.reduce_mean(norm, axis=feat_ax, keepdims=True)
+            rms = tf.math.rsqrt(norm + eps)
+        elif self.split_norm:
+            l0_w = tf.cast(self.split_l0_weights, x.dtype)
+            lgt0_w = tf.cast(self.split_lgt0_weights, x.dtype)
+            norm_l0 = tf.reduce_sum(x_sq * l0_w, axis=angular_ax, keepdims=True)
+            norm_l0 = tf.reduce_mean(norm_l0, axis=feat_ax, keepdims=True)
+            norm_lgt0 = tf.reduce_sum(x_sq * lgt0_w, axis=angular_ax, keepdims=True)
+            norm_lgt0 = tf.reduce_mean(norm_lgt0, axis=feat_ax, keepdims=True)
+            rms_l0 = tf.math.rsqrt(norm_l0 + eps)
+            rms_lgt0 = tf.math.rsqrt(norm_lgt0 + eps)
+            l0_m = tf.cast(self.split_l0_mask, x.dtype)
+            lgt0_m = tf.cast(self.split_lgt0_mask, x.dtype)
+            rms = rms_l0 * l0_m + rms_lgt0 * lgt0_m
+        else:
+            degree_weights = tf.cast(self.degree_weights, x.dtype)
+            weighted = x_sq * degree_weights
+            norm = tf.reduce_sum(weighted, axis=angular_ax, keepdims=True)
+            norm = tf.reduce_mean(norm, axis=feat_ax, keepdims=True)
+            rms = tf.math.rsqrt(norm + eps)
+
+        # 3. Zero out padding atoms
+        if self.lm_first:
+            r_map = tf.reshape(
+                tf.range(n_at_b_total, delta=1, dtype=tf.int32), [1, -1, 1]
+            )
+        else:
+            r_map = tf.reshape(
+                tf.range(n_at_b_total, delta=1, dtype=tf.int32), [-1, 1, 1]
+            )
+        rms = tf.where(r_map < n_at_b_real, rms, tf.zeros_like(rms))
+
+        # 4. Per-(l, parity, hist) affine scale
+        scale = tf.gather(
+            tf.cast(self.affine_weight, x.dtype), self.expand_index, axis=0
+        )  # [n_angular, n_out]
+        if self.lm_first:
+            # scale: [n_angular, n_out] → [n_angular, 1, n_out]
+            scale = scale[:, tf.newaxis, :]
+        else:
+            # scale: [n_angular, n_out] → [n_out, n_angular] → [1, n_out, n_angular]
+            scale = tf.transpose(scale)[tf.newaxis, :, :]
+
+        if self.normalize_l0_only:
+            normalized = x * rms * scale
+            non_l0 = tf.cast(self.non_l0_mask, x.dtype)
+            out = normalized * (1.0 - non_l0) + x * non_l0
+        else:
+            out = x * rms * scale
+
+        # 5. Optional L=0 bias
+        if self.center_l0 and self.center_l0_bias:
+            bias_mask = tf.cast(r_map < n_at_b_real, out.dtype)
+            l0_bias = tf.cast(self.l0_bias, out.dtype)  # [1, n_out, n_angular]
+            if self.lm_first:
+                l0_bias = tf.transpose(l0_bias, [2, 0, 1])  # [n_angular, 1, n_out]
+            out = out + l0_bias * l0_mask_f * bias_mask
+
+        return out
+
+
+@capture_init_args
+class EquivariantGate(TPEquivariantInstruction):
+    """
+    Equivariant gating using L=0 (scalar) channels to gate all angular channels.
+
+    Extracts L=0 components from the input, projects them through a learnable
+    linear layer (or optional MLP with SiLU activation), applies sigmoid, and
+    multiplies with all channels. Gate values are computed per (l, parity, hist)
+    group and broadcast over m within each group, preserving equivariance.
+
+    Parameters
+    ----------
+    input : TPEquivariantInstruction
+        The equivariant instruction whose output will be gated.
+    name : str
+        Name of this instruction.
+    hidden_dim : int or None
+        If None, use a single linear projection. If int, use a two-layer MLP
+        with this hidden dimension and a SiLU activation.
+    use_bias : bool
+        If True, add learnable bias to the gate projection(s). Default True.
+    mix_channels : int or None
+        If None (default), gate values are computed per-channel independently
+        (same projection applied to each channel's L=0 features). If int,
+        first mix across n_channels via a bottleneck of this dimension, then
+        project to gate values. This allows the gate to make decisions based
+        on cross-channel information.
+    """
+
+    input_tensor_spec = {}
+
+    def __init__(
+        self,
+        input: TPEquivariantInstruction,
+        name: str,
+        hidden_dim: int = None,
+        use_bias: bool = True,
+        mix_channels: int = None,
+        lm_first: bool = False,
+        **kwargs,
+    ):
+        self.lm_first = lm_first
+        super().__init__(name=name, lmax=input.lmax)
+        self.input = input
+        self.n_out = input.n_out
+        self.coupling_meta_data = input.coupling_meta_data.copy()
+        if hasattr(input, "coupling_origin"):
+            self.coupling_origin = input.coupling_origin
+
+        self.hidden_dim = hidden_dim
+        self.use_bias = use_bias
+        self.mix_channels = mix_channels
+
+        # Identify L=0 indices in the angular dimension
+        l_values = self.coupling_meta_data["l"].values
+        self._l0_indices_np = np.where(l_values == 0)[0].astype(np.int32)
+        self.n_l0 = len(self._l0_indices_np)
+        assert self.n_l0 > 0, "No L=0 channels found — cannot construct gate signal"
+
+        # Runtime normalization constant for the linear projection
+        self._norm_l0 = 1.0 / np.sqrt(self.n_l0)
+
+        # Build (l, parity, hist) group mapping
+        lph_groups = self.coupling_meta_data.groupby(["l", "parity", "hist"]).indices
+        self.n_groups = len(lph_groups)
+
+        n_angular = len(l_values)
+        expand_idx = np.zeros(n_angular, dtype=np.int32)
+        for gid, (key, indices) in enumerate(lph_groups.items()):
+            for idx in indices:
+                expand_idx[idx] = gid
+        self._expand_index_np = expand_idx
+
+        if self.hidden_dim is not None:
+            self._norm_hidden = 1.0 / np.sqrt(self.hidden_dim)
+
+        if self.mix_channels is not None:
+            self._norm_mix = 1.0 / np.sqrt(self.input.n_out)
+            self._norm_mix_back = 1.0 / np.sqrt(self.mix_channels)
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype):
+        if not self.is_built:
+            self.l0_indices = tf.constant(self._l0_indices_np, dtype=tf.int32)
+            self.expand_index = tf.constant(self._expand_index_np, dtype=tf.int32)
+            self.norm_l0 = tf.constant(self._norm_l0, dtype=float_dtype)
+
+            # Optional cross-channel mixing bottleneck
+            if self.mix_channels is not None:
+                self.norm_mix = tf.constant(self._norm_mix, dtype=float_dtype)
+                self.norm_mix_back = tf.constant(self._norm_mix_back, dtype=float_dtype)
+                self.mix_weight = tf.Variable(
+                    tf.random.normal(
+                        [self.input.n_out, self.mix_channels], dtype=float_dtype
+                    ),
+                    name="mix_weight",
+                )
+                self.mix_weight_back = tf.Variable(
+                    tf.random.normal(
+                        [self.mix_channels, self.input.n_out], dtype=float_dtype
+                    ),
+                    name="mix_weight_back",
+                )
+
+            if self.hidden_dim is None:
+                # Linear: [n_l0] -> [n_groups]
+                self.gate_weight = tf.Variable(
+                    tf.random.normal([self.n_l0, self.n_groups], dtype=float_dtype),
+                    name="gate_weight",
+                )
+                if self.use_bias:
+                    self.gate_bias = tf.Variable(
+                        tf.zeros([self.n_groups], dtype=float_dtype),
+                        name="gate_bias",
+                    )
+            else:
+                # MLP: [n_l0] -> [hidden_dim] -> [n_groups]
+                self.norm_hidden = tf.constant(self._norm_hidden, dtype=float_dtype)
+                self.gate_w1 = tf.Variable(
+                    tf.random.normal([self.n_l0, self.hidden_dim], dtype=float_dtype),
+                    name="gate_w1",
+                )
+                self.gate_w2 = tf.Variable(
+                    tf.random.normal(
+                        [self.hidden_dim, self.n_groups], dtype=float_dtype
+                    ),
+                    name="gate_w2",
+                )
+                if self.use_bias:
+                    self.gate_b1 = tf.Variable(
+                        tf.zeros([self.hidden_dim], dtype=float_dtype),
+                        name="gate_b1",
+                    )
+                    self.gate_b2 = tf.Variable(
+                        tf.zeros([self.n_groups], dtype=float_dtype),
+                        name="gate_b2",
+                    )
+
+            self.is_built = True
+
+    def frwrd(self, input_data, training=False, local=False):
+        x = input_data[self.input.name]
+        # x shape: [atoms, n_channels, n_angular] (standard)
+        #      or: [n_angular, atoms, n_channels] (lm_first)
+
+        if self.lm_first:
+            # Gather L=0 from axis 0, then transpose to [atoms, n_channels, n_l0]
+            # for gate computation (which is layout-agnostic scalar math)
+            x_l0 = tf.gather(x, self.l0_indices, axis=0)  # [n_l0, atoms, n_channels]
+            x_l0 = tf.transpose(x_l0, [1, 2, 0])  # [atoms, n_channels, n_l0]
+        else:
+            x_l0 = tf.gather(x, self.l0_indices, axis=2)  # [atoms, n_channels, n_l0]
+
+        # Optional cross-channel mixing bottleneck
+        if self.mix_channels is not None:
+            mix_w = tf.cast(self.mix_weight, x.dtype)
+            mix_w_back = tf.cast(self.mix_weight_back, x.dtype)
+            norm_mix = tf.cast(self.norm_mix, x.dtype)
+            norm_mix_back = tf.cast(self.norm_mix_back, x.dtype)
+            # [atoms, n_channels, n_l0] -> [atoms, mix_channels, n_l0]
+            x_l0 = tf.einsum("anl,nk->akl", x_l0, mix_w) * norm_mix
+            x_l0 = tf.nn.silu(x_l0)
+            # [atoms, mix_channels, n_l0] -> [atoms, n_channels, n_l0]
+            x_l0 = tf.einsum("akl,kn->anl", x_l0, mix_w_back) * norm_mix_back
+
+        # Compute gate values
+        if self.hidden_dim is None:
+            gate_w = tf.cast(self.gate_weight, x.dtype)
+            norm = tf.cast(self.norm_l0, x.dtype)
+            gate = tf.einsum("anl,lg->ang", x_l0, gate_w) * norm
+            if self.use_bias:
+                gate = gate + tf.cast(self.gate_bias, x.dtype)
+        else:
+            w1 = tf.cast(self.gate_w1, x.dtype)
+            w2 = tf.cast(self.gate_w2, x.dtype)
+            norm_l0 = tf.cast(self.norm_l0, x.dtype)
+            norm_h = tf.cast(self.norm_hidden, x.dtype)
+            h = tf.einsum("anl,lh->anh", x_l0, w1) * norm_l0
+            if self.use_bias:
+                h = h + tf.cast(self.gate_b1, x.dtype)
+            h = tf.nn.silu(h)
+            gate = tf.einsum("anh,hg->ang", h, w2) * norm_h
+            if self.use_bias:
+                gate = gate + tf.cast(self.gate_b2, x.dtype)
+
+        gate = tf.sigmoid(gate)  # [atoms, n_out_channels, n_groups]
+
+        # Expand gate to full angular dimension
+        if self.lm_first:
+            # gate: [atoms, n_channels, n_groups]
+            # → transpose to [n_groups, atoms, n_channels]
+            # → gather to [n_angular, atoms, n_channels]
+            gate_t = tf.transpose(gate, [2, 0, 1])
+            gate_expanded = tf.gather(gate_t, self.expand_index, axis=0)
+        else:
+            gate_expanded = tf.gather(gate, self.expand_index, axis=2)
+
+        return x * gate_expanded
 
 
 @capture_init_args
@@ -2787,15 +4585,19 @@ class FunctionReduceParticular(
         n_out: int,
         is_central_atom_type_dependent: bool = False,
         number_of_atom_types: int = None,
+        out_norm: bool = False,
+        lm_first: bool = False,
         **kwargs,
     ):
         super(FunctionReduceParticular, self).__init__(name=name, lmax=selected_l)
+        self.lm_first = lm_first
         self.instructions = instructions
         self.selected_l = selected_l
         self.selected_p = selected_p
         self.n_out = n_out
         self.is_central_atom_type_dependent = is_central_atom_type_dependent
         self.number_of_atom_types = number_of_atom_types
+        self.out_norm = out_norm
 
         if self.is_central_atom_type_dependent:
             assert self.number_of_atom_types is not None
@@ -2808,13 +4610,13 @@ class FunctionReduceParticular(
 
         collector_data = []
         for m in range(-self.selected_l, self.selected_l + 1):
-            lbl = 0 if self.selected_p > 0 else 1
             collector_data.append(
-                [self.selected_l, m, f"", self.selected_p, self.selected_l]
+                [self.selected_l, m, "", self.selected_p, self.selected_l]
             )
         self.coupling_meta_data = pd.DataFrame(
             collector_data, columns=["l", "m", "hist", "parity", "sum_of_ls"]
         )
+        norms = np.zeros(self.coupling_meta_data.shape[0])
         self.selector = {}
         for instr in self.instructions:
             instruction_collection = instr.select_functions(
@@ -2829,12 +4631,15 @@ class FunctionReduceParticular(
                         & (row["parity"] == rw["parity"])
                     ):
                         instruction_collection["total_sum_ind"].append(idx)
+                        norms[idx] += 1
             instruction_collection["total_sum_ind"] = tf.constant(
                 np.array(instruction_collection["total_sum_ind"]).reshape(-1, 1),
                 dtype=tf.int32,
             )
             instruction_collection["n_out"] = instr.n_out
             self.selector[instr.name] = instruction_collection
+        norms[norms == 0] = 1
+        self._out_norm_map = 1 / norms**0.5
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):
@@ -2862,46 +4667,63 @@ class FunctionReduceParticular(
                     f"norm_{k}",
                     tf.constant(1 / n_in**0.5, dtype=float_dtype),
                 )
+            if self.out_norm:
+                self.norm_map = tf.reshape(
+                    tf.constant(self._out_norm_map, dtype=float_dtype), [-1, 1, 1]
+                )
+            else:
+                self.norm_map = tf.constant(1, dtype=float_dtype)
             self.float_dtype = float_dtype
             self.is_built = True
 
     def frwrd(self, input_data, training=False, local=False):
-        collection = tf.zeros(
-            [
-                self.coupling_meta_data.shape[0],
-                input_data[constants.N_ATOMS_BATCH_TOTAL],
-                self.n_out,
-            ],
-            dtype=self.float_dtype,
-        )
+        # lm_first: equivariant inputs are [lm, atoms, n] (gather lm on axis 0,
+        # einsum reads A_r as "wan"); standard: [atoms, n, lm] (axis 2, "anw").
+        gather_ax = 0 if self.lm_first else 2
+        collection = None
         for instr in self.instructions:
             instruction_collection = self.selector[instr.name]
             A_r = tf.gather(
                 input_data[instr.name],
                 instruction_collection["func_collect_ind"],
-                axis=2,
+                axis=gather_ax,
             )
             w = tf.gather(
                 getattr(self, f"reducing_{instr.name}"),
                 instruction_collection["w_l_tile"],
                 axis=-1,
             )
+            if collection is None:
+                collection = tf.zeros(
+                    [
+                        self.coupling_meta_data.shape[0],
+                        input_data[constants.N_ATOMS_BATCH_TOTAL],
+                        self.n_out,
+                    ],
+                    dtype=w.dtype,
+                )
             if self.is_central_atom_type_dependent:
                 w = tf.gather(w, input_data[constants.ATOMIC_MU_I], axis=0)
-                eq = "aknw,anw->wak"
+                eq = "aknw,wan->wak" if self.lm_first else "aknw,anw->wak"
             else:
-                eq = "knw,anw->wak"
+                eq = "knw,wan->wak" if self.lm_first else "knw,anw->wak"
             # w_al = tf.gather(w, instruction_collection["w_l_tile"], axis=-1)
             norm = getattr(self, f"norm_{instr.name}")
+            if A_r.dtype != w.dtype:
+                A_r = tf.cast(A_r, w.dtype)
             pr = tf.einsum(eq, w, A_r, name=f"ein_{instr.name}") * norm
 
             collection = tf.tensor_scatter_nd_add(
                 collection, instruction_collection["total_sum_ind"], pr
             )
 
-        collection = tf.transpose(collection, [1, 2, 0])
-
-        return collection
+        # norm_map is [n_cg_out,1,1], broadcasts over [n_cg_out, atoms, n_out].
+        collection *= self.norm_map
+        # collection is [n_cg_out, atoms, n_out] (already lm-first); standard
+        # consumers want [atoms, n_out, lm].
+        if self.lm_first:
+            return collection
+        return tf.transpose(collection, [1, 2, 0])
 
     def prepare_variables_for_selected_elements(self, index_to_select):
         if self.is_central_atom_type_dependent:
@@ -2977,9 +4799,11 @@ class ZBLPotential(TPInstruction, ElementsReduceInstructionMixin):
         else:
             raise ValueError(f"Unsupported cutoff type {type(cutoff)}")
 
-        self.at_nums = np.array(
-            [atomic_numbers[sym] for sym, ind in element_map.items()]
-        ).reshape(-1, 1)
+        self.at_nums = (
+            np.array([atomic_numbers[sym] for sym, ind in element_map.items()])
+            .astype(np.float64)
+            .reshape(-1, 1)
+        )
 
         # coefficients of ZBL potential
         self.phi_coefs = np.array([0.18175, 0.50986, 0.28022, 0.02817]).reshape(1, -1)
@@ -2992,6 +4816,12 @@ class ZBLPotential(TPInstruction, ElementsReduceInstructionMixin):
 
     def __repr__(self):
         return f"{self.__class__.__name__}_{self.name}"
+
+    def get_element_map(self) -> tuple[np.ndarray, np.ndarray] | None:
+        return (
+            self.element_map_symbols.numpy().astype(str),
+            self.element_map_index.numpy(),
+        )
 
     @tf.Module.with_name_scope
     def build(self, float_dtype):

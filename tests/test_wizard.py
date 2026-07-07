@@ -1,8 +1,6 @@
 """Tests for tensorpotential.cli.wizard."""
 from __future__ import annotations
 
-import os
-import sys
 import pytest
 
 import tensorpotential.cli.wizard as wizard

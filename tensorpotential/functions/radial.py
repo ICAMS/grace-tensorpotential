@@ -46,13 +46,12 @@ class RadialBasisFunction(tf.Module, ABC):
         self.is_build = False
 
     def build(self, float_dtype):
-
         if not self.is_build:
-            self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
+            self.PI = tf.constant(np.pi, dtype=tf.float64, name="pi")
             self.rc = tf.Variable(
                 self.rcut, dtype=float_dtype, name="cutoff", trainable=False
             )
-            self.epsilon = tf.constant(1e-10, dtype=float_dtype, name="small_epsilon")
+            self.epsilon = tf.constant(1e-10, dtype=tf.float64, name="small_epsilon")
             self.is_build = True
 
     @abstractmethod
@@ -160,17 +159,18 @@ class ChebSqrRadialBasisFunction(RadialBasisFunction):
         if not self.is_build:
             super().build(float_dtype)
             if self.normalized:
-                self.norm = tf.convert_to_tensor(self.norm, dtype=float_dtype)
+                self.norm = tf.convert_to_tensor(self.norm, dtype=tf.float64)
         self.is_build = True
 
     def compute_basis(self, r):
+        rc = tf.cast(self.rc, r.dtype)
         if self.reversed:
-            r_rescale = -2.0 * (1.0 - tf.abs(1.0 - r / self.rc) ** self.lmbda) + 1.0
+            r_rescale = -2.0 * (1.0 - tf.abs(1.0 - r / rc) ** self.lmbda) + 1.0
         else:
-            r_rescale = 2.0 * (1.0 - tf.abs(1.0 - r / self.rc) ** self.lmbda) - 1.0
+            r_rescale = 2.0 * (1.0 - tf.abs(1.0 - r / rc) ** self.lmbda) - 1.0
         # basis = 1 - chebvander(r_rescale, self.nfunc+1)[:, 1:]
         basis = chebvander(r_rescale, self.nfunc + 1, self.kind)[:, 1:]
-        basis *= cutoff_func_p_order_poly(r / self.rc, self.pcut)
+        basis *= cutoff_func_p_order_poly(r / rc, self.pcut)
         if self.normalized:
             return basis * self.norm
         else:
@@ -220,19 +220,19 @@ class SinBesselRadialBasisFunction(RadialBasisFunction):
             self.sigma = np.sqrt(sigma2)
 
     def build(self, float_dtype):
-        enforced_float_dtype = float_dtype
+        c_float_dtype = tf.float64
 
         if not self.is_build:
-            self.PI = tf.constant(np.pi, dtype=float_dtype, name="pi")
+            self.PI = tf.constant(np.pi, dtype=c_float_dtype, name="pi")
             self.rc = tf.Variable(
-                self.rcut, dtype=enforced_float_dtype, name="cutoff", trainable=False
+                self.rcut, dtype=float_dtype, name="cutoff", trainable=False
             )
-            self.epsilon = tf.constant(1e-8, dtype=float_dtype, name="small_epsilon")
+            self.epsilon = tf.constant(1e-8, dtype=c_float_dtype, name="small_epsilon")
             if self.normalized:
-                self.urc = tf.constant(1.0, dtype=float_dtype, name="urc")
-                self.mu = tf.constant(self.mu, dtype=float_dtype, name="nbessmu")
+                self.urc = tf.constant(1.0, dtype=c_float_dtype, name="urc")
+                self.mu = tf.constant(self.mu, dtype=c_float_dtype, name="nbessmu")
                 self.sigma = tf.constant(
-                    self.sigma, dtype=float_dtype, name="nbesssigma"
+                    self.sigma, dtype=c_float_dtype, name="nbesssigma"
                 )
             self.is_build = True
 

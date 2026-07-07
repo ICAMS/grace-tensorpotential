@@ -4,6 +4,21 @@ Several GRACE models are pre-trained on large datasets.
 
 **NOTE\!** You should use the "Full Name" column to refer to the model in LAMMPS and ASE.
 
+The **UQ** and **Kokkos** columns indicate, per model:
+
+- **UQ** — the distributed saved model ships with an uncertainty-quantification head (and the checkpoint includes `gmm_artifacts.npz`).
+- **Kokkos** — a `kokkos.npz` LAMMPS-Kokkos export is available. It is now distributed as a
+  **separate file** (no longer bundled inside the model archive); fetch it with
+  `grace_models download <model_name> --kokkos`.
+
+**Precision (fp32 / fp64).** The current release defaults to **fp32**: the bare model name
+(e.g. `GRACE-2L-OMAT-large-ft-E`) resolves to the fp32 saved model and checkpoint — roughly
+2× faster and half the memory, with a negligible accuracy gap (UQ `gamma` max-rel ≤ 5×10⁻⁵).
+A matching full-precision build is published non-default under the **`-fp64`** suffix
+(e.g. `GRACE-2L-OMAT-large-ft-E-fp64`) for tight finite-difference or bit-reproducible work.
+Exceptions: `-mx` models are natively mixed precision, and the 3L models are natively fp32
+(no `-fp64` variant). The Kokkos export is precision-agnostic — one file serves both.
+
 ## **SMAX models**
 
 Reference: [arXiv](https://arxiv.org/abs/2602.23489)
@@ -20,21 +35,23 @@ broad and diverse regions of configurational space. This provides a robust physi
 **Recommendation:** For most general-purpose applications, we recommend using the **SMAX-OMAT** models.
 They offer the best balance of structural robustness (from SMAX) and high-precision energy/force accuracy (from OMat24).
 
-#### **Single-layer, local models**
+#### **Two-layer (2L), semilocal models**
 
-| Model Name | Full Name | Size | κSRME​ | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| GRACE-1L-SMAX-L | GRACE-1L-SMAX-large | large | 0.696 | Single-layer local (SMAX) |
-| **GRACE-1L-SMAX-OMAT-L** | **GRACE-1L-SMAX-OMAT-large** | **large** | 0.338 | **Single-layer local (SMAX \+ OMat24)** |
+| Model Name | Full Name | Size | κSRME​ | UQ | Kokkos | Description |
+| :---- | :---- | :---- | :---- |:---|:---| :---- |
+| GRACE-2L-SMAX-M | GRACE-2L-SMAX-medium | medium | 0.469 | ✓ | ✓ | Two-layer semi-local (SMAX) |
+| GRACE-2L-SMAX-L | GRACE-2L-SMAX-large | large | 0.444 | ✓ | ✓ | Two-layer semi-local (SMAX) |
+| **GRACE-2L-SMAX-OMAT-M** | **GRACE-2L-SMAX-OMAT-medium** | **medium** | 0.197 | ✓ | ✓ | **Two-layer semi-local (SMAX \+ OMat24)** |
+| **GRACE-2L-SMAX-OMAT-L** | **GRACE-2L-SMAX-OMAT-large** | **large** | 0.191 | ✓ | ✓ | **Two-layer semi-local (SMAX \+ OMat24)** |
 
-#### **Two-layer, semilocal models**
 
-| Model Name | Full Name | Size | κSRME​ | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| GRACE-2L-SMAX-M | GRACE-2L-SMAX-medium | medium | 0.469 | Two-layer semi-local (SMAX) |
-| GRACE-2L-SMAX-L | GRACE-2L-SMAX-large | large | 0.444 | Two-layer semi-local (SMAX) |
-| **GRACE-2L-SMAX-OMAT-M** | **GRACE-2L-SMAX-OMAT-medium** | **medium** | 0.197 | **Two-layer semi-local (SMAX \+ OMat24)** |
-| **GRACE-2L-SMAX-OMAT-L** | **GRACE-2L-SMAX-OMAT-large** | **large** | 0.191 | **Two-layer semi-local (SMAX \+ OMat24)** |
+#### **Single-layer (1L), local models**
+
+| Model Name | Full Name | Size | κSRME​ | UQ | Kokkos | Description |
+| :---- | :---- | :---- | :---- |:---|:---| :---- |
+| GRACE-1L-SMAX-L | GRACE-1L-SMAX-large | large | 0.696 | ✓ | ✓ | Single-layer local (SMAX) |
+| **GRACE-1L-SMAX-OMAT-L** | **GRACE-1L-SMAX-OMAT-large** | **large** | 0.338 | ✓ | ✓ | **Single-layer local (SMAX \+ OMat24)** |
+
 
 ## OMAT models
 
@@ -44,25 +61,42 @@ The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/d
 The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by fine-tuning with more emphasis on energies.
  All models listed use a fixed **6 Å cutoff**.
 
-#### Single-layer, local models
 
-| Model Name             | Full Name | Size | $\kappa_\mathrm{SRME}$ | Description                    |
-|:-----------------------| :--- | :--- |:-----------------------|:-------------------------------|
-| **GRACE-1L-OMAT**        | GRACE-1L-OMAT | small | 0.398                  | Single-layer local             |
-| GRACE-1L-OMAT-M-base | GRACE-1L-OMAT-medium-base | medium | 0.380                  | Single-layer local (base)  |
-| **GRACE-1L-OMAT-M**      | GRACE-1L-OMAT-medium-ft-E | medium | 0.417                  | Single-layer local (finetuned on energy)  |
-| GRACE-1L-OMAT-L-base | GRACE-1L-OMAT-large-base | large | **0.354**                 | Single-layer local (base)             |
-| **GRACE-1L-OMAT-L**      | GRACE-1L-OMAT-large-ft-E | large | 0.383                  | Single-layer local (finetuned on energy)            |
+### Three-layer (3L) models
 
-#### Two-layer, semilocal models
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
 
-| Model Name              | Full Name | Size | $\kappa_\mathrm{SRME}$ | Description |
-|:------------------------| :--- | :--- |:-----------------------| :--- |
-| **GRACE-2L-OMAT**         | GRACE-2L-OMAT | small | 0.288                  | Two-layer semi-local |
-| GRACE-2L-OMAT-M-base   | GRACE-2L-OMAT-medium-base | medium | 0.212                  | Two-layer semi-local (base) |
-| **GRACE-2L-OMAT-M**     | GRACE-2L-OMAT-medium-ft-E | medium | 0.217                  | Two-layer semi-local (finetuned on energy) |
-| GRACE-2L-OMAT-L-base    | GRACE-2L-OMAT-large-base | large | **0.165**                  | Two-layer semi-local (base)|
-| **GRACE-2L-OMAT-L**     | GRACE-2L-OMAT-large-ft-E | large | 0.186                 | Two-layer semi-local (finetuned on energy) |
+The **three-layer (3L)** GRACE models add a third message-passing layer for a larger
+effective receptive field. Both use a fixed **6 Å cutoff** and ship with UQ. They are
+natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
+`pair_style grace/3l/kk` (mixed precision) or `pair_style grace/3l/kk/fp32`.
+
+| Model Name | Full Name | Size |  $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+|:--- |:--- |:--- |:------|:-----------------------|:---|:---| :--- |
+| **GRACE-3L-OMAT-large** | GRACE-3L-OMAT-large | large | 0.141 | ✓ | ✓ | Three-layer, trained on OMat24 |
+
+
+### Two-layer (2L), semilocal models
+
+| Model Name              | Full Name | Size | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+|:------------------------| :--- | :--- |:-----------------------|:---|:---| :--- |
+| **GRACE-2L-OMAT**         | GRACE-2L-OMAT | small | 0.288                  | — | — | Two-layer semi-local |
+| GRACE-2L-OMAT-M-base   | GRACE-2L-OMAT-medium-base | medium | 0.212                  | ✓ | ✓ | Two-layer semi-local (base) |
+| **GRACE-2L-OMAT-M**     | GRACE-2L-OMAT-medium-ft-E | medium | 0.217                  | ✓ | ✓ | Two-layer semi-local (finetuned on energy) |
+| GRACE-2L-OMAT-L-base    | GRACE-2L-OMAT-large-base | large | **0.165**                  | ✓ | ✓ | Two-layer semi-local (base)|
+| **GRACE-2L-OMAT-L**     | GRACE-2L-OMAT-large-ft-E | large | 0.186                 | ✓ | ✓ | Two-layer semi-local (finetuned on energy) |
+| **GRACE-2L-OMAT-L-mx**  | **GRACE-2L-OMAT-large-mx**| large | -                     | ✓ | ✓ | **Two-layer semi-local (large, mixed precision)** |
+
+
+### Single-layer (1L), local models
+
+| Model Name             | Full Name | Size | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description                    |
+|:-----------------------| :--- | :--- |:-----------------------|:---|:---|:-------------------------------|
+| **GRACE-1L-OMAT**        | GRACE-1L-OMAT | small | 0.398                  | — | — | Single-layer local             |
+| GRACE-1L-OMAT-M-base | GRACE-1L-OMAT-medium-base | medium | 0.380                  | ✓ | ✓ | Single-layer local (base)  |
+| **GRACE-1L-OMAT-M**      | GRACE-1L-OMAT-medium-ft-E | medium | 0.417                  | ✓ | ✓ | Single-layer local (finetuned on energy)  |
+| GRACE-1L-OMAT-L-base | GRACE-1L-OMAT-large-base | large | **0.354**                 | ✓ | ✓ | Single-layer local (base)             |
+| **GRACE-1L-OMAT-L**      | GRACE-1L-OMAT-large-ft-E | large | 0.383                  | ✓ | ✓ | Single-layer local (finetuned on energy)            |
 
 ***
 
@@ -72,30 +106,50 @@ Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1),
 
 These models are first pre-trained on **OMat24** and then fine-tuned on a combination of the [sAlex](https://huggingface.co/datasets/fairchem/OMAT24#salex-dataset) dataset (10.4M structures) and the [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375) dataset (1.58M structures).
 
-#### Single-layer, local models
+### Three-layer (3L) models
 
-| Model Name | Full Name                  | Size | F1    | $\kappa_\mathrm{SRME}$ | Description |
-| :--- |:---------------------------| :--- |:------|:-----------------------| :--- |
-| GRACE-1L-OAM | GRACE-1L-OAM               | small | 0.824 | 0.516                  | Single-layer local |
-| GRACE-1L-OAM-M| GRACE-1L-OMAT-medium-ft-AM | medium | 0.800 | 0.411         | Single-layer local |
-| GRACE-1L-OAM-L| GRACE-1L-OMAT-large-ft-AM  | large | 0.815 | **0.377**           | Single-layer local |
+The **three-layer (3L)** GRACE models add a third message-passing layer for a larger
+effective receptive field. Both use a fixed **6 Å cutoff** and ship with UQ. They are
+natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
+`pair_style grace/3l/kk` (mixed precision) or `pair_style grace/3l/kk/fp32`.
 
-#### Two-layer, semilocal models
+| Model Name | Full Name | Size | F1 | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+|:--- |:--- |:--- |:------|:-----------------------|:---|:---| :--- |
+| **GRACE-3L-OMAT-large-ft-AM** | GRACE-3L-OMAT-large-ft-AM | large | 0.925 | **0.121** | ✓ | ✓ | Three-layer, fine-tuned on sAlex + MPtraj |
 
-| Model Name | Full Name | Size | F1    | $\kappa_\mathrm{SRME}$ | Description |
-| :--- |:--- | :--- |:------| :--- | :--- |
-| GRACE-2L-OAM | GRACE-2L-OAM | small | 0.880 | 0.294 | Two-layer semi-local |
-| GRACE-2L-OAM-M| GRACE-2L-OMAT-medium-ft-AM | medium | 0.881 | 0.200 | Two-layer semi-local |
-| GRACE-2L-OAM-L| GRACE-2L-OMAT-large-ft-AM | large | 0.889 | **0.168** | Two-layer semi-local |
+### Two-layer (2L), semilocal models
+
+| Model Name | Full Name | Size | F1    | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+| :--- |:--- | :--- |:------| :--- |:---|:---| :--- |
+| GRACE-2L-OAM | GRACE-2L-OAM | small | 0.880 | 0.294 | — | — | Two-layer semi-local |
+| GRACE-2L-OAM-M| GRACE-2L-OMAT-medium-ft-AM | medium | 0.881 | 0.200 | ✓ | ✓ | Two-layer semi-local |
+| GRACE-2L-OAM-L| GRACE-2L-OMAT-large-ft-AM | large | 0.889 | **0.168** | ✓ | ✓ | Two-layer semi-local |
+| **GRACE-2L-OAM-L-mx**| **GRACE-2L-OMAT-large-mx-ft-AM** | large | - | - | ✓ | ✓ | **Two-layer semi-local (large, mixed precision)** |
+
+
+### Single-layer (1L), local models
+
+| Model Name | Full Name                  | Size | F1    | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+| :--- |:---------------------------| :--- |:------|:-----------------------|:---|:---| :--- |
+| GRACE-1L-OAM | GRACE-1L-OAM               | small | 0.824 | 0.516                  | — | — | Single-layer local |
+| GRACE-1L-OAM-M| GRACE-1L-OMAT-medium-ft-AM | medium | 0.800 | 0.411         | ✓ | ✓ | Single-layer local |
+| GRACE-1L-OAM-L| GRACE-1L-OMAT-large-ft-AM  | large | 0.815 | **0.377**           | ✓ | ✓ | Single-layer local |
+
 
 ---
 
 ## Downloading Foundation Models
 
-You can use the `grace_models` utility to download pre-trained GRACE models:  
+You can use the `grace_models` utility to download and inspect pre-trained GRACE models:
 
-- Run `grace_models list` to view the list of available models.  
-- Run `grace_models download <model_name>` to download a specific model.  
+- Run `grace_models list` to view the list of available models (a compact capability
+  table). Add `-v`/`--verbose` for a full per-model block (description, paths, license).
+- Run `grace_models info <model_name>` to show a model's declared capability flags
+  (precision, UQ, parallel) and, if it is already downloaded, introspect the artifact.
+- Run `grace_models download <model_name>` to download a specific model. Add `--kokkos`
+  to also fetch its LAMMPS-Kokkos export (`kokkos.npz`) into the model directory.
+- Run `grace_models checkpoint <model_name>` to download only the checkpoint (used for
+  fine-tuning).
 
 These models can be used for simulations within [ASE](../quickstart/#usage-in-ase) and [LAMMPS](../quickstart/#usage-in-lammps).  
 

@@ -2,8 +2,17 @@ from tensorpotential.instructions.output import (
     CreateOutputTarget,
     LinearOut2Target,
 )
-from tensorpotential.instructions.base import *
-from tensorpotential.instructions.compute import *
+from tensorpotential.instructions.base import BondLength, InstructionManager, ScaledBondVector
+from tensorpotential.instructions.compute import (
+    FunctionReduceN as FunctionReduce,
+    MLPRadialFunction,
+    ProductFunction,
+    RadialBasis,
+    ScalarChemicalEmbedding,
+    SingleParticleBasisFunctionScalarInd,
+    SphericalHarmonic,
+)
+from tensorpotential import constants
 from tensorpotential.utils import Parity
 
 

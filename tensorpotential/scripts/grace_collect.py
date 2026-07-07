@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import glob
-import sys
 import os
 import numpy as np
 import pandas as pd

@@ -116,7 +116,7 @@ class ReferenceTensorDataBuilder(AbstractDataBuilder):
     def postprocess_dataset(self, batches):
         if self.normalize_weights:
             weight_sum = np.sum(
-                np.sum(b[cc.DATA_REFERENCE_TENSOR_WEIGHT]) for b in batches
+                [np.sum(b[cc.DATA_REFERENCE_TENSOR_WEIGHT]) for b in batches]
             )
 
             for b in batches:

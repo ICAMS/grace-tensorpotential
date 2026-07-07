@@ -1,5 +1,5 @@
 from .registry import REGISTERED_PRESETS
-from . import presets
+from . import presets as presets
 
 try:
     import tensorpotential.experimental.presets
@@ -7,7 +7,7 @@ except ImportError:
     pass
 
 try:
-    import tensorpotential.extra.gen_tensor.model
+    import tensorpotential.extra.gen_tensor.model  # noqa: F401
 except ImportError:
     pass
 from typing import Any, Callable

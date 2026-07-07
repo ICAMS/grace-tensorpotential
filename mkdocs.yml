@@ -52,6 +52,7 @@ nav:
   - Utilities: gracemaker/utilities.md
   - Foundation models: gracemaker/foundation.md
   - Tutorials: gracemaker/tutorials.md
+  - Uncertainty Quantification: gracemaker/uq.md
   - Fitting Generic Tensors: gracemaker/gen_tensor.md
   - FAQs: gracemaker/faq.md
 
@@ -64,6 +65,9 @@ markdown_extensions:
       separator: "-"
   - attr_list
   - md_in_html
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
   - pymdownx.blocks.caption
 
 extra_javascript:

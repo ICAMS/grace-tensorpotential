@@ -9,6 +9,7 @@ data:
 
 potential:
   preset: "LINEAR"
+  param_dtype: float64
 
 fit:
   loss: {

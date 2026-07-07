@@ -2,17 +2,16 @@
 import argparse
 import logging
 import os
-import sys
 
 import pandas as pd
 from ase.calculators.singlepoint import SinglePointCalculator
+from ase.io import write
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 logger = logging.getLogger()
 
 
-from ase.io import write
 
 
 def build_parser():

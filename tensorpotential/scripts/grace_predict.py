@@ -1,27 +1,22 @@
-#!/usr/bin/env python
-
+import argparse
+import logging
+import os
 import warnings
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+from tensorpotential.calculator import TPCalculator
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import sys
-import os
-import pandas as pd
-import numpy as np
-import argparse
-
-from tensorpotential.calculator import TPCalculator
-
-import logging
+tqdm.pandas()
 
 LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 logger = logging.getLogger()
-
-from tqdm import tqdm
-
-tqdm.pandas()
 
 NUMBER_ASSERT_ERRORS_SHOWN = 3
 
@@ -118,7 +113,7 @@ def main(args=None):
     logger.info(f"Loading dataset from: {dataset_file}")
     df = pd.read_pickle(dataset_file, compression="gzip")
 
-    logger.info(f"Starting prediction")
+    logger.info("Starting prediction")
 
     df["prediction"] = df.progress_apply(predict, axis=1, args=(calc, raise_errors))
     df["energy_predicted"] = df["prediction"].map(lambda x: x.get("energy"))

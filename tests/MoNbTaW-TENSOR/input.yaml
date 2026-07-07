@@ -16,6 +16,7 @@ potential:
            n_rad_base: 4, n_rad_max: 8, embedding_size: 8, n_mlp_dens: 4, max_order: 2}
   scale: False
   shift: False
+  param_dtype: float64
 
 fit:
   compute_function: ComputeBatchEFTensor

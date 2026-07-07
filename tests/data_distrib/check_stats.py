@@ -22,7 +22,7 @@ print(f"{datasets_fnames=}")
 
 
 def dataset_fn(context):
-    print(f"context=", context)
+    print("context=", context)
     total = context.num_input_pipelines
     ind = context.input_pipeline_id
     datasets = [

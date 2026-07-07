@@ -36,7 +36,7 @@ def extract_const_shift_scale(fs_ins_dict):
         scale = const_shift_scale.scale
         try:
             scale = scale.numpy()
-        except:
+        except Exception:
             pass
 
         constant_shift = const_shift_scale.constant_shift
@@ -144,7 +144,7 @@ def export_to_yaml(
             ls = []
             ms = []
             for mon in mons:
-                l, m = map(int, p.findall(mon))
+                l, m = map(int, p.findall(mon))  # noqa: E741
                 ls.append(l)
                 ms.append(m)
             total_ls.add(tuple(ls))

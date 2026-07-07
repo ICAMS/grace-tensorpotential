@@ -1,22 +1,14 @@
+import logging
 import os
 
-import pytest
 
 from .utils import general_integration_test
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-import logging
-
-LOG_FMT = "%(asctime)s %(levelname).1s - %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FMT, datefmt="%Y/%m/%d %H:%M:%S")
 log = logging.getLogger()
 
 
-import tensorflow as tf
-
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
 
 
 def test_TENSOR_1L():

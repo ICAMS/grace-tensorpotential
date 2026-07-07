@@ -116,9 +116,42 @@ Here `-r` flag stands for reading checkpoint with best test loss (usually, it is
 
 This will generate the `seed/1/FS_model.yaml` file, which can be used in [ASE](#gracefs) or [LAMMPS](#lammps-gracefs).
 
+#### LAMMPS Kokkos `.npz` (GRACE-1L / GRACE-2L / GRACE-3L)
+
+For TensorFlow-free GPU/OpenMP runs with `pair_style grace/1l/kk`, `grace/2l/kk`
+or `grace/3l/kk`, export the model weights to `.npz` using
+[`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style):
+
+```bash
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
+```
+
+The architecture (1L, 2L, or 3L) is auto-detected. The resulting `.npz` is loaded directly
+by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L (Kokkos, no TensorFlow)](#lammps-grace-1l-grace-2l-kokkos-no-tensorflow).
+
 ---
 
-### Build Active Set (for GRACE/FS Only)
+### Uncertainty quantification 
+
+#### Uncertainty quantification (UQ) artifact (for GRACE-1L/2L/3L models)
+
+To equip a fitted model with a per-atom extrapolation grade (`gamma`), build a
+GMM-UQ artifact from the training set with [`grace_uq build`](../uq/#grace_uq-build):
+
+```bash
+grace_uq build --model-yaml /path/to/model.yaml \
+               --checkpoint /path/to/checkpoint/checkpoint.best_test_loss.index \
+               --train-data train.pkl.gz \
+               --artifact-path gmm_artifacts.npz
+```
+
+This writes `gmm_artifacts.npz` plus a `saved_model/` carrying the `compute_uq`
+signature next to it. See the [Uncertainty Quantification](../uq/) page for the
+full pipeline and options, and [`export_kokkos --uq-artifacts`](../utilities/#baking-in-uq-uncertainty-quantification-artifacts)
+to bake the artifact into the Kokkos `.npz` for LAMMPS.
+
+
+#### Build Active Set (for GRACE/FS Only)
 
 For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
 Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
@@ -165,6 +198,55 @@ calc = TPCalculator('path/to/saved_model',
 If `min_dist` is given, calculator will raise an exception when it encounters a distance shorter than `min_dist`
 (useful for preventing non-physical short distances during relaxation).
 
+##### Aggregation engine: the `mode` argument
+
+!!! warning "Be aware: GRACE is XLA-JIT-compiled per input shape"
+    Under the hood the calculator is XLA-JIT-compiled for a **specific input shape** —
+    the padded number of atoms *and* number of neighbours. The **first** evaluation of
+    each new shape triggers a fresh compilation that takes **~20 seconds**; afterwards
+    that shape runs at full speed. If the padding settings and the order in which
+    structures are evaluated are not chosen well, the calculator keeps hitting new
+    shapes and **recompiles frequently**, which can dominate the wall-clock time and
+    make overall performance very poor — even though each individual evaluation is fast.
+
+    To avoid this, pick a strategy that keeps the shape stable (or slowly changing):
+    match the `mode` below to your workload, tune the padding (`pad_neighbors_fraction`,
+    `pad_atoms_number`), and — for heterogeneous scans — feed structures largest-first
+    (see the tips further down).
+
+`TPCalculator` has two neighbor-aggregation engines, selected with `mode`:
+
+| `mode` | Engine | Use it for | Why |
+|---|---|---|---|
+| `"uniform"` | dense (reshape) | a **single structure**, an **MD / relaxation trajectory**, or a **uniform dataset** (all evaluated structures have ~the same size) | up to ~1.7× faster per structure. Pads tight from the start. |
+| `"diverse"` (default) | segment_sum | scanning **many very different structures** (a heterogeneous dataset) | tolerant of size variation without exploding the number of XLA compiles |
+
+
+```python
+# single structure / MD / relaxation / uniform dataset
+calc = TPCalculator('path/to/saved_model', mode="uniform")
+
+# scanning a heterogeneous dataset
+calc = TPCalculator('path/to/saved_model', mode="diverse")  # the default
+```
+
+!!! note "Why two modes (and no automatic switch)"
+    The dense engine is generally faster for heavy models for any *given* structure,
+     but it pads tightly, so a stream of differently-sized structures forces a fresh 
+     XLA compile per distinct size.
+     The calculator evaluates one structure per call and cannot see the whole sequence in advance, so it
+    cannot reliably auto-detect the regime.
+
+!!! tip "Sort `diverse` scans by decreasing atom count"
+    Feeding structures **largest first** lets the first compiled shape cover all the
+    rest, minimizing recompiles. Ascending (smallest first) is the worst case: it can
+    mint a fresh compile at nearly every size step (an order of magnitude more compiles
+    than descending).
+
+**Fallback:** if the model cannot run the requested engine (an in-memory model is single-engine, fixed at
+build time; a SavedModel may export only `compute`), the calculator falls back to the available engine and
+logs a warning. SavedModels exported from a dense-capable model carry both engines and switch freely.
+
 ---
 
 #### GRACE/FS
@@ -196,6 +278,8 @@ All GRACE pair styles require `units metal`. The right style depends on your mod
 | `grace/1layer/chunk` | 1-layer | yes | yes | always available |
 | `grace/2layer/chunk` | 2-layer | yes | yes | always available |
 | `grace/2layer/parallel` | 2-layer | yes | yes | always available |
+| `grace/1l/kk` | 1-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
+| `grace/2l/kk` | 2-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
 | `grace/fs` | FS | no | yes | always available |
 | `grace/fs/kk` | FS (Kokkos) | no | yes + GPU/OpenMP | always available |
 
@@ -243,6 +327,9 @@ pair_coeff * * /path/to/2layer_saved_model Al Li
 * For two-layer models parallization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
 * For memory-reduced version use `grace/1layer/chunk` or `grace/2layer/chunk` - both of them support MPI parallelism.
 * For GRACE/FS models use `grace/fs` (or `grace/fs/kk` for GPU/OpenMP).
+* For TensorFlow-free GPU/OpenMP runs of GRACE-1L or GRACE-2L models use
+  `grace/1l/kk` / `grace/2l/kk` after exporting weights to `.npz` with
+  [`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style).
 
 If you don't have CUDA-aware MPI, use
 ```bash
@@ -265,6 +352,50 @@ A Kokkos-accelerated variant (`grace/fs/kk`) adds GPU and OpenMP support (`newto
 pair_style grace/fs/kk
 pair_coeff * * FS_model.yaml Mo Nb Ta W
 ```
+
+#### LAMMPS: GRACE-1L / GRACE-2L (Kokkos, no TensorFlow)
+
+`grace/1l/kk` and `grace/2l/kk` run GRACE-1L / GRACE-2L models on
+GPU/OpenMP without TensorFlow at LAMMPS runtime. They read a `.npz`
+weights file produced from a fitted `model.yaml` + checkpoint by
+[`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style).
+
+!!! warning "Standard architectures only"
+    The Kokkos pair styles support the **standard GRACE-1L / GRACE-2L
+    architectures** ([built-in presets](../presets/) and
+    [foundation models](../foundation/)). Custom GRACE models with
+    non-standard instruction graphs, unsupported activations, or
+    dimensions exceeding the Kokkos compile-time caps are not supported —
+    `export_kokkos` will reject them with a clear error. For arbitrary
+    custom architectures use the TensorFlow-based pair styles
+    (`grace`, `grace/2layer/parallel`, …) or GRACE-FS instead.
+
+```bash
+grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
+```
+
+Then in the LAMMPS input:
+
+```
+pair_style grace/1l/kk    # or grace/2l/kk
+pair_coeff * * grace_weights.npz Mo Nb Ta W
+```
+
+`newton on` is required (set automatically by the standard `lmp_kk -k on g 1 -sf kk -pk kokkos newton on neigh half ...` invocation).
+
+**Runtime precision.** `export_kokkos` always writes the `.npz` in float64, but
+the LAMMPS pair style picks the compute precision:
+
+| `pair_style` | NN math | Geometry |
+|---|---|---|
+| `grace/{1l,2l}/kk`       | fp64 | fp64 |
+| `grace/{1l,2l}/kk/mixed` | fp32 | fp64 |
+| `grace/{1l,2l}/kk/fp32`  | fp32 | fp32 |
+
+The same `.npz` works with all variants — choose by your accuracy / throughput
+trade-off. Empirically, `fp32` and `mixed` agree with `fp64` to roughly
+**1e-6 relative precision** on energies and forces — well within typical MD
+requirements.
 
 To monitor extrapolation grade:
 

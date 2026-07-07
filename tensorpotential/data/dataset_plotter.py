@@ -117,7 +117,7 @@ class DatasetHistPlotter(IDatasetPlotter):
                     ax.set_ylabel("Count")
                     ax.set_xscale(xscale)
                     ax.set_yscale(yscale)
-                except Exception as e:
+                except Exception:
                     log.warning(
                         f'DatasetHistPlotter: Failed to plot distribution for target "{target}" for dataset "{ds_lbl}", skipping'
                     )

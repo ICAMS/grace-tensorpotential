@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+
 import gc
 import importlib
 import logging
 import os
-import re
 import sys
 
+import tensorflow as tf
+
+
 from tensorpotential.cli.data import FutureDistributedDataset
-from tensorpotential.cli.wizard import generate_template_input  # re-export
 
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict
 
 from tqdm import tqdm
 
@@ -21,8 +23,29 @@ from tensorpotential.potentials import (
     get_preset,
 )
 
-from tensorpotential.loss import *
-from tensorpotential.metrics import *
+from tensorpotential.loss import (
+    L2Loss,
+    LossFunction,
+    WeightedHuberEnergyPerAtomLoss,
+    WeightedHuberForceLoss,
+    WeightedHuberStressLoss,
+    WeightedHuberVirialLoss,
+    WeightedMAEEPALoss,
+    WeightedMAEStressLoss,
+    WeightedPiecewiseLinearEnergyPerAtomLoss,
+    WeightedPiecewiseLinearForceLoss,
+    WeightedPiecewiseLinearStressLoss,
+    WeightedSSEEnergyPerAtomLoss,
+    WeightedSSEForceLoss,
+    WeightedSSEStressLoss,
+    WeightedSSEVirialLoss,
+)
+from tensorpotential.metrics import (
+    ComputeMetrics,
+    EnergyMetrics,
+    ForceMetrics,
+    VirialMetrics,
+)
 from tensorpotential.instructions.base import (
     str_to_class,
     TPInstruction,
@@ -63,6 +86,14 @@ def construct_model(
     """
     preset = potential_config.get("preset")
     kwargs = potential_config.get("kwargs", {})
+    # `dense_nbr` is a first-class potential knob (input.yaml::potential::dense_nbr,
+    # default False): broadcast it into the build kwargs so the model's
+    # InstructionManager enables the dense neighbor-aggregation path on the
+    # equivariant SPBF instructions. The data builder reads the same key, so model
+    # and data stay in sync. Explicit potential::dense_nbr wins over a kwargs entry.
+    kwargs["dense_nbr"] = potential_config.get(
+        tc.INPUT_POTENTIAL_DENSE_NBR, kwargs.get("dense_nbr", False)
+    )
     if kwargs:
         log.info(f"Model kwargs: {kwargs}")
 
@@ -97,7 +128,7 @@ def construct_model(
         )
     else:
         raise ValueError(
-            f"Neither `preset` nor `custom` specified in input.yaml::potential"
+            "Neither `preset` nor `custom` specified in input.yaml::potential"
         )
 
     communicated_keys = None
@@ -123,6 +154,15 @@ def convert_to_tensors_for_model(tp, train_data, test_data, strategy):
         train_data, test_data = train_data.generate_dataset(
             strategy=strategy, signatures=sigs
         )
+        return train_data, test_data
+
+    # Streaming datasets: set model signatures for lazy key filtering + conversion
+    from tensorpotential.data.streaming import StreamingDatasetWrapper
+
+    if isinstance(train_data, StreamingDatasetWrapper):
+        train_data.set_model_signatures(sigs)
+        if isinstance(test_data, StreamingDatasetWrapper):
+            test_data.set_model_signatures(sigs)
         return train_data, test_data
 
     train_batches = []
@@ -240,6 +280,7 @@ def build_loss_function(fit_config):
                 "square": WeightedSSEEnergyPerAtomLoss,
                 "huber": WeightedHuberEnergyPerAtomLoss,
                 "mae": WeightedMAEEPALoss,
+                "piecewise_linear": WeightedPiecewiseLinearEnergyPerAtomLoss,
             },
         )
 
@@ -250,6 +291,7 @@ def build_loss_function(fit_config):
             {
                 "square": WeightedSSEForceLoss,
                 "huber": WeightedHuberForceLoss,
+                "piecewise_linear": WeightedPiecewiseLinearForceLoss,
             },
         )
 
@@ -271,6 +313,7 @@ def build_loss_function(fit_config):
                 "square": WeightedSSEStressLoss,
                 "huber": WeightedHuberStressLoss,
                 "mae": WeightedMAEStressLoss,
+                "piecewise_linear": WeightedPiecewiseLinearStressLoss,
             },
         )
 

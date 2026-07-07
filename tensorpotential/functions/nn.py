@@ -4,9 +4,6 @@ from typing import Callable, Optional, Any
 
 import tensorflow as tf
 
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="safe")
-
 
 from tensorpotential.functions.lora import (
     initialize_lora_tensors,
@@ -134,11 +131,126 @@ class Linear(tf.Module):
         w = w * self.norm
         if w.dtype != x.dtype:
             x = tf.cast(x, dtype=w.dtype)
-        x = tf.einsum("...k,...kn->...n", x, w)
+        # For a plain 2-D weight, use the matmul-form einsum (no ellipsis on w) so
+        # XLA lowers it to a GEMM whose weight-gradient is a GEMM too. The
+        # ellipsis-on-both-operands form ("...k,...kn->...n") is lowered as
+        # broadcast-multiply + reduce, making dw a reduction over the (huge) batch
+        # axis -- which XLA 2.22-dev's reduce emitter mis-tiles into ~227KB ptxas
+        # register spills.
+        xs = tf.shape(x)
+        x2 = tf.reshape(x, [-1, xs[-1]])
+        y2 = tf.matmul(x2, w)
+        x = tf.reshape(y2, tf.concat([xs[:-1], [tf.shape(w)[-1]]], axis=0))
+        # x = tf.einsum("...k,...kn->...n", x, w)
         if self.use_bias:
             x += self.b * self.norm
 
         return x
+
+
+class ElementDependentLinear(tf.Module):
+    """Linear layer with per-element-type weights.
+
+    Weights have shape ``[n_types, n_in, n_out]``; forward gathers per-atom
+    weights via ``atomic_mu_i`` and then applies a per-atom matmul.
+    """
+
+    def __init__(
+        self,
+        n_in: int,
+        n_out: int,
+        n_types: int,
+        name: str = "ElementDependentLinear",
+        no_weight_decay: bool = False,
+        use_bias: bool = False,
+        init_type: str = "normal",
+        normalize: bool = True,
+    ):
+        super().__init__(name=name)
+        self.n_in = n_in
+        self.n_out = n_out
+        self.n_types = n_types
+        self.use_bias = use_bias
+
+        self.init_type = init_type
+        assert init_type in ["normal", "uniform", "zeros"]
+
+        self.normalize = normalize
+        self.norm = 1.0
+
+        if no_weight_decay:
+            self.weight_decay = "no_decay"
+        else:
+            self.weight_decay = "_"
+        self.is_built = False
+
+    @tf.Module.with_name_scope
+    def build(self, float_dtype=tf.float64, init_value=1.0):
+        if self.is_built:
+            return
+        var_name = f"ElementDependentLinear_{self.name}_{self.weight_decay}"
+        w_shape = [self.n_types, self.n_in, self.n_out]
+        b_shape = [self.n_types, 1, self.n_out]
+        if self.normalize:
+            self.norm = 1.0 / self.n_in**0.5
+        else:
+            init_value = init_value / self.n_in**0.5
+        if self.init_type == "normal":
+            self.w = tf.Variable(
+                tf.random.normal(shape=w_shape, stddev=init_value, dtype=float_dtype),
+                name=var_name,
+            )
+            if self.use_bias:
+                self.b = tf.Variable(
+                    tf.random.normal(
+                        shape=b_shape, stddev=init_value, dtype=float_dtype
+                    ),
+                    name=var_name + "_bias",
+                )
+        elif self.init_type == "uniform":
+            self.w = tf.Variable(
+                tf.random.uniform(
+                    minval=-init_value,
+                    maxval=init_value,
+                    shape=w_shape,
+                    dtype=float_dtype,
+                ),
+                name=var_name,
+            )
+            if self.use_bias:
+                self.b = tf.Variable(
+                    tf.random.uniform(
+                        minval=-init_value,
+                        maxval=init_value,
+                        shape=b_shape,
+                        dtype=float_dtype,
+                    ),
+                    name=var_name + "_bias",
+                )
+        elif self.init_type == "zeros":
+            self.w = tf.Variable(
+                tf.zeros(shape=w_shape, dtype=float_dtype), name=var_name
+            )
+            if self.use_bias:
+                self.b = tf.Variable(
+                    tf.zeros(shape=b_shape, dtype=float_dtype),
+                    name=var_name + "_bias",
+                )
+        self.norm = tf.convert_to_tensor(self.norm, dtype=self.w.dtype)
+        self.is_built = True
+
+    @tf.Module.with_name_scope
+    def __call__(self, x: tf.Tensor, atomic_mu_i: tf.Tensor) -> tf.Tensor:
+        # x: [atoms, n_in]; atomic_mu_i: [atoms]
+        w = self.w * self.norm
+        wg = tf.gather(w, atomic_mu_i, axis=0)  # [atoms, n_in, n_out]
+        if x.dtype != wg.dtype:
+            x = tf.cast(x, dtype=wg.dtype)
+        y = tf.einsum("ak,akn->an", x, wg)
+        if self.use_bias:
+            bg = tf.gather(self.b * self.norm, atomic_mu_i, axis=0)
+            y = y + tf.squeeze(bg, axis=1)
+        return y
 
 
 class DenseLayer(tf.Module):
@@ -198,7 +310,14 @@ class DenseLayer(tf.Module):
         w = w * self.norm
         if x.dtype != w.dtype:
             x = tf.cast(x, dtype=w.dtype)
-        x = tf.einsum("...k,...kn->...n", x, w)
+        # Plain 2-D weight: use matmul (not the ellipsis-on-both einsum) so XLA lowers
+        # it to a GEMM whose weight-gradient is also a GEMM, not a reduce over the
+        # (huge) batch axis -- which XLA 2.22-dev's reduce emitter mis-tiles into large
+        # ptxas register spills (same fix as Linear above).
+        xs = tf.shape(x)
+        x2 = tf.reshape(x, [-1, xs[-1]])
+        y2 = tf.matmul(x2, w)
+        x = tf.reshape(y2, tf.concat([xs[:-1], [tf.shape(w)[-1]]], axis=0))
         if self.use_bias:
             x += self.b
         if self.activation is not None:
@@ -301,11 +420,18 @@ class FullyConnectedMLP(tf.Module):
                     sm.build(float_dtype)
         self.is_built = True
 
-    def __call__(self, x: tf.Tensor) -> tf.Tensor:
+    def __call__(
+        self, x: tf.Tensor, return_hidden: bool = False
+    ) -> tf.Tensor | tuple[tf.Tensor, tf.Tensor]:
+        hidden = None
         for i in range(self.nlayers):
+            if return_hidden and i == self.nlayers - 1:
+                hidden = x
             layer = getattr(self, f"layer{i}")
             x = layer(x)
 
+        if return_hidden:
+            return x, hidden
         return x
 
     def __repr__(self):

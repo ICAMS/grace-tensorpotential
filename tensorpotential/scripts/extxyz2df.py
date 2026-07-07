@@ -2,7 +2,6 @@
 
 import os
 import argparse
-import sys
 from tensorpotential.cli.data import load_extxyz
 
 import logging
@@ -51,7 +50,7 @@ def main(args=None):
     logging.info(f"Output filename: {output_dataset_filename}")
 
     df = load_extxyz(extxyz_filename)
-    logging.info(f"Saving dataframe")
+    logging.info("Saving dataframe")
     df.to_pickle(output_dataset_filename, compression="gzip")
     logging.info(
         f"Saved dataframe to {output_dataset_filename} ({sizeof_fmt(output_dataset_filename)})"

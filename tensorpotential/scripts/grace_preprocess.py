@@ -7,9 +7,28 @@ import os
 import shutil
 import sys
 
-import tqdm
-from ase.data import chemical_symbols
 import numpy as np
+import pandas as pd
+import tensorflow as tf
+import tqdm
+
+from tensorpotential import constants as tc
+from tensorpotential.data.databuilder import (
+    GeometricalDataBuilder,
+    ReferenceEnergyForcesStressesDataBuilder,
+    split_batches_into_buckets,
+)
+from tensorpotential.data.process_df import (
+    ASE_ATOMS,
+    ENERGY_CORRECTED_COL,
+    FORCES_COL,
+    STRESS_COL,
+)
+from tensorpotential.utils import NumpyEncoder
+
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 EQUI_STRUCTURE_STRATEGY = "structures"
 EQUI_ATOMS_STRATEGY = "atoms"
@@ -225,32 +244,7 @@ OMOL_N_ELEMENTS = [
 ]
 
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-
-
 orders = ["n_neighbours", "n_atoms", "n_structures"]
-
-import pandas as pd
-
-from tensorpotential.data.databuilder import (
-    GeometricalDataBuilder,
-    ReferenceEnergyForcesStressesDataBuilder,
-    split_batches_into_buckets,
-)
-from tensorpotential import constants as tc
-
-import tensorflow as tf
-tf.config.experimental.enable_tensor_float_32_execution(False)
-tf.experimental.numpy.experimental_enable_numpy_behavior(dtype_conversion_mode="all")
-
-from tensorpotential.data.process_df import (
-    ASE_ATOMS,
-    ENERGY_CORRECTED_COL,
-    FORCES_COL,
-    STRESS_COL,
-)
-from tensorpotential.utils import NumpyEncoder
 
 
 remap_type_to_tf_dtype = {
@@ -320,9 +314,9 @@ def get_window_stat(batch_list):
     stat_dict = {"n_structures": 0, "n_atoms": 0, "n_neighbours": 0}
 
     for b in batch_list:
-        stat_dict["n_structures"] += b[tc.N_STRUCTURES_BATCH_REAL].numpy()
-        stat_dict["n_atoms"] += b[tc.N_ATOMS_BATCH_REAL].numpy()
-        stat_dict["n_neighbours"] += b[tc.N_NEIGHBORS_REAL].numpy()
+        stat_dict["n_structures"] += int(b[tc.N_STRUCTURES_BATCH_REAL].numpy())
+        stat_dict["n_atoms"] += int(b[tc.N_ATOMS_BATCH_REAL].numpy())
+        stat_dict["n_neighbours"] += int(b[tc.N_NEIGHBORS_REAL].numpy())
 
     return stat_dict
 
@@ -459,7 +453,9 @@ def build_parser():
     parser.add_argument("--forces-col", type=str, default=FORCES_COL)
     parser.add_argument("--stress-col", type=str, default=STRESS_COL)
     parser.add_argument("--is-fit-stress", action="store_true", default=False)
-    parser.add_argument("--precision", type=str, default="float64") # can be float32 or float64
+    parser.add_argument(
+        "--precision", type=str, default="float64"
+    )  # can be float32 or float64
 
     parser.add_argument(
         "-s",
@@ -513,6 +509,16 @@ def build_parser():
         default=False,
         dest="remove_stage1",
         help="If True - during stage 3, remove corresponding shard from stage1 folder",
+    )
+
+    parser.add_argument(
+        "--dense-nbr",
+        action="store_true",
+        default=False,
+        dest="dense_nbr",
+        help="Mark the dataset for the dense (reshape) aggregation. Reserved for the "
+        "batched dense data prep (per-atom-uniform layout bucketed by max_neigh, TODO); "
+        "should match the model (input.yaml::potential::dense_nbr).",
     )
 
     return parser
@@ -696,6 +702,7 @@ def get_databuilders(
         cutoff_dict=cutoff_dict,  # TODO: provide parameter
         is_fit_stress=args_parse.is_fit_stress,
         float_dtype=precision,
+        dense_nbr=getattr(args_parse, "dense_nbr", False),
     )
     ref_db = ReferenceEnergyForcesStressesDataBuilder(
         is_fit_stress=args_parse.is_fit_stress,
@@ -798,10 +805,9 @@ def main(args=None):
 
     ############################################################################################################
     # Stage 1: initial dataset
+    ############################################################################################################
     if stage_1:
-        ############################################################################################################
         if not os.path.isdir(stage1_path) or rerun:
-
             if sharded_input:
                 input_fnames = input_fnames[task_index::total_num_tasks]
                 logging.info(
@@ -810,13 +816,14 @@ def main(args=None):
             else:
                 logging.info(f"Total {len(input_fnames)} input file(s): {input_fnames}")
 
-            df_rows = lambda verbose: dataframe_iterrows_generator(
-                input_fnames,
-                shard_by_row=not sharded_input,
-                task_index=task_index,
-                total_num_tasks=total_num_tasks,
-                verbose=verbose,
-            )
+            def df_rows(verbose):
+                return dataframe_iterrows_generator(
+                    input_fnames,
+                    shard_by_row=not sharded_input,
+                    task_index=task_index,
+                    total_num_tasks=total_num_tasks,
+                    verbose=verbose,
+                )
 
             if elements is None:
                 if elements_map is None:
@@ -853,7 +860,7 @@ def main(args=None):
                 cutoff_dict=cutoff_dict,
             )
 
-            logging.info(f"Stage 1: Computing neigh-list dataset")
+            logging.info("Stage 1: Computing neigh-list dataset")
 
             logging.info(f"Cleaning temp folder {stage1_path_temp}")
             shutil.rmtree(stage1_path_temp, ignore_errors=True)
@@ -874,7 +881,7 @@ def main(args=None):
             if os.path.isdir(stage1_path):
                 shutil.rmtree(stage1_path)
             shutil.move(stage1_path_temp, stage1_path)
-            logging.info(f"Stage 1 complete")
+            logging.info("Stage 1 complete")
 
         else:
             logging.info(f"Stage 1 is already finished, folder {stage1_path} exists")
@@ -887,7 +894,7 @@ def main(args=None):
         if os.path.isfile(batches_df_fname) and not rerun:
             logging.info(f"Stage 2: {batches_df_fname} already exists, stopping")
         else:
-            logging.info(f"Stage 2: Computing batches statistics")
+            logging.info("Stage 2: Computing batches statistics")
             logging.info(f"Loading {stage1_path}, batch size={batch_size}")
             dataset = tf.data.Dataset.load(stage1_path, compression=compression)
             batches_df = compute_batches_df(
@@ -990,9 +997,9 @@ def main(args=None):
             tot_nstruct = 0
             for b in tqdm.tqdm(dataset):
                 b_count += 1
-                nat_real = b[tc.N_ATOMS_BATCH_REAL].numpy()
-                n_neigh_real = b[tc.N_NEIGHBORS_REAL].numpy()
-                n_struct = b[tc.N_STRUCTURES_BATCH_REAL].numpy()
+                nat_real = int(b[tc.N_ATOMS_BATCH_REAL].numpy())
+                n_neigh_real = int(b[tc.N_NEIGHBORS_REAL].numpy())
+                n_struct = int(b[tc.N_STRUCTURES_BATCH_REAL].numpy())
 
                 cur_forces = b[tc.DATA_REFERENCE_FORCES].numpy()
                 cur_forces = cur_forces[:nat_real]
