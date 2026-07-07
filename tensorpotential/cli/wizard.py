@@ -345,12 +345,21 @@ _FOUNDATION_MODEL_TREE = {
             "medium": ["GRACE-2L-SMAX-OMAT-medium"],
         },
     },
+    "3L": {
+        "OAM": {
+            "large": ["GRACE-3L-OMAT-large-ft-AM"],
+        },
+        "OMAT": {
+            "large": ["GRACE-3L-OMAT-large"],
+        },
+    },
 }
 
 _TIER_DESC = {
     "FS": "FS  — Finnis-Sinclair-like, fastest",
     "1L": "1L  — single message-passing layer",
-    "2L": "2L  — two message-passing layers (most accurate)",
+    "2L": "2L  — two message-passing layers",
+    "3L": "3L  — three message-passing layers (most accurate)",
 }
 _DS_DESC = {
     "OAM": "OAM       — OMat24 + sAlex + MPTraj (fine-tuned on AM data)",
@@ -429,6 +438,29 @@ def _ask_foundation_model() -> str:
             (n for n in models_in_size if n.endswith("-ft-E")), models_in_size[0]
         ),
     )
+
+
+def _maybe_ask_fp64_variant(name: str) -> str:
+    """For finetuning: pick the fp32 (default) or fp64 checkpoint.
+
+    Precision at finetune time is chosen by which checkpoint is loaded: the bare
+    model name is the fp32 checkpoint; ``<name>-fp64`` is the fp64 checkpoint.
+    Only ask when a ``-fp64`` variant is actually registered (fp32-only releases
+    such as 3L have none). param_dtype then follows from the checkpoint's
+    model.yaml — no dtype flag is set here.
+    """
+    from tensorpotential.calculator.foundation_models import MODELS_METADATA
+
+    if f"{name}-fp64" not in MODELS_METADATA:
+        return name
+    fp32_label = "FP32 (default, recommended — faster, half memory)"
+    fp64_label = "FP64 (full precision — for older/full-precision workflows)"
+    choice = _ask_select(
+        "Finetuning precision:",
+        choices=[fp32_label, fp64_label],
+        default=fp32_label,
+    )
+    return name if choice.startswith("FP32") else f"{name}-fp64"
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +578,10 @@ def _section_model(s: _WizardState) -> _WizardState:
                 s.checkpoint_name = s.checkpoint_name.replace(".index", "")
         else:
             s.foundation_model_name = _ask_foundation_model()
+            if s.fit_type == "finetune foundation model":
+                s.foundation_model_name = _maybe_ask_fp64_variant(
+                    s.foundation_model_name
+                )
         label = "Previous model" if s.fit_type == "continue fit" else "Foundation model"
         _success(f"{label}: {s.foundation_model_name}")
         if s.checkpoint_name:
@@ -885,15 +921,31 @@ def _apply_state(s: _WizardState, template: str) -> str:
     template = template.replace("{{eval_init_stats}}", str(s.eval_init_stats))
     template = template.replace("{{RESET_EPOCH}}", str(s.reset_epoch_and_step))
 
-    # Frozen weights finetuning
+    # Frozen weights finetuning: freeze the radial/embedding backbone, train only
+    # the readout `reducing_` weights. The trainable set is tier-specific because
+    # 1L/2L/3L use different block names. Anything else (e.g. FS, whose readout
+    # block is `E`, not `rho`) is unsupported in frozen mode and raises rather
+    # than silently freezing the whole model.
     trainable_var_str = ""
     if s.finetune_mode == "frozen":
-        if "2L" in s.foundation_model_name:
+        name = s.foundation_model_name
+        if "3L" in name:
+            trainable_var_str = (
+                'trainable_variable_names: ['
+                '"rho1/reducing_", "rho2/reducing_", "rho3/reducing_", '
+                '"eq1/reducing_", "eq2/reducing_"]'
+            )
+        elif "2L" in name:
             trainable_var_str = (
                 'trainable_variable_names: ["I2/reducing_", "rho/reducing_", "I1/reducing_"]'
             )
-        else:
+        elif "1L" in name:
             trainable_var_str = 'trainable_variable_names: ["rho/reducing_"]'
+        else:
+            raise ValueError(
+                f"Frozen-weights finetuning is only supported for 1L/2L/3L GRACE "
+                f"models; got {name!r}. Use naive finetuning instead."
+            )
     template = template.replace("{{TRAINABLE_VARIABLE_NAMES}}", trainable_var_str)
 
     # Optimizer block
