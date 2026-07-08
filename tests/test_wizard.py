@@ -437,6 +437,54 @@ def test_ask_foundation_model_smax_2l_medium(monkeypatch, silence_output):
     assert result == "GRACE-2L-SMAX-OMAT-medium"
 
 
+# ---------------------------------------------------------------------------
+# 3L model tree + selection tests
+# ---------------------------------------------------------------------------
+
+_3L_MODELS = ["GRACE-3L-OMAT-large", "GRACE-3L-OMAT-large-ft-AM"]
+
+
+def test_3l_models_in_tree():
+    """Both 3L models must appear in _FOUNDATION_MODEL_TREE under a '3L' tier."""
+    from tensorpotential.cli.wizard import _FOUNDATION_MODEL_TREE, _TIER_DESC
+
+    assert "3L" in _FOUNDATION_MODEL_TREE
+    assert "3L" in _TIER_DESC
+
+    all_names = []
+    for tier_data in _FOUNDATION_MODEL_TREE.values():
+        for ds_data in tier_data.values():
+            for size_list in ds_data.values():
+                all_names.extend(size_list)
+
+    for model in _3L_MODELS:
+        assert model in all_names, f"{model!r} missing from _FOUNDATION_MODEL_TREE"
+
+
+def test_ask_foundation_model_3l_oam(monkeypatch, silence_output):
+    """Selecting 3L -> OAM returns the ft-AM model (single size/variant, auto-picked)."""
+    selections = iter(["3L", "OAM"])
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: next(selections),
+    )
+    result = wizard._ask_foundation_model()
+    assert result == "GRACE-3L-OMAT-large-ft-AM"
+
+
+def test_ask_foundation_model_3l_omat(monkeypatch, silence_output):
+    """Selecting 3L -> OMAT returns the base model."""
+    selections = iter(["3L", "OMAT"])
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: next(selections),
+    )
+    result = wizard._ask_foundation_model()
+    assert result == "GRACE-3L-OMAT-large"
+
+
 def test_apply_state_frozen_smax_2l():
     """Frozen finetuning of a 2L-SMAX-OMAT model uses the 2L trainable-variable pattern."""
     s = _make_state(
@@ -448,3 +496,85 @@ def test_apply_state_frozen_smax_2l():
     result = _apply_state(s, _MINIMAL_TEMPLATE)
     assert "I2/reducing_" in result, "Expected 2L frozen-weight pattern in output"
     assert "rho/reducing_" in result
+
+
+def test_apply_state_frozen_3l():
+    """Frozen finetuning of a 3L model emits densities + inter-layer messages."""
+    s = _make_state(
+        finetune_model=True,
+        fit_type="finetune foundation model",
+        foundation_model_name="GRACE-3L-OMAT-large",
+        finetune_mode="frozen",
+    )
+    result = _apply_state(s, _MINIMAL_TEMPLATE)
+    for name in [
+        "rho1/reducing_",
+        "rho2/reducing_",
+        "rho3/reducing_",
+        "eq1/reducing_",
+        "eq2/reducing_",
+    ]:
+        assert name in result, f"Expected {name!r} in 3L frozen output"
+    # must NOT fall back to the generic 1L pattern
+    assert "rho/reducing_" not in result
+
+
+def test_apply_state_frozen_3l_ft_am():
+    """The ft-AM 3L name also matches the 3L branch."""
+    s = _make_state(
+        finetune_model=True,
+        fit_type="finetune foundation model",
+        foundation_model_name="GRACE-3L-OMAT-large-ft-AM",
+        finetune_mode="frozen",
+    )
+    result = _apply_state(s, _MINIMAL_TEMPLATE)
+    assert "rho1/reducing_" in result and "eq2/reducing_" in result
+
+
+def test_apply_state_frozen_fs_raises():
+    """Frozen finetuning of an FS model is unsupported and must raise."""
+    s = _make_state(
+        finetune_model=True,
+        fit_type="finetune foundation model",
+        foundation_model_name="GRACE-FS-OMAT",
+        finetune_mode="frozen",
+    )
+    with pytest.raises(ValueError, match="1L/2L/3L"):
+        _apply_state(s, _MINIMAL_TEMPLATE)
+
+
+# ---------------------------------------------------------------------------
+# Finetuning precision (fp32 default / fp64) tests
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_ask_fp64_variant_chooses_fp64(monkeypatch):
+    """A model with a -fp64 sibling: choosing FP64 appends the suffix."""
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: "FP64 (full precision — for older/full-precision workflows)",
+    )
+    out = wizard._maybe_ask_fp64_variant("GRACE-2L-OMAT-large-base")
+    assert out == "GRACE-2L-OMAT-large-base-fp64"
+
+
+def test_maybe_ask_fp64_variant_chooses_fp32(monkeypatch):
+    """A model with a -fp64 sibling: choosing FP32 keeps the bare name."""
+    monkeypatch.setattr(
+        wizard,
+        "_ask_select",
+        lambda msg, choices, default=None: "FP32 (default, recommended — faster, half memory)",
+    )
+    out = wizard._maybe_ask_fp64_variant("GRACE-2L-OMAT-large-base")
+    assert out == "GRACE-2L-OMAT-large-base"
+
+
+def test_maybe_ask_fp64_variant_no_variant_does_not_ask(monkeypatch):
+    """A model without a -fp64 sibling (3L): returns unchanged, asks nothing."""
+    def _boom(*a, **k):
+        raise AssertionError("_ask_select must not be called when no fp64 variant exists")
+
+    monkeypatch.setattr(wizard, "_ask_select", _boom)
+    out = wizard._maybe_ask_fp64_variant("GRACE-3L-OMAT-large")
+    assert out == "GRACE-3L-OMAT-large"
