@@ -5,6 +5,18 @@
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the [PACEmaker](https://pacemaker.readthedocs.io/)
 software geared towards support for multi-component materials and graph architectures.
 
+## What's new
+
+
+### 07 July 2026: [0.6.0 Release](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.0)
+
+- **[Uncertainty estimates](https://gracemaker.readthedocs.io/en/latest/gracemaker/uq/).** Models can now report a per-atom uncertainty score (gamma) that flags when a prediction is an extrapolation — useful for spotting unreliable regions and for active learning. Comes with a new `grace_uq` command line tool.
+- **[LAMMPS Kokkos support](https://gracemaker.readthedocs.io/en/latest/gracemaker/quickstart/#lammps-kokkos-npz-grace-1l-grace-2l-grace-3l).** You can now export GRACE models for the fast Kokkos pair styles in LAMMPS. The uncertainty score can be carried along, so it's available during LAMMPS runs too.
+- **[Foundation models on HuggingFace](https://huggingface.co/AMS-ICAMS-RUB/grace-foundation-models)**. The released models now include uncertainty support out of the box,
+-  **[GRACE-3L-OMAT/OAM](https://gracemaker.readthedocs.io/en/latest/gracemaker/foundation/#three-layer-3l-models).** There are new, larger **3-layer models** (`GRACE-3L-OMAT-large` and `GRACE-3L-OMAT-large-ft-AM`).
+- **[Faster and lighter by default](https://gracemaker.readthedocs.io/en/latest/gracemaker/foundation/).** Foundation models now use fp32 precision by default, which roughly halves memory use and about doubles speed. (fp64 versions are still available under the `-fp64` name.) 
+- **Better tooling.** A new `grace_dashboard` shows training curves and metrics in the browser; the `grace_models` command was reworked to list, inspect, and download models (including Kokkos weights); and training can now save and resume in the middle of an epoch.
+
 
 ## Series of ACE models
 
