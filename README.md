@@ -1,5 +1,13 @@
-# News
-* 07 July 2026: [0.6.0 Release](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.0), shipping new features including uncertainty quantification for foundational models and more.
+## What's new
+
+
+### 07 July 2026: [0.6.0 Release](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.0)
+
+- **Uncertainty estimates.** Models can now report a per-atom uncertainty score (gamma) that flags when a prediction is an extrapolation — useful for spotting unreliable regions and for active learning. Comes with a new `grace_uq` command line tool to build the uncertainty data, inspect it, run predictions, and select new structures to add to training.
+- **LAMMPS Kokkos support.** You can now export GRACE models for the fast Kokkos pair styles in LAMMPS. The uncertainty score can be carried along, so it's available during LAMMPS runs too.
+- **Foundation models on HuggingFace** (`AMS-ICAMS-RUB/grace-foundation-models`). The released models now include uncertainty support out of the box, and there are new, larger **3-layer models** (`GRACE-3L-OMAT-large` and `GRACE-3L-OMAT-large-ft-AM`).
+- **Faster and lighter by default.** Foundation models now use fp32 precision by default, which roughly halves memory use and about doubles speed. (fp64 versions are still available under the `-fp64` name.) Additional speedups for multi-GPU runs and for certain system types.
+- **Better tooling.** A new `grace_dashboard` shows training curves and metrics in the browser; the `grace_models` command was reworked to list, inspect, and download models (including Kokkos weights); and training can now save and resume in the middle of an epoch.
 
 # Important Note  
 
