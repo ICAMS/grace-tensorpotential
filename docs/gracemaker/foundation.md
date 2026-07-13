@@ -113,9 +113,11 @@ effective receptive field. Both use a fixed **6 Å cutoff** and ship with UQ. Th
 natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
 `pair_style grace/3l/kk` (mixed precision) or `pair_style grace/3l/kk/fp32`.
 
-| Model Name | Full Name | Size | F1 | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
-|:--- |:--- |:--- |:------|:-----------------------|:---|:---| :--- |
+
+| Model Name | Full Name | Size | F1    | $\kappa_\mathrm{SRME}$ | UQ | Kokkos | Description |
+| :--- |:--- | :--- |:------| :--- |:---|:---| :--- |
 | **GRACE-3L-OMAT-large-ft-AM** | GRACE-3L-OMAT-large-ft-AM | large | 0.925 | **0.121** | ✓ | ✓ | Three-layer, fine-tuned on sAlex + MPtraj |
+
 
 ### Two-layer (2L), semilocal models
 
