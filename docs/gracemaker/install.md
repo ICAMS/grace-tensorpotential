@@ -147,6 +147,16 @@ cmake ../cmake -DBUILD_MPI=ON -DCMAKE_BUILD_TYPE=Release -DPKG_MC=ON -DPKG_ML-PA
 ```
 or `-DKokkos_ARCH_HOPPER90=ON` for H100/200 or `-DKokkos_ARCH_AMPERE80=ON` for A100.
 
+!!! warning "Use CUDA >= 12.8 for the KOKKOS build"
+    With CUDA 12.2-12.6 the build can hang for many hours (without any error
+    message) while compiling `pair_grace_2l_kokkos.cpp` and
+    `pair_grace_2l_cpu_kokkos.cpp`. This is an `nvcc` bug that is fixed in
+    CUDA 12.8; lowering the optimization level with `-Xptxas` does not help.
+    See the FAQ entry
+    [LAMMPS KOKKOS build hangs for hours on `pair_grace_2l` files](../faq/#lammps-kokkos-build-hangs-for-hours-on-pair_grace_2l-files)
+    for the diagnosis and for how to get a newer `nvcc` without touching your
+    system modules.
+
 Note, that for running LAMMPS with KOKKOS acceleration:
 ```bash
 lmp_kk -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.lammps 
