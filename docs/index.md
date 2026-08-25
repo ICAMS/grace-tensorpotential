@@ -65,7 +65,7 @@ This code and the foundation models are distributed under the [Academic Software
 
 Please cite the following papers if you use GRACEmaker in your work:
 
-- [Lysogorskiy, Y., Bochkarev, A. and Drautz, R. Graph atomic cluster expansion for foundational machine learning interatomic potentials, arXiv:2508.17936](https://arxiv.org/abs/2508.17936)
+- [Lysogorskiy, Y., Bochkarev, A. and Drautz, R. Graph atomic cluster expansion for foundational machine learning interatomic potentials. npj Computational Materials 12(1), 114 (2026)](https://www.nature.com/articles/s41524-026-01979-1)
 - [Bochkarev, A., Lysogorskiy, Y. and Drautz, R. Graph Atomic Cluster Expansion for Semilocal Interactions beyond Equivariant Message Passing. Phys. Rev. X 14, 021036 (2024)](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.14.021036)
 
 

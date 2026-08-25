@@ -42,14 +42,19 @@ https://acesupport.zulipchat.com/join/xtwxu2grjbtg64m3vnhypi6p/
 
 # Reference
 Please see 
-* [Y.Lysogorskiy, A. Bochkarev, R.Drautz, Graph atomic cluster expansion for foundational machine learning interatomic potentials, arXiv:2508.17936](https://arxiv.org/abs/2508.17936)
+* [Y.Lysogorskiy, A. Bochkarev, R.Drautz, Graph atomic cluster expansion for foundational machine learning interatomic potentials. npj Computational Materials 12(1), 114 (2026)](https://www.nature.com/articles/s41524-026-01979-1)
 
 ```bibtex
-@article{lysogorskiy2025graph,
+@article{lysogorskiy2026graph,
   title={Graph atomic cluster expansion for foundational machine learning interatomic potentials},
   author={Lysogorskiy, Yury and Bochkarev, Anton and Drautz, Ralf},
-  journal={arXiv preprint arXiv:2508.17936},
-  year={2025}
+  journal={npj Computational Materials},
+  volume={12},
+  number={1},
+  pages={114},
+  year={2026},
+  doi={10.1038/s41524-026-01979-1},
+  url={https://www.nature.com/articles/s41524-026-01979-1}
 }
 ```
 
