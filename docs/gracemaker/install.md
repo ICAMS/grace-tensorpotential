@@ -40,7 +40,7 @@ pip install .
 TensorFlow should be installed automatically. However, to manually install TensorFlow with GPU support:
 
 ```bash
-pip install tensorflow[and-cuda]<2.20
+pip install "tensorflow[and-cuda]<=2.20"
 ```
 #### TensorFlow & Keras Notes
 

@@ -169,7 +169,7 @@ You can generate an `input.yaml` file for fine-tuning a foundation model by runn
 ### Manual setup
 
 Fine-tuning foundation GRACE models can only be performed using checkpoints, not saved models.
-Run `grace_models list` to view the available models that include a `CHECKPOINT:` field.
+Run `grace_models list -v` to view the available models that include a `CHECKPOINT:` field (or `grace_models info <MODEL-NAME>` for a single model).
 You can either download this checkpoint manually using `grace_models checkpoint <MODEL-NAME>`, or it will be downloaded automatically when needed.
 
 To fine-tune a foundation model, add the following to the `potential` section of your `input.yaml`:

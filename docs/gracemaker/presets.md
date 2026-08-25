@@ -9,11 +9,11 @@ supports MPI parallelization with domain decomposition in LAMMPS. Extrapolation 
 can be used, after construction of [active set](../quickstart/#build-active-set-for-gracefs-only).
 
   
-* **GRACE_1LAYER**: A one-layer model (i.e., only star graphs basis functions) extending the FS preset with MLP for radial functions and readouts,
+* **GRACE_1LAYER_latest**: A one-layer model (i.e., only star graphs basis functions) extending the FS preset with MLP for radial functions and readouts,
 and additional improvements. This model supports only TensorFlow-based execution; GPU usage is highly recommended but not mandatory. 
 Due to the local interactions (within a single cutoff distance), no extra overhead is required for domain decomposition, and the model can be parallelized with MPI in LAMMPS on multiple GPUs.
 
-* **GRACE_2LAYER**: A two-layer model (i.e., star and tree graph basis functions) that builds upon GRACE_1LAYER by adding 
+* **GRACE_2LAYER_latest**: A two-layer model (i.e., star and tree graph basis functions) that builds upon GRACE_1LAYER_latest by adding 
 a second layer of message passing. It also supports only TensorFlow-based execution, making GPU usage highly recommended.
 
 * **_Custom Model_**: Users can construct custom models by combining building blocks from the previous presets. 
@@ -24,7 +24,7 @@ More details on customization will be provided in future documentation.
 Presets can be selected in `input.yaml` input file, in section `potential`:
 ```yaml
 potential:
-  # LINEAR, FS, GRACE_1LAYER, GRACE_2LAYER
+  # LINEAR, FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
   preset: "FS" 
   
   # kw-arguments that will be passed to preset or custom function
@@ -32,6 +32,14 @@ potential:
 ```
 
 Latest and complete list of arguments can be found in definition of the models in the [presets.py](https://github.com/ICAMS/grace-tensorpotential/blob/master/tensorpotential/potentials/presets.py) file.
+
+!!! note "Preset names"
+    The names above are the ones accepted by `input.yaml::potential::preset`:
+    `LINEAR`, `FS`, `GRACE_1LAYER_latest` (the default) and `GRACE_2LAYER_latest`.
+    The `_latest` presets always point to the current recommended architecture;
+    to pin the 2024 architecture instead, use `GRACE_1LAYER_v1_24` or
+    `GRACE_2LAYER_v1_24`. Each preset also provides `small`, `medium` and
+    `large` parameter sets, which `gracemaker -t` offers as "model complexity".
 
 ### FS
 
@@ -48,7 +56,7 @@ Following parameters can be provided to tune FS model:
 * `fs_parameters: [[1.0, 1.0], [1.0, 0.5], [1.0, 2], [1.0, 0.75]]` - parameters of FS embedding in a form `[[c1,m1], [c2,m2], ...]`
 that corresponds to $c_1 \phi_1^{m_1} + c_2 \phi_2^{m_2} + ...$
 
-### GRACE_1LAYER
+### GRACE_1LAYER_latest
 
 * `basis_type: "Cheb"` - type of the radial basis functions: SBessel, Cheb
 * `n_rad_base: 8`  - number of radial basis functions
@@ -60,7 +68,7 @@ that corresponds to $c_1 \phi_1^{m_1} + c_2 \phi_2^{m_2} + ...$
 * `n_mlp_dens: 16` - number of non-linear readout densities (+1 extra for linear readout automatically added)
 
 
-### GRACE_2LAYER
+### GRACE_2LAYER_latest
 
 * `basis_type: "Cheb"` - type of radial basis functions: SBessel, Cheb
 * `n_rad_base: 8`  - number of radial basis functions

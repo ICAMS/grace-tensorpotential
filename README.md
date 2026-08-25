@@ -16,7 +16,7 @@ If a model was fitted with `gracemaker` version < 0.5.1, it will not be compatib
 You can convert it to the new format using the following command:  
 
 ```bash
-grace_utils -p seed/1/model.yaml -c seed/1/checkpoint/checkpoint.best_test_loss.index update_model
+grace_utils -p seed/1/model.yaml -c seed/1/checkpoints/checkpoint.best_test_loss.index update_model
 ```  
 
 This will generate new files with the "-converted" suffix, which you can replace the old files (`model.yaml` and checkpoints) with.

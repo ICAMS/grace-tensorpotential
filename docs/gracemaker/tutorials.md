@@ -234,7 +234,7 @@ cd grace-tutorial/2-HEA25S-GRACE-FS/
 You can download the complete dataset from [Materials Cloud](https://archive.materialscloud.org/record/2024.43) in _extxyz_ format.
 
 * Download the `data.zip` file (in browser)
-* Unpack the `data.zip`, go to any (or all) subfolders and convert the _extxyz_ dataset with `extxyz2df`:
+* Unpack the `data.zip`, go to any (or all) subfolders and convert the _extxyz_ dataset with [`extxyz2df`](../utilities/#extxyz2df):
 
 ```bash
 unzip data.zip
@@ -450,7 +450,7 @@ Find more details [here](https://pacemaker.readthedocs.io/en/latest/pacemaker/ut
 
 Universal machine learning interatomic potentials, also known as foundation models, are models capable of supporting a wide range of elements or even nearly the entire periodic table. These models are parameterized using large reference DFT datasets, such as the [Materials Project](https://next-gen.materialsproject.org/) or [Alexandria](https://alexandria.icams.rub.de/). Some of these models have been tested for high-throughput materials discovery, as demonstrated in [Matbench Discovery](https://matbench-discovery.materialsproject.org/).
 
-We have parameterized several GRACE-1LAYER and GRACE-2LAYER models on the MPTraj dataset (relaxation trajectories from the Materials Project).
+We have parameterized a series of single-layer (GRACE-1L), two-layer (GRACE-2L) and three-layer (GRACE-3L) foundation models on large reference datasets: OMat24 (`-OMAT`), OMat24 fine-tuned on sAlex + MPtraj (`-OAM`), and the chemistry-agnostic SMAX dataset (`-SMAX`). See [foundation models](../foundation/) for the full list.
 
 ### 3.1. Overview and Download
 
