@@ -67,7 +67,7 @@ The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by f
 Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
 
 The **three-layer (3L)** GRACE models add a third message-passing layer for a larger
-effective receptive field. Both use a fixed **6 Å cutoff** and ship with UQ. They are
+effective receptive field. The 3L models use a fixed **6 Å cutoff** and ship with UQ. They are
 natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
 `pair_style grace/3l/kk` (mixed precision) or `pair_style grace/3l/kk/fp32`.
 
@@ -109,7 +109,7 @@ These models are first pre-trained on **OMat24** and then fine-tuned on a combin
 ### Three-layer (3L) models
 
 The **three-layer (3L)** GRACE models add a third message-passing layer for a larger
-effective receptive field. Both use a fixed **6 Å cutoff** and ship with UQ. They are
+effective receptive field. The 3L models use a fixed **6 Å cutoff** and ship with UQ. They are
 natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
 `pair_style grace/3l/kk` (mixed precision) or `pair_style grace/3l/kk/fp32`.
 
@@ -263,7 +263,7 @@ You need to create a `$HOME/.cache/grace/models_registry.yaml` file with a conte
 
 ```yaml
 FULL-MODEL-NAME:
-  path: /path/to/saved_mode
+  path: /path/to/saved_model
   checkpoint_path: /path/to/checkpoint/  # model.yaml and checkpoint.index should be in this folder
   description: some description
   license: some license

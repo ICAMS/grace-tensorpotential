@@ -4,7 +4,7 @@ To use GRACE models, including fitting and utilizing pre-fitted models, you need
 
 ### Setting Up the Environment
 
-#### Micromamba (Recommended)
+#### Micromamba (recommended)
 
 For [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html), install it by running the following command:
 
@@ -18,6 +18,9 @@ Then, create a new environment:
 micromamba create -n grace python=3.11 
 micromamba activate grace
 ```
+
+`conda`/`mamba` or a plain `python -m venv` environment work as well — replace
+`micromamba` with your tool of choice in the commands below.
 
 ---
 
@@ -73,7 +76,7 @@ This is a standalone C++ implementation of the GRACE/FS model that can be execut
 
 * Activate the conda environment:
 ```bash
-conda activate grace
+micromamba activate grace   # or: conda activate grace
 ```
 
 * Clone the repository:
@@ -100,7 +103,7 @@ Once installed, you can use the `pace_activeset` utility to [generate](../quicks
 
 * Activate the conda environment (it should contain TensorFlow):
 ```bash
-conda activate grace
+micromamba activate grace   # or: conda activate grace
 ```
 
 * Clone the LAMMPS repository:

@@ -214,7 +214,7 @@ For example, on an A100 GPU, one of the final output lines might be:
 Loop time of 24.4206 on 1 procs for 20 steps with 108000 atoms
 ```
 
-This indicates that the current model (GRACE-2LAYER, small) achieves a performance of approximately **11 mcs/atom**, supporting simulations with up to **108k atoms**.
+This indicates that the current model (GRACE-2L, small) achieves a performance of approximately **11 µs/atom/step** (24.4 s / 20 steps / 108 000 atoms), supporting simulations with up to **108k atoms**.
 
 ---
 

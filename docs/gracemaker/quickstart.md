@@ -14,7 +14,7 @@ You can either use [`grace_collect`](../utilities#grace_collect)
 grace_collect
 ```
 
-or build a `pandas.DataFrame` on you own. It must contain the following columns:
+or build a `pandas.DataFrame` on your own. It must contain the following columns:
  
 * `ase_atoms` - Atomic structures represented as ASE Atoms
 * `energy` - Total energy (should be force-consistent), shape: single number 
@@ -46,8 +46,9 @@ To start `gracemaker`, simply run
 gracemaker
 ```
 
-Please note that the first line of input file should be `seed: 1`, which sets the random see for initializing the model
-parameters. When `gracemaker` starts, it creates a working subfolder, (e.g., _seed/1/_)  containing the following output files:
+The `seed` entry of the input file sets the random seed for initializing the model parameters.
+When `gracemaker` starts, it creates a working subfolder named after that seed (e.g. _seed/1/_ for
+`seed: 1`) containing the following output files:
 
 * **log.txt** — Redirected log output.
 * **train_metrics.yaml** and **test_metrics.yaml** — Various training and testing metrics in YAML format.
@@ -68,7 +69,7 @@ _____
 
 ### Restart from checkpoint 
 
-To initialized fitting from previously saved state, simply run
+To initialize fitting from a previously saved state, simply run
 ```bash
 gracemaker -r
 ```
@@ -78,7 +79,7 @@ locations at `./seed/*/checkpoints/checkpoint.best_test_loss` and `./seed/*/` re
 You can also explicitly provide path to the checkpoint and model configuration file:
   
 ```bash
-gracemaker -r -p /path/to/model.yaml -cn /path/to/chekpoint.index
+gracemaker -r -p /path/to/model.yaml -cn /path/to/checkpoint.index
 ```
 
 or in `input.yaml`:
@@ -86,7 +87,7 @@ or in `input.yaml`:
 ```yaml
 potential:
   filename: /path/to/model.yaml
-  checkpoint_name: /path/to/chekpoint.index
+  checkpoint_name: /path/to/checkpoint.index
 ```
 _____
 
@@ -324,8 +325,8 @@ pair_coeff * * /path/to/2layer_saved_model Al Li
 #### Multi-GPU / MPI parallelization
 
 * Use `grace` for single-process runs for both single-layer and two-layer models.
-* For single-layer models parallization also use `grace` (with CUDA-aware mpirun command)
-* For two-layer models parallization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
+* For single-layer models parallelization also use `grace` (with CUDA-aware mpirun command)
+* For two-layer models parallelization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
 * For memory-reduced version use `grace/1layer/chunk` or `grace/2layer/chunk` - both of them support MPI parallelism.
 * For GRACE/FS models use `grace/fs` (or `grace/fs/kk` for GPU/OpenMP).
 * For TensorFlow-free GPU/OpenMP runs of GRACE-1L or GRACE-2L models use

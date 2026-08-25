@@ -195,7 +195,8 @@ and run TensorFlow-free.
 
 ## How to run GRACE models in parallel in LAMMPS?
 
-**Single-layer models** — use `grace/1layer/chunk` and assign one GPU per MPI rank:
+**Single-layer models** — use `grace` (or `grace/1layer/chunk` for large structures
+and guaranteed virials) and assign one GPU per MPI rank:
 
 ```bash
 mpirun -np 4 --bind-to none bash -c \

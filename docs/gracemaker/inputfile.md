@@ -39,7 +39,7 @@ data:
   #                                # per-axis dict also supported: {atom: 0.1, bond: 0.05, structure: 5}
   #   outlier_strategy: expand     # "expand" (grow bucket), "warn_skip" (drop), or "error" (raise)
   #   verbose: false               # log bucket discovery events
-  #   prefetch_queue_size: 0       # set to >0 to thread prefetcing
+  #   prefetch_queue_size: 0       # set to >0 to thread prefetching
 
   ## Extra input/reference DataBuilder/s required for model
   # extra_components: {
@@ -219,8 +219,8 @@ fit:
   #  normalize_force_per_structure: True ## force-weights is divided by number of atoms
 ```
 
-This is complete list of parameters. For the most of practical purposes
-it is sufficient to generate input file with `gracemaker -t` utility.
+This is the complete list of parameters. For most practical purposes
+it is sufficient to generate the input file with the `gracemaker -t` utility.
 
 Detailed weighting option (`weighting` belongs to the `fit` section):
 
