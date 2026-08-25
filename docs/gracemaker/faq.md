@@ -227,6 +227,73 @@ Alternatively, use `grace/1layer/chunk`, `grace/2layer/chunk`, or `grace/2layer/
 
 ---
 
+## How to evaluate uncertainty (extrapolation grade `gamma`) for GRACE models?
+
+Use the per-atom extrapolation grade **`gamma`** — the single UQ signal
+reported by GRACE models. It is the Mahalanobis distance of an atomic
+environment to its nearest GMM cluster in the model's own latent space,
+normalized by a calibrated per-cluster threshold, so it is dimensionless:
+
+* $\gamma \lesssim 1$ — the environment lies inside the training distribution.
+* $\gamma \approx 1$ — the atom sits at the boundary of the training distribution.
+* $\gamma \gg 1$ — extrapolation; treat the prediction as unreliable.
+
+**GRACE-1L/2L/3L models** need a GMM-UQ artifact, built once from the training
+set with [`grace_uq build`](../uq/#grace_uq-build):
+
+```bash
+grace_uq build --model-yaml model.yaml \
+               --checkpoint checkpoints/checkpoint.best_test_loss.index \
+               --train-data training_set.pkl.gz \
+               --artifact-path UQ/gmm_artifacts.npz
+```
+
+Then attach it to a calculator and read `gamma` from the results:
+
+```python
+from tensorpotential.uq.factories import get_gmm_uq_calculator
+
+at.calc = get_gmm_uq_calculator(
+    model_yaml="model.yaml",
+    checkpoint="checkpoint.best_test_loss",
+    gmm_artifact_path="UQ/gmm_artifacts.npz",
+)
+at.get_potential_energy()
+at.calc.results["gamma"]         # per-atom extrapolation grades
+at.calc.results["atomic_sigma"]  # raw, unnormalized Mahalanobis distances
+```
+
+`grace_uq build` also exports a `saved_model/` carrying a `compute_uq`
+signature — a plain `TPCalculator(model="saved_model")` auto-detects it and
+returns `gamma` as well (toggle with `calc.disable_uq()` / `calc.enable_uq()`
+if you want the faster non-UQ path).
+
+!!! tip "Foundation models often ship UQ already"
+    Many distributed models come with `gmm_artifacts.npz` and a UQ head — no
+    build step needed. Check the **UQ** column in the
+    [foundation models](../foundation/) tables.
+
+**GRACE/FS models** use extrapolation grades based on D-optimality instead:
+[build an active set (ASI)](../quickstart/#build-active-set-for-gracefs-only),
+then read `gamma` from
+[`PyGRACEFSCalculator`](../quickstart/#gracefs_1) in ASE or from
+[`pair_style grace/fs extrapolation`](../quickstart/#lammps-gracefs) in LAMMPS.
+
+**Screening datasets and active learning:** `grace_uq predict` evaluates
+energies/forces/stresses plus per-atom γ over a whole dataset, and
+`grace_uq select` picks N structures from a candidate pool by
+extrapolation/diversity strategy.
+
+**In LAMMPS** with the Kokkos pair styles, bake the artifact into the weights
+file with
+[`export_kokkos --uq-artifacts`](../utilities/#baking-in-uq-uncertainty-quantification-artifacts) —
+γ is then computed from the same `.npz` at runtime, with no separate UQ file.
+
+See the [Uncertainty Quantification](../uq/) page for the full pipeline,
+options, and the Python API.
+
+---
+
 ## What are buckets (`train_max_n_buckets` and `test_max_n_buckets`)?
 
 GRACE models are JIT-compiled, so every batch must share a shape — achieved
