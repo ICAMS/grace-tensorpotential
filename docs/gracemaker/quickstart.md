@@ -127,7 +127,7 @@ grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index expor
 ```
 
 The architecture (1L, 2L, or 3L) is auto-detected. The resulting `.npz` is loaded directly
-by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L (Kokkos, no TensorFlow)](#lammps-grace-1l-grace-2l-kokkos-no-tensorflow).
+by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L / GRACE-3L (Kokkos, no TensorFlow)](#lammps-grace-1l-grace-2l-grace-3l-kokkos-no-tensorflow).
 
 ---
 
@@ -280,6 +280,7 @@ All GRACE pair styles require `units metal`. The right style depends on your mod
 | `grace/2layer/parallel` | 2-layer | yes | yes | always available |
 | `grace/1l/kk` | 1-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
 | `grace/2l/kk` | 2-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
+| `grace/3l/kk` | 3-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
 | `grace/fs` | FS | no | yes | always available |
 | `grace/fs/kk` | FS (Kokkos) | no | yes + GPU/OpenMP | always available |
 
@@ -353,15 +354,15 @@ pair_style grace/fs/kk
 pair_coeff * * FS_model.yaml Mo Nb Ta W
 ```
 
-#### LAMMPS: GRACE-1L / GRACE-2L (Kokkos, no TensorFlow)
+#### LAMMPS: GRACE-1L / GRACE-2L / GRACE-3L (Kokkos, no TensorFlow)
 
-`grace/1l/kk` and `grace/2l/kk` run GRACE-1L / GRACE-2L models on
-GPU/OpenMP without TensorFlow at LAMMPS runtime. They read a `.npz`
-weights file produced from a fitted `model.yaml` + checkpoint by
+`grace/1l/kk`, `grace/2l/kk` and `grace/3l/kk` run GRACE-1L / GRACE-2L /
+GRACE-3L models on GPU/OpenMP without TensorFlow at LAMMPS runtime. They read a
+`.npz` weights file produced from a fitted `model.yaml` + checkpoint by
 [`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style).
 
 !!! warning "Standard architectures only"
-    The Kokkos pair styles support the **standard GRACE-1L / GRACE-2L
+    The Kokkos pair styles support the **standard GRACE-1L / GRACE-2L / GRACE-3L
     architectures** ([built-in presets](../presets/) and
     [foundation models](../foundation/)). Custom GRACE models with
     non-standard instruction graphs, unsupported activations, or
@@ -377,7 +378,7 @@ grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index expor
 Then in the LAMMPS input:
 
 ```
-pair_style grace/1l/kk    # or grace/2l/kk
+pair_style grace/1l/kk    # or grace/2l/kk, grace/3l/kk
 pair_coeff * * grace_weights.npz Mo Nb Ta W
 ```
 
@@ -391,13 +392,16 @@ the LAMMPS pair style picks the compute precision:
 | `grace/{1l,2l}/kk`       | fp64 | fp64 |
 | `grace/{1l,2l}/kk/mixed` | fp32 | fp64 |
 | `grace/{1l,2l}/kk/fp32`  | fp32 | fp32 |
+| `grace/3l/kk`            | fp32 | fp64 |
+| `grace/3l/kk/fp32`       | fp32 | fp32 |
 
 The same `.npz` works with all variants — choose by your accuracy / throughput
 trade-off. Empirically, `fp32` and `mixed` agree with `fp64` to roughly
 **1e-6 relative precision** on energies and forces — well within typical MD
-requirements.
+requirements. The 3L models are natively fp32, so `grace/3l/kk` is the
+mixed-precision style and there is no fp64 3L variant.
 
-To monitor extrapolation grade:
+#### Monitoring the extrapolation grade in LAMMPS (GRACE/FS)
 
 ```
 pair_style grace/fs extrapolation

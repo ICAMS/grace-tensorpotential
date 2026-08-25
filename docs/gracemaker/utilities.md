@@ -238,10 +238,11 @@ grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index expor
 
 #### Export to .npz for LAMMPS Kokkos pair style
 
-GRACE-1L and GRACE-2L models can be exported to a self-contained `.npz` blob
-that the `pair_grace_1l_kokkos` / `pair_grace_2l_kokkos` LAMMPS pair styles
-read directly — no TensorFlow at LAMMPS runtime. The architecture (1L vs 2L)
-is auto-detected from the model's instructions.
+GRACE-1L, GRACE-2L and GRACE-3L models can be exported to a self-contained
+`.npz` blob that the `pair_grace_1l_kokkos` / `pair_grace_2l_kokkos` /
+`pair_grace_3l_kokkos` LAMMPS pair styles read directly — no TensorFlow at
+LAMMPS runtime. The architecture (1L, 2L or 3L) is auto-detected from the
+model's instructions.
 
 ```bash
 grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
@@ -250,12 +251,12 @@ grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index expor
 Use the resulting file in your LAMMPS input as:
 
 ```
-pair_style grace/1l/kk    # or grace/2l/kk
+pair_style grace/1l/kk    # or grace/2l/kk, grace/3l/kk
 pair_coeff * * grace_weights.npz <element1> <element2> ...
 ```
 
 !!! warning "Standard architectures only"
-    `grace/1l/kk` and `grace/2l/kk` only support the standard GRACE-1L / 2L
+    The Kokkos pair styles only support the standard GRACE-1L / 2L / 3L
     architectures from the built-in [presets](../presets/) and
     [foundation models](../foundation/). Models with non-standard instructions,
     unsupported activations, or dimensions above the LAMMPS compile-time caps
@@ -263,7 +264,7 @@ pair_coeff * * grace_weights.npz <element1> <element2> ...
     TensorFlow-based pair styles (`grace`, `grace/2layer/parallel`, …) or
     GRACE-FS instead.
 
-Use `--arch 1l` / `--arch 2l` to override architecture auto-detection.
+Use `--arch 1l` / `--arch 2l` / `--arch 3l` to override architecture auto-detection.
 
 ##### Baking in UQ (uncertainty quantification) artifacts
 
@@ -290,6 +291,10 @@ The same `.npz` works with three runtime-precision variants of the pair style
 - `grace/{1l,2l}/kk`        — full fp64 (default)
 - `grace/{1l,2l}/kk/mixed`  — geometry in fp64, NN math in fp32
 - `grace/{1l,2l}/kk/fp32`   — everything in fp32
+
+The 3L models are natively fp32: `grace/3l/kk` is the mixed-precision style
+(geometry in fp64) and `grace/3l/kk/fp32` runs everything in fp32; there is no
+fp64 3L variant.
 
 Empirically, `fp32` and `mixed` agree with `fp64` to roughly **1e-6 relative
 precision** on energies and forces — well within typical MD requirements.

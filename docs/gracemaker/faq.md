@@ -182,6 +182,7 @@ the full bisection across toolchains.
 | `grace/2layer/parallel` | 2-layer | yes | yes | — | always |
 | `grace/1l/kk` | 1-layer | no | yes | yes (Kokkos) | always |
 | `grace/2l/kk` | 2-layer | no | yes | yes (Kokkos) | always |
+| `grace/3l/kk` | 3-layer | no | yes | yes (Kokkos) | always |
 | `grace/fs` | FS | no | yes | — | always |
 | `grace/fs/kk` | FS | no | yes | yes (Kokkos) | always |
 

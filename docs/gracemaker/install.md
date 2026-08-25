@@ -135,8 +135,8 @@ cmake -DCMAKE_BUILD_TYPE=Release -D BUILD_MPI=ON -DPKG_ML-PACE=ON -DNO_GRACE_TF=
 ```
 
 #### KOKKOS build
-KOKKOS support is available for `grace/fs`, `grace/1l/kk`, and `grace/2l/kk`.
-The `grace/1l/kk` and `grace/2l/kk` pair styles read a `.npz` weights file
+KOKKOS support is available for `grace/fs`, `grace/1l/kk`, `grace/2l/kk` and `grace/3l/kk`.
+The `grace/{1l,2l,3l}/kk` pair styles read a `.npz` weights file
 produced by `grace_utils export_kokkos` (see
 [utilities](../utilities/#export-to-npz-for-lammps-kokkos-pair-style))
 and do not require TensorFlow at runtime.
