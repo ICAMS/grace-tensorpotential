@@ -248,25 +248,20 @@ grace_uq build --model-yaml model.yaml \
                --artifact-path UQ/gmm_artifacts.npz
 ```
 
-Then attach it to a calculator and read `gamma` from the results:
+Alongside the artifact this writes a `saved_model/` with UQ baked in — just
+load it with the usual calculator and read `gamma` from the results:
 
 ```python
-from tensorpotential.uq.factories import get_gmm_uq_calculator
+from tensorpotential.calculator import TPCalculator
 
-at.calc = get_gmm_uq_calculator(
-    model_yaml="model.yaml",
-    checkpoint="checkpoint.best_test_loss",
-    gmm_artifact_path="UQ/gmm_artifacts.npz",
-)
+at.calc = TPCalculator(model="UQ/saved_model")
 at.get_potential_energy()
 at.calc.results["gamma"]         # per-atom extrapolation grades
 at.calc.results["atomic_sigma"]  # raw, unnormalized Mahalanobis distances
 ```
 
-`grace_uq build` also exports a `saved_model/` carrying a `compute_uq`
-signature — a plain `TPCalculator(model="saved_model")` auto-detects it and
-returns `gamma` as well (toggle with `calc.disable_uq()` / `calc.enable_uq()`
-if you want the faster non-UQ path).
+UQ is detected and enabled automatically; call `calc.disable_uq()` if you want
+the faster non-UQ path (and `calc.enable_uq()` to switch back).
 
 !!! tip "Foundation models often ship UQ already"
     Many distributed models come with `gmm_artifacts.npz` and a UQ head — no
