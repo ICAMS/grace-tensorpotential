@@ -286,6 +286,10 @@ file with
 [`export_kokkos --uq-artifacts`](../utilities/#baking-in-uq-uncertainty-quantification-artifacts) —
 γ is then computed from the same `.npz` at runtime, with no separate UQ file.
 
+For a model without a UQ artifact — or for a second, independent opinion — you
+can also fit several models with different seeds and use their spread:
+see [ensembling (query-by-committee)](../uq/#alternative-ensembling-query-by-committee).
+
 See the [Uncertainty Quantification](../uq/) page for the full pipeline,
 options, and the Python API.
 

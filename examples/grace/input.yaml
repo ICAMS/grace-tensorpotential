@@ -10,7 +10,7 @@ data:
 
 potential:
   #  elements: ["C", "H", "O"]
-  preset: "FS" # LINEAR, FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
+  preset: "FS" # FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
 
 fit:
   #  strategy: mirrored # or -m flag

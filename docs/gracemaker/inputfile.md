@@ -54,7 +54,7 @@ potential:
 
 
   ## Option 1. Presets
-  preset: GRACE_1LAYER_latest # LINEAR, FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
+  preset: GRACE_1LAYER_latest # FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
   # kwargs: {n_rad_max: 16}  # kw-arguments that will be passed to preset or custom model
 
   ## Option 2. Custom model in python file (advanced)

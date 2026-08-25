@@ -24,7 +24,7 @@ More details on customization will be provided in future documentation.
 Presets can be selected in `input.yaml` input file, in section `potential`:
 ```yaml
 potential:
-  # LINEAR, FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
+  # FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
   preset: "FS" 
   
   # kw-arguments that will be passed to preset or custom function
@@ -35,7 +35,7 @@ Latest and complete list of arguments can be found in definition of the models i
 
 !!! note "Preset names"
     The names above are the ones accepted by `input.yaml::potential::preset`:
-    `LINEAR`, `FS`, `GRACE_1LAYER_latest` (the default) and `GRACE_2LAYER_latest`.
+    `FS`, `GRACE_1LAYER_latest` (the default) and `GRACE_2LAYER_latest`.
     The `_latest` presets always point to the current recommended architecture;
     to pin the 2024 architecture instead, use `GRACE_1LAYER_v1_24` or
     `GRACE_2LAYER_v1_24`. Each preset also provides `small`, `medium` and

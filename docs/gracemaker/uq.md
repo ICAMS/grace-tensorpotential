@@ -377,3 +377,55 @@ When running Active Learning (e.g., HAL), you can update UQ artifacts incrementa
 uq_model.update_one(new_features, new_element_indices)
 uq_model.save("updated_artifacts.npz")
 ```
+
+---
+
+## Alternative: ensembling (query-by-committee)
+
+GMM-UQ needs a calibrated artifact and answers the question "is this environment
+inside the training distribution?". An **ensemble** answers a different one —
+"do independently trained models disagree here?" — and works for **any** GRACE
+model, including ones with no UQ artifact.
+
+Parameterize the same input several times with different seeds:
+
+```bash
+gracemaker ... --seed 1
+gracemaker ... --seed 2
+gracemaker ... --seed 3
+```
+
+This produces one model per seed in `seed/{number}/`. Pass them together to a
+single `TPCalculator`:
+
+```python
+from tensorpotential.calculator import TPCalculator
+
+calc_ens = TPCalculator(model=[
+    "fit/seed/1/saved_model/",
+    "fit/seed/2/saved_model/",
+    "fit/seed/3/saved_model/",
+])
+
+at.calc = calc_ens
+at.get_potential_energy()
+
+calc_ens.results["energy_std"]  # std. dev. of total energy over the ensemble
+calc_ens.results["forces_std"]  # std. dev. of forces
+calc_ens.results["stress_std"]  # std. dev. of stress
+```
+
+The reported `energy`/`forces`/`stress` are the ensemble **mean**; the `*_std`
+keys appear only when more than one model is given.
+
+**Cost and trade-offs.** An ensemble multiplies both fitting and inference cost
+by the number of models, and its spread is not calibrated against the training
+set — there is no equivalent of the "$\gamma \approx 1$ is the boundary"
+reading. Prefer `gamma` for routine screening, active learning and HAL, where a
+single model evaluation and a calibrated threshold matter; reach for an ensemble
+when you want a second, independent opinion, or for a model without a UQ
+artifact.
+
+For **GRACE/FS** models a third option is available: extrapolation grades based
+on D-optimality, in [ASE](../quickstart/#gracefs_1) and in
+[LAMMPS](../quickstart/#lammps-gracefs).
