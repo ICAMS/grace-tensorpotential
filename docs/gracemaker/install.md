@@ -74,7 +74,7 @@ Learn more [here](../foundation/#pretrained-grace-foundation-models).
 
 This is a standalone C++ implementation of the GRACE/FS model that can be executed on a CPU without the TensorFlow library and parallelized using standard MPI.
 
-* Activate the conda environment:
+* Activate the environment:
 ```bash
 micromamba activate grace   # or: conda activate grace
 ```
@@ -101,7 +101,7 @@ Once installed, you can use the `pace_activeset` utility to [generate](../quicks
 
 ## LAMMPS with GRACE
 
-* Activate the conda environment (it should contain TensorFlow):
+* Activate the environment (it should contain TensorFlow):
 ```bash
 micromamba activate grace   # or: conda activate grace
 ```

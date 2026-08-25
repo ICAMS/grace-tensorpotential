@@ -165,8 +165,7 @@ fit:
   ## To use jit_compile efficiently, data must be padded.
   ## Bucket is a group of batches padded to the same shape for efficient JIT execution.
   ## max_n_buckets can be an integer or "auto".
-  ## In "auto" mode, the smallest number of buckets (1-32) that keeps the neighbour-padding
-  ## overhead below `auto_bucket_max_padding` is selected.
+  ## In "auto" mode, the bucket count is chosen automatically (see `auto_bucket_max_padding` below).
   ## `train_max_n_buckets`: "auto" (default) or integer. Max number of distinct buffer shapes (buckets) for training.
   ##   - "auto": dynamically determines the minimum number of buckets (1-32) that keeps padding overhead below `auto_bucket_max_padding`.
   ## `test_max_n_buckets`: "auto" (default) or integer. Same for test set.
