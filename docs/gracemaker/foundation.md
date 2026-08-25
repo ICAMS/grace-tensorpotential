@@ -55,7 +55,7 @@ They offer the best balance of structural robustness (from SMAX) and high-precis
 
 ## OMAT models
 
-Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1) (open access)
 
 The base models (**-OMAT**) are trained on the [OMat24](https://huggingface.co/datasets/fairchem/OMAT24#omat24-dataset) dataset.
 The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by fine-tuning with more emphasis on energies.
@@ -64,7 +64,7 @@ The fine-tuned versions (**-OMAT-ft-E**) are derived from these base models by f
 
 ### Three-layer (3L) models
 
-Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1) (open access)
 
 The **three-layer (3L)** GRACE models add a third message-passing layer for a larger
 effective receptive field. The 3L models use a fixed **6 Å cutoff** and ship with UQ. They are
@@ -102,7 +102,7 @@ natively **fp32** (there is no `-fp64` variant). For LAMMPS-Kokkos use
 
 ## OAM models
 
-Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1), [arXiv](https://arxiv.org/abs/2508.17936)
+Reference: [npj Comp. Mat.](https://www.nature.com/articles/s41524-026-01979-1) (open access)
 
 These models are first pre-trained on **OMat24** and then fine-tuned on a combination of the [sAlex](https://huggingface.co/datasets/fairchem/OMAT24#salex-dataset) dataset (10.4M structures) and the [MPtraj](https://figshare.com/articles/dataset/Materials_Project_Trjectory_MPtrj_Dataset/23713842?file=41619375) dataset (1.58M structures).
 
