@@ -12,13 +12,6 @@ The NCM-UQ method provides a per-atom uncertainty estimate by:
 3.  Calculating the Mahalanobis distance of a new environment to its **nearest** cluster centroid.
 4.  Calibrating these distances against the training data to provide a normalized uncertainty metric.
 
-!!! note "`gmm` in file and class names"
-    The method is a nearest-cluster Mahalanobis distance: each atom is assigned to one cluster and
-    scored against that cluster's covariance — there are no mixture weights or soft responsibilities,
-    so it is not a Gaussian mixture model in the statistical sense. The artifact file
-    (`gmm_artifacts.npz`), the array keys and the Python classes (`GMMUQModel`,
-    `GMMUQArtifactBuilder`) keep their historical `gmm` names for backwards compatibility.
-
 ### Feature space (basis-RP)
 
 The UQ feature **z** is a fixed, seeded **Johnson–Lindenstrauss random projection** of the model's
