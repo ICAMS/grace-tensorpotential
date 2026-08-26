@@ -127,6 +127,7 @@ gracemaker
 ```
 
 During this process:
+
 * **Preprocessing and Data Preparation**: Tasks such as building neighbor lists will be performed.
 * **JIT Compilation**: The first epoch may take additional time due to JIT compilation for each training and testing bucket.
 
