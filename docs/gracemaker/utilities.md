@@ -268,7 +268,7 @@ Use `--arch 1l` / `--arch 2l` / `--arch 3l` to override architecture auto-detect
 
 ##### Baking in UQ (uncertainty quantification) artifacts
 
-If the model has a GMM-based UQ artifact (`gmm_artifacts.npz`, schema v2),
+If the model has an NCM-based UQ artifact (`gmm_artifacts.npz`, schema v2),
 pass it via `--uq-artifacts` to bake the dense `uq_*` arrays — cluster
 centroids, per-cluster inverse covariances, gamma extrapolation-grade
 thresholds, and the per-element force-error model — directly into the
@@ -377,7 +377,7 @@ options:
 
 ## `grace_uq`
 
-Utility to build GMM-based uncertainty-quantification (UQ) artifacts for trained
+Utility to build NCM-based (nearest-cluster Mahalanobis) uncertainty-quantification (UQ) artifacts for trained
 GRACE models, calibrate the per-atom extrapolation grade `gamma`, and stamp the
 artifacts into checkpoints / exports.
 

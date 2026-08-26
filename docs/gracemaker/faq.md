@@ -233,14 +233,14 @@ Alternatively, use `grace/1layer/chunk`, `grace/2layer/chunk`, or `grace/2layer/
 
 Use the per-atom extrapolation grade **`gamma`** — the single UQ signal
 reported by GRACE models. It is the Mahalanobis distance of an atomic
-environment to its nearest GMM cluster in the model's own latent space,
+environment to its nearest cluster in the model's own latent space,
 normalized by a calibrated per-cluster threshold, so it is dimensionless:
 
 * $\gamma \lesssim 1$ — the environment lies inside the training distribution.
 * $\gamma \approx 1$ — the atom sits at the boundary of the training distribution.
 * $\gamma \gg 1$ — extrapolation; treat the prediction as unreliable.
 
-**GRACE-1L/2L/3L models** need a GMM-UQ artifact, built once from the training
+**GRACE-1L/2L/3L models** need an NCM-UQ artifact, built once from the training
 set with [`grace_uq build`](../uq/#grace_uq-build):
 
 ```bash

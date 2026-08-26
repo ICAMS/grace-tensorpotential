@@ -137,7 +137,8 @@ by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L / GRACE-3
 #### Uncertainty quantification (UQ) artifact (for GRACE-1L/2L/3L models)
 
 To equip a fitted model with a per-atom extrapolation grade (`gamma`), build a
-GMM-UQ artifact from the training set with [`grace_uq build`](../uq/#grace_uq-build):
+NCM-UQ artifact (nearest-cluster Mahalanobis distance) from the training set with
+[`grace_uq build`](../uq/#grace_uq-build):
 
 ```bash
 grace_uq build --model-yaml /path/to/model.yaml \

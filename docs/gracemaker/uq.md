@@ -1,14 +1,23 @@
 # Uncertainty Quantification (UQ)
 
-This guide covers the Uncertainty Quantification features in `gracemaker`, specifically the GMM-UQ (Gaussian Mixture Model - Uncertainty Quantification) pipeline.
+This guide covers the Uncertainty Quantification features in `gracemaker`, specifically the
+**NCM-UQ** (nearest-cluster Mahalanobis distance) pipeline.
 
 ## Overview
 
-The GMM-UQ method provides a per-atom uncertainty estimate by:
+The NCM-UQ method provides a per-atom uncertainty estimate by:
+
 1.  Mapping atoms to a local environment "latent space" (the basis-RP feature, below).
-2.  Clustering these environments using a Gaussian Mixture Model (GMM).
-3.  Calculating the Mahalanobis distance of a new environment to its assigned cluster centroid.
+2.  Clustering these environments per chemical element (streaming *k*-means).
+3.  Calculating the Mahalanobis distance of a new environment to its **nearest** cluster centroid.
 4.  Calibrating these distances against the training data to provide a normalized uncertainty metric.
+
+!!! note "`gmm` in file and class names"
+    The method is a nearest-cluster Mahalanobis distance: each atom is assigned to one cluster and
+    scored against that cluster's covariance — there are no mixture weights or soft responsibilities,
+    so it is not a Gaussian mixture model in the statistical sense. The artifact file
+    (`gmm_artifacts.npz`), the array keys and the Python classes (`GMMUQModel`,
+    `GMMUQArtifactBuilder`) keep their historical `gmm` names for backwards compatibility.
 
 ### Feature space (basis-RP)
 
@@ -19,7 +28,9 @@ $\ell=0$ basis functions entering those reduces (dimension $D_\text{basis}$, typ
 and multiplies by a frozen matrix $R \in \mathbb{R}^{D_\text{basis}\times d}$ with
 $R = \mathcal{N}(0,1)/\sqrt{d}$:
 
-$$\mathbf{z} = \mathbf{b}_{\ell=0}\, R, \qquad d = \texttt{rp\_dim}\ (\text{default } 128).$$
+$$\mathbf{z} = \mathbf{b}_{\ell=0}\, R$$
+
+The projection dimension $d$ is set by `rp_dim` (default 128).
 
 $R$ is generated deterministically from `rp_seed` (default 42), so every build worker and the eval/export
 paths use a byte-identical matrix; it is stored verbatim in the artifact (key `uq_rp_matrix`) and baked
@@ -33,28 +44,33 @@ Given the feature vector **z** above for an atom of element *e*:
 
 1.  **Cluster assignment** — assign to the nearest centroid by Euclidean distance:
 
-$$k^* = \arg\min_k \| \mathbf{z} - \boldsymbol{\mu}_{e,k} \|^2$$
+    $$k^* = \arg\min_k \| \mathbf{z} - \boldsymbol{\mu}_{e,k} \|^2$$
 
 2.  **Sigma** (`atomic_sigma`) — Mahalanobis distance to the assigned centroid:
 
-$$\sigma = \sqrt{(\mathbf{z} - \boldsymbol{\mu}_{e,k^*})^\top \, \Sigma_{e,k^*}^{-1} \, (\mathbf{z} - \boldsymbol{\mu}_{e,k^*})}$$
+    $$\sigma = \sqrt{(\mathbf{z} - \boldsymbol{\mu}_{e,k^*})^\top \, \Sigma_{e,k^*}^{-1} \, (\mathbf{z} - \boldsymbol{\mu}_{e,k^*})}$$
 
-where $\boldsymbol{\mu}_{e,k}$ and $\Sigma_{e,k}$ are the centroid and covariance matrix of cluster *k* for element *e*.
+    where $\boldsymbol{\mu}_{e,k}$ and $\Sigma_{e,k}$ are the centroid and covariance matrix of
+    cluster *k* for element *e*.
 
 3.  **Gamma** (`gamma`) — sigma normalized by the calibrated per-cluster threshold:
 
-$$\gamma = \frac{\sigma}{\theta_{e,k^*}}$$
+    $$\gamma = \frac{\sigma}{\theta_{e,k^*}}$$
 
-where $\theta_{e,k}$ is a robust upper fence on the training sigma for cluster *k* of element *e*, computed as $\mathrm{median} + 3 \cdot (1.4826 \cdot \mathrm{MAD})$ (a tail-immune ~3-sigma bound; deliberately *not* a p99 quantile, so a heavy outlier tail can't inflate the threshold and leave the bulk over-lenient). $\gamma \approx 1$ means the atom is at the boundary of the training distribution; $\gamma \gg 1$ indicates an out-of-distribution environment. `gamma` is the sole UQ signal — the dimensionless extrapolation grade used for screening, active learning, and HAL.
+Here $\theta_{e,k}$ is a robust upper fence on the training sigma for cluster *k* of element *e*, computed as $\mathrm{median} + 3 \cdot (1.4826 \cdot \mathrm{MAD})$ (a tail-immune ~3-sigma bound; deliberately *not* a p99 quantile, so a heavy outlier tail can't inflate the threshold and leave the bulk over-lenient). $\gamma \approx 1$ means the atom is at the boundary of the training distribution; $\gamma \gg 1$ indicates an out-of-distribution environment. `gamma` is the sole UQ signal — the dimensionless extrapolation grade used for screening, active learning, and HAL.
 
-The pipeline has two parts:
+The pipeline has two stages:
 
--   **Post-training (required)**: fit the GMM on features extracted from a trained model, calibrate thresholds, and attach the artifact to a calculator. This is the `grace_uq` pipeline below.
+-   **Build (post-training, required)** — fit the per-element clusters on features extracted from a
+    trained model, accumulate covariances and calibrate the thresholds. This is the
+    [`grace_uq build`](#grace_uq-build) pipeline below.
+-   **Inference** — attach the artifact (or load the exported SavedModel / Kokkos `.npz` that carries
+    it) and read `gamma` per atom in ASE, in `grace_uq predict`, or in LAMMPS.
 
 
 ## CLI tool: `grace_uq`
 
-`grace_uq` is a multi-subcommand CLI built around the GMM-UQ pipeline:
+`grace_uq` is a multi-subcommand CLI built around the NCM-UQ pipeline:
 
 | Subcommand | Purpose |
 | :--- | :--- |
@@ -110,7 +126,7 @@ No `--train-data` is needed — only the model and existing artifacts.
 | `--train-data-weighted` | Repeatable. First token is a per-source weight (float > 0), remaining tokens are training shard paths. Atoms from those shards carry that weight in centroid placement, covariance accumulation, and the calibration histogram. See [Weighted multi-source builds](#weighted-multi-source-builds) below. Mutually exclusive with `--train-data`. Pickle/df shards only — not supported for sharded TF datasets. |
 | `--filter-fn` | Dotted import path `module.path:function_name` to a callable `filter_atoms(ase.Atoms) -> bool`. False-returning structures are dropped during ingest, before `--frac` subsampling. The module must be importable on the worker's `PYTHONPATH`. Pickle/df shards only. See [Structure filtering](#structure-filtering). |
 | `--n-workers` | Number of parallel processes to spawn for feature extraction and accumulation (default: 1). |
-| `--n-clusters` | Number of GMM clusters per chemical element (default: `1 2 4 8 16`). Pass a single value to use it directly, or multiple values to run the elbow method and automatically select the optimal k. |
+| `--n-clusters` | Number of clusters per chemical element (default: `1 2 4 8 16`). Pass a single value to use it directly, or multiple values to run the elbow method and automatically select the optimal k. |
 | `--max-neighbours-per-batch` | Target number of neighbour pairs per batch for streaming (pickle) input (default: 15000). Controls GPU memory usage. Ignored for sharded TF datasets (batches are pre-padded). |
 | `--frac` | Float (0.0 to 1.0). Use a random fraction of the training data to speed up artifact generation. |
 | `--seed` | Random seed for data shuffling and KMeans initialization (default: 42). |
@@ -195,11 +211,8 @@ Each of steps 1–3 splits the training data across `--n-workers` parallel proce
     -   Outputs `.step1_final.npz` with global centroids for the selected k.
 
 2.  **Covariance Accumulation**:
-    -   Each worker streams through its data shard again, assigns each atom's feature vector to the nearest global centroid (Euclidean distance), and accumulates per-cluster **scatter matrices**:
-        $S_{e,k} = \sum_{i \in \text{cluster } k} (\mathbf{z}_i - \boldsymbol{\mu}_{e,k})(\mathbf{z}_i - \boldsymbol{\mu}_{e,k})^\top$
-        and cluster counts $n_{e,k}$.
-    -   The master **sums** scatter matrices and counts across all workers (scatter and counts are additive), then computes the per-cluster covariance and its regularized inverse:
-        $\Sigma_{e,k} = S_{e,k} / n_{e,k} + \epsilon I, \qquad \Sigma_{e,k}^{-1} = \text{pinv}(\Sigma_{e,k})$
+    -   Each worker streams through its data shard again, assigns each atom's feature vector to the nearest global centroid (Euclidean distance), and accumulates per-cluster **scatter matrices** $S_{e,k} = \sum_{i \in \text{cluster } k} (\mathbf{z}_i - \boldsymbol{\mu}_{e,k})(\mathbf{z}_i - \boldsymbol{\mu}_{e,k})^\top$ and cluster counts $n_{e,k}$.
+    -   The master **sums** scatter matrices and counts across all workers (scatter and counts are additive), then computes the per-cluster covariance and its regularized inverse: $\Sigma_{e,k} = S_{e,k} / n_{e,k} + \epsilon I$ and $\Sigma_{e,k}^{-1} = \text{pinv}(\Sigma_{e,k})$.
     -   After finalization, the master prints **covariance diagnostics** per element: condition number, effective rank, and number of truncated eigenvalues. High condition numbers (> 1e10) indicate ill-conditioned clusters that may produce unreliable uncertainty estimates.
     -   Outputs `.step2_final.npz` with centroids, inverse covariance matrices, and counts.
 
@@ -214,7 +227,7 @@ Each of steps 1–3 splits the training data across `--n-workers` parallel proce
     -   Exports a TF SavedModel with `compute`, `compute_uq` (full, includes `dsigma_dr`), and `compute_uq_gamma_only` (faster, no uncertainty-force backward pass) signatures.
     -   Output directory defaults to `saved_model/` next to the artifact file.
 
-> **Artifact format (schema v3).** The `.npz` stores the GMM statistics as **float32** (the model
+> **Artifact format (schema v3).** The `.npz` stores the cluster statistics as **float32** (the model
 > runs float32, so this is lossless and halves the file; raw and effective counts stay float64 for
 > exact round-trip), plus the self-describing basis-RP spec: `uq_feature_mode`, `uq_rp_matrix` ($R$),
 > `uq_rp_dim`, `uq_rp_seed`. `grace_utils export_kokkos --uq-artifacts` likewise bakes $R$
@@ -382,7 +395,7 @@ uq_model.save("updated_artifacts.npz")
 
 ## Alternative: ensembling (query-by-committee)
 
-GMM-UQ needs a calibrated artifact and answers the question "is this environment
+NCM-UQ needs a calibrated artifact and answers the question "is this environment
 inside the training distribution?". An **ensemble** answers a different one —
 "do independently trained models disagree here?" — and works for **any** GRACE
 model, including ones with no UQ artifact.
