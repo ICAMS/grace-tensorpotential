@@ -71,8 +71,9 @@ markdown_extensions:
   - pymdownx.blocks.caption
 
 extra_javascript:
+  # Configures MathJax and loads it from a pinned, SRI-checked URL.
+  # See docs/javascripts/mathjax.js to change the version.
   - javascripts/mathjax.js
-  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 #extra_css:
 #  - stylesheets/extra.css
