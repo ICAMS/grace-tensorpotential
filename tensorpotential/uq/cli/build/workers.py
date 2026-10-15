@@ -17,6 +17,7 @@ from tensorpotential.tensorpot import TensorPotential
 from tensorpotential.uq import GMMUQArtifactBuilder, GMMUQModel
 from tensorpotential.uq import constants as uq_constants
 from tensorpotential.uq.cli.build.paths import _worker_dir
+from tensorpotential.uq.cli.build.thresholds import SIGMA_HIST_N_BINS, sigma_bin_index
 
 log = logging.getLogger("grace_uq")
 
@@ -220,9 +221,8 @@ def run_worker_step3(args, feature_iter, tp):
     """
     param_dtype = tp.param_dtype
     gmm_uq = GMMUQModel(args.step2_artifacts, param_dtype=param_dtype)
-    n_bins, low, high = 250, 0, 100
+    n_bins = SIGMA_HIST_N_BINS
     n_clusters = args.n_clusters[0]
-    scale = n_bins / (high - low)
     hists = defaultdict(lambda: np.zeros((n_clusters, n_bins), dtype=np.int64))
     eff_hists = defaultdict(lambda: np.zeros((n_clusters, n_bins), dtype=np.float64))
 
@@ -240,7 +240,7 @@ def run_worker_step3(args, feature_iter, tp):
         # weighted histogram then equals the raw one and we accumulate it
         # by reusing the int64 flat result as a float view.
         batch_unweighted = bool(np.all(w_np == 1.0))
-        s_bins = np.clip(((s_np - low) * scale).astype(np.int64), 0, n_bins - 1)
+        s_bins = sigma_bin_index(s_np)
         for e in np.unique(elems):
             mask_e = elems == e
             combined = a_np[mask_e] * n_bins + s_bins[mask_e]
@@ -280,11 +280,17 @@ def export_savedmodel(args):
 
     instructions = load_instructions(args.model_yaml)
     tp = TensorPotential(potential=instructions, param_dtype=param_dtype)
+    # Read only the model-weights subtree (model_only=True), exactly as
+    # factories.load_uq_model does: the export needs no training bookkeeping
+    # (step/epoch/intra_epoch_save) or optimizer slots, and without it the
+    # strict object match below fails on any checkpoint written before
+    # intra_epoch_save existed (2026-04-23) -- which is most of the deployed
+    # foundation models, and every checkpoint from a fit older than that.
     # expect_partial=True silences the noisy "checkpoint deleted with
-    # unrestored values" warnings at GC time. The unmatched values are the
-    # optimizer slots/iterations, which the SavedModel export does not need.
+    # unrestored values" warnings at GC time.
     tp.load_checkpoint(
         checkpoint,
+        model_only=True,
         assert_consumed=False,
         # GRACE_UQ_LENIENT_LOAD: see factories.load_uq_model. Strict by default.
         assert_existing_objects_matched=not os.environ.get("GRACE_UQ_LENIENT_LOAD"),

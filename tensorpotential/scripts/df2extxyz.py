@@ -57,6 +57,15 @@ def sizeof_fmt(file_name_or_size, suffix="B"):
     return "%.1f%s%s" % (file_name_or_size, "Yi", suffix)
 
 
+def default_output_filename(input_fname: str) -> str:
+    """``data.pkl.gz`` (or ``.pckl.gz``, ``.pkl.gzip``, ``.pckl.gzip``) -> ``data.xyz``;
+    any other name gets ``.xyz`` appended."""
+    for ext in (".pckl.gzip", ".pckl.gz", ".pkl.gzip", ".pkl.gz"):
+        if input_fname.endswith(ext):
+            return input_fname[: -len(ext)] + ".xyz"
+    return input_fname + ".xyz"
+
+
 def main(args=None):
     parser = build_parser()
     args_parse = parser.parse_args(args)
@@ -94,10 +103,7 @@ def main(args=None):
 
     output_fname = args_parse.output
     if output_fname is None:
-        ext_to_replace = [".pckl.gzip", "pckl.gz", ".pkl.gzip", ".pkl.gz"]
-        output_fname = input_fname
-        for ext in ext_to_replace:
-            output_fname = output_fname.replace(ext, ".xyz")
+        output_fname = default_output_filename(input_fname)
     logging.info(f"Writing to output filename: {output_fname}")
     write(output_fname, atoms_list, format="extxyz")
     logging.info(f"Saved to {output_fname} ({sizeof_fmt(output_fname)})")

@@ -73,7 +73,10 @@ from tensorpotential.uq.cli.build.thresholds import (
     _print_covariance_diagnostics,
     _save_elbow_plot,
     _save_elbow_report,
+    narrow_sigma_clusters,
+    print_narrow_sigma_warning,
     select_optimal_clusters,
+    sigma_hist_edges,
 )
 from tensorpotential.uq.cli.build.workers import (
     export_savedmodel,
@@ -134,6 +137,7 @@ def run_master(args):
 
     # Intermediate files go next to the output file.
     work_dir = os.path.dirname(args.artifact_path) or "."
+    os.makedirs(work_dir, exist_ok=True)
 
     def _wpath(name):
         return os.path.join(work_dir, name)
@@ -597,7 +601,7 @@ def run_master(args):
                         )
                         total_eff_hists[e] += eff_inc
 
-        bins = np.linspace(0, 100, 250)
+        edges = sigma_hist_edges()
         n_clusters = args.n_clusters[0]
         # Minimum atoms required for a stable threshold estimate. A cluster with
         # fewer calibration atoms produces an unreliable threshold (its sigma
@@ -624,7 +628,7 @@ def run_master(args):
         threshold_percentile = args.threshold_percentile
         thresh_matrix, eff_thresh_matrix, underpop_warnings, elementwise_fallback_warnings = (
             _compute_dual_thresholds(
-                total_hists, total_eff_hists, bins, n_clusters,
+                total_hists, total_eff_hists, edges, n_clusters,
                 min_atoms_for_threshold, n_elements=len(master_symbols),
                 threshold_percentile=threshold_percentile,
             )
@@ -710,6 +714,15 @@ def run_master(args):
                 ellipsis,
             )
 
+        if threshold_percentile is None:  # median + k*MAD is the bin-sensitive one
+            print_narrow_sigma_warning(
+                narrow_sigma_clusters(
+                    total_hists, total_eff_hists, edges, min_atoms_for_threshold
+                ),
+                element_names,
+                n_clusters,
+            )
+
         # Save per-element-per-cluster histograms (raw + weighted) for later
         # recalibration / inspection. Both threshold matrices are persisted;
         # inference prefers the weighted one when present.
@@ -746,7 +759,7 @@ def run_master(args):
             interp_thresholds=thresh_matrix,
             eff_interp_thresholds=eff_thresh_matrix,
             element_map=np.array(symbols),
-            hist_bins=bins,
+            hist_bin_edges=edges,
             threshold_mode=np.array(threshold_mode),
             **hist_kwargs,
             **rp_kwargs,

@@ -169,14 +169,17 @@ def test_spawn_and_monitor_forwards_progress_lines_to_stdout_when_no_handler(cap
     assert progress_line in out
 
 
-def test_spawn_and_monitor_round_robins_cuda_visible_devices(tmp_path):
-    """Each worker should see CUDA_VISIBLE_DEVICES = gpus[i % len(gpus)]."""
+def test_spawn_and_monitor_round_robins_cuda_visible_devices(tmp_path, monkeypatch):
+    """Each worker should see CUDA_VISIBLE_DEVICES = gpus[i % len(gpus)] and
+    TF_FORCE_GPU_ALLOW_GROWTH=true (workers share GPUs), whatever the parent has."""
+    monkeypatch.setenv("TF_FORCE_GPU_ALLOW_GROWTH", "false")
     out_files = [str(tmp_path / f"w{i}.txt") for i in range(4)]
     cmds = []
     for i, out_path in enumerate(out_files):
         body = (
             "import os\n"
-            f"open({out_path!r}, 'w').write(os.environ.get('CUDA_VISIBLE_DEVICES', ''))\n"
+            f"open({out_path!r}, 'w').write(os.environ.get('CUDA_VISIBLE_DEVICES', '')"
+            " + ',' + os.environ.get('TF_FORCE_GPU_ALLOW_GROWTH', ''))\n"
         )
         cmds.append((i, [sys.executable, "-c", body]))
 
@@ -184,10 +187,7 @@ def test_spawn_and_monitor_round_robins_cuda_visible_devices(tmp_path):
         cmds, gpus=["0", "1"], threads_per_worker=0, verbose=False
     )
 
-    assert open(out_files[0]).read() == "0"
-    assert open(out_files[1]).read() == "1"
-    assert open(out_files[2]).read() == "0"
-    assert open(out_files[3]).read() == "1"
+    assert [open(f).read() for f in out_files] == ["0,true", "1,true", "0,true", "1,true"]
 
 
 def test_spawn_and_monitor_sets_thread_env_vars_when_positive(tmp_path):

@@ -153,3 +153,25 @@ def test_a_real_not_implemented_error_is_not_mistaken_for_a_missing_property():
     with pytest.raises(NotImplementedError):
         predict_structures(_structures([2]), BrokenStress(),
                            properties=("energy", "stress"))
+
+
+def test_postprocess_reduces_extra_values_per_structure():
+    """postprocess sees one structure's extra values and may drop or add keys; new keys
+    are aligned with the input order (None where it did not set them)."""
+    sizes = [1, 4, 2]
+    seen = []
+
+    def post(values):
+        seen.append(len(values["gamma"]))
+        g = values.pop("gamma")
+        if len(g) > 1:
+            values["big"] = g[:1]
+        return values
+
+    out = predict_structures(_structures(sizes), RecordingCalc(), properties=("energy",),
+                             extra=("gamma",), postprocess=post)
+    assert seen == [4, 2, 1]  # largest first, one structure at a time
+    assert out["gamma"] == [None, None, None]
+    assert out["big"][0] is None
+    np.testing.assert_allclose(out["big"][1], [2.0])
+    np.testing.assert_allclose(out["big"][2], [1.0])

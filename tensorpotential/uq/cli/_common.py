@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import time
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -20,12 +21,10 @@ PKL_EXTS = (".pkl.gz", ".pkl.gzip", ".pckl.gz", ".pckl.gzip", ".pkl")
 XYZ_EXTS = (".xyz", ".extxyz")
 
 
-# Sentinel slots in step-1 / step-2 artifacts: pad rows whose centroid
-# components are written as ``SENTINEL_CENTROID_VALUE`` so atoms never
-# bind there at inference time. Detection uses a slightly looser threshold
-# so any large-magnitude centroid (incl. accidental drift) is also caught.
-SENTINEL_CENTROID_VALUE: float = 1e10
-SENTINEL_DETECTION_THRESHOLD: float = 1e9
+# Sentinel slots in step-1 / step-2 artifacts: defined in uq.constants, re-exported here
+# for the existing imports.
+SENTINEL_CENTROID_VALUE = uq_constants.SENTINEL_CENTROID_VALUE
+SENTINEL_DETECTION_THRESHOLD = uq_constants.SENTINEL_DETECTION_THRESHOLD
 
 
 def is_sentinel_mask(centroids: np.ndarray) -> np.ndarray:
@@ -41,14 +40,63 @@ def is_pkl_path(path: str) -> bool:
     return any(path.lower().endswith(ext) for ext in PKL_EXTS)
 
 
-def load_dataset_any(path: str) -> pd.DataFrame:
-    """Load a dataframe from pkl.gz (default) or extxyz.
+def is_lammps_dump_path(path: str) -> bool:
+    """A LAMMPS text dump, whatever its name: the first line is ``ITEM: TIMESTEP``."""
+    if is_extxyz_path(path) or is_pkl_path(path):
+        return False
+    try:
+        with open(path) as f:
+            return f.readline().strip() == "ITEM: TIMESTEP"
+    except (OSError, UnicodeDecodeError):
+        return False
 
-    Returns a DataFrame with at least an `ase_atoms` column.
+
+def load_lammps_dump(path: str, elements=None) -> pd.DataFrame:
+    """Read every frame of a LAMMPS text dump into an ``ase_atoms`` DataFrame.
+
+    The species come from the dump's ``element`` column; without it, ``elements``
+    maps atom type 1, 2, ... to element names (``--dump-elements``). Without either,
+    ASE would silently read type 1 as H, type 2 as He, so this is an error.
+    """
+    from ase.io import read
+
+    with open(path) as f:
+        columns = next((ln.split()[2:] for ln in f if ln.startswith("ITEM: ATOMS")), [])
+    frames = read(path, index=":", format="lammps-dump-text")
+    if "element" in columns:
+        if elements:
+            log.warning("%s has an element column: --dump-elements is ignored.", path)
+    elif not elements:
+        raise SystemExit(
+            f"{path}: the LAMMPS dump has no element column, so its atom types cannot "
+            "be mapped to elements. Add `element` to the dump columns (with "
+            "`dump_modify <ID> element Al Li ...`), or pass --dump-elements with one "
+            "element per atom type, type 1 first."
+        )
+    else:
+        for at in frames:
+            n_types = int(at.arrays["type"].max())
+            if n_types > len(elements):
+                raise SystemExit(
+                    f"{path}: the dump has atom type {n_types}, but --dump-elements "
+                    f"names only {len(elements)} element(s): {' '.join(elements)}."
+                )
+            at.set_chemical_symbols([elements[t - 1] for t in at.arrays["type"]])
+    log.info("Read %d frame(s) from LAMMPS dump %s", len(frames), path)
+    return pd.DataFrame({"ase_atoms": frames})
+
+
+def load_dataset_any(path: str, dump_elements=None) -> pd.DataFrame:
+    """Load a dataframe from pkl.gz (default), extxyz or a LAMMPS text dump.
+
+    Returns a DataFrame with at least an `ase_atoms` column. ``dump_elements``
+    maps LAMMPS atom types to elements for a dump without an element column.
     """
     if is_extxyz_path(path):
         from tensorpotential.cli.data import load_extxyz
         return load_extxyz(path)
+    if is_lammps_dump_path(path):
+        return load_lammps_dump(path, dump_elements)
     compression = "gzip" if path.endswith((".gz", ".gzip")) else "infer"
     return pd.read_pickle(path, compression=compression)
 
@@ -104,12 +152,17 @@ def _save_extxyz(
 def slice_dataset_for_worker(
     df: pd.DataFrame, worker_id: int, n_workers: int
 ) -> pd.DataFrame:
-    """Round-robin row split: worker_id keeps rows where idx % n_workers == worker_id."""
+    """Round-robin row split: worker_id keeps rows where row % n_workers == worker_id.
+
+    With several workers, ``_orig_index`` holds each row's position in ``df`` (not its
+    index label, which may be duplicated or unordered) so the shards can be merged back
+    into input order.
+    """
     if n_workers <= 1:
         return df.reset_index(drop=True)
-    return df.iloc[worker_id::n_workers].reset_index(drop=False).rename(
-        columns={"index": "_orig_index"}
-    )
+    shard = df.iloc[worker_id::n_workers].reset_index(drop=True)
+    shard["_orig_index"] = np.arange(len(df))[worker_id::n_workers]
+    return shard
 
 
 def alignment_perm_from_hist(hist: np.ndarray, counts: np.ndarray):
@@ -174,8 +227,9 @@ def read_artifact_metadata(artifact_path: str) -> dict:
 
     Returns a dict with: D (feature_dim), n_elements, K_max, element_map (or None),
     has_thresholds, has_histograms, artifacts (full per-element dict), interp_thresholds,
-    eff_interp_thresholds, hist_bins, hist_arrays / eff_hist_arrays
-    ({elem_idx: np.ndarray[K, n_bins]}, or None if not stored).
+    eff_interp_thresholds, hist_bin_edges ([n_bins + 1]) and hist_bins (left edges),
+    hist_arrays / eff_hist_arrays ({elem_idx: np.ndarray[K, n_bins]}, or None if
+    not stored).
     """
     artifacts = GMMUQArtifactBuilder.load(artifact_path)
     with np.load(artifact_path, allow_pickle=True) as data:
@@ -197,9 +251,16 @@ def read_artifact_metadata(artifact_path: str) -> dict:
             if "eff_interp_thresholds" in data.files
             else None
         )
-        hist_bins = (
-            np.asarray(data["hist_bins"]) if "hist_bins" in data.files else None
-        )
+        # New builds store the bin edges (log grid); older ones the left edges of a
+        # uniform grid, whose last edge is one bin width past the last left edge.
+        if "hist_bin_edges" in data.files:
+            hist_bin_edges = np.asarray(data["hist_bin_edges"], dtype=np.float64)
+        elif "hist_bins" in data.files:
+            b = np.asarray(data["hist_bins"], dtype=np.float64)
+            hist_bin_edges = np.append(b, b[-1] + (b[1] - b[0]))
+        else:
+            hist_bin_edges = None
+        hist_bins = hist_bin_edges[:-1] if hist_bin_edges is not None else None
         # Which estimator produced interp_thresholds. Absent on artifacts built
         # before the option existed, which were all robust median+k*MAD.
         threshold_mode = (
@@ -210,7 +271,7 @@ def read_artifact_metadata(artifact_path: str) -> dict:
         hist_arrays: dict[int, np.ndarray] = {}
         eff_hist_arrays: dict[int, np.ndarray] = {}
         for key in data.files:
-            if key == "hist_bins":
+            if key in ("hist_bins", "hist_bin_edges"):
                 continue
             if key.startswith("hist_"):
                 try:
@@ -274,6 +335,7 @@ def read_artifact_metadata(artifact_path: str) -> dict:
         "interp_thresholds": interp_thresholds,
         "eff_interp_thresholds": eff_interp_thresholds,
         "hist_bins": hist_bins,
+        "hist_bin_edges": hist_bin_edges,
         "threshold_mode": threshold_mode,
         "hist_arrays": hist_arrays or None,
         "eff_hist_arrays": eff_hist_arrays or None,
@@ -312,6 +374,26 @@ def parse_progress(line: str) -> tuple[int, int] | None:
         return None
 
 
+_THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_MAX_THREADS", "TF_NUM_INTEROP_THREADS", "TF_NUM_INTRAOP_THREADS")
+
+
+def worker_env(gpu, threads: int) -> dict:
+    """Environment of one worker subprocess: one GPU (``None``: none, CPU only), GPU
+    memory allocated on demand (workers may share a GPU), ``threads`` CPU threads for
+    OMP/MKL/OpenBLAS/numexpr/TF (``0``: no limit)."""
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = "-1" if gpu is None else str(gpu)
+    env["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+    if threads > 0:
+        env.update({v: str(threads) for v in _THREAD_VARS})
+    return env
+
+
+# Hidden (non-verbose) output lines kept per worker and shown if it fails.
+FAILED_WORKER_TAIL_LINES = 40
+
+
 def spawn_and_monitor(
     cmds: list[tuple[int, list[str]]],
     *,
@@ -323,29 +405,22 @@ def spawn_and_monitor(
 ) -> list[int]:
     """Spawn each (worker_id, cmd) tuple as a subprocess, stream their stdout, return failed ids.
 
-    GPU assignment is round-robin via CUDA_VISIBLE_DEVICES env var.
+    GPU assignment is round-robin via CUDA_VISIBLE_DEVICES env var; every worker
+    allocates GPU memory on demand (TF_FORCE_GPU_ALLOW_GROWTH=true).
 
     If ``progress_handler`` is given, it is called as
     ``progress_handler(worker_id, line)`` for every line starting with
     :data:`PROGRESS_PREFIX`; such lines are then suppressed from normal stdout
     forwarding so the master can render a single combined bar.
+
+    Without ``verbose`` most worker output is hidden; the last
+    :data:`FAILED_WORKER_TAIL_LINES` hidden lines of a failed worker (its
+    traceback) are printed when it exits non-zero.
     """
     procs = []
     for i, cmd in cmds:
-        env = os.environ.copy()
+        env = worker_env(gpus[i % len(gpus)], threads_per_worker)
         env["TF_CPP_MIN_LOG_LEVEL"] = "3"
-        env["CUDA_VISIBLE_DEVICES"] = gpus[i % len(gpus)]
-        if threads_per_worker > 0:
-            t = str(threads_per_worker)
-            for var in (
-                "OMP_NUM_THREADS",
-                "MKL_NUM_THREADS",
-                "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_MAX_THREADS",
-                "TF_NUM_INTEROP_THREADS",
-                "TF_NUM_INTRAOP_THREADS",
-            ):
-                env[var] = t
         p = subprocess.Popen(
             cmd,
             env=env,
@@ -359,6 +434,8 @@ def spawn_and_monitor(
     def should_print(line: str) -> bool:
         return verbose or any(k in line.lower() for k in _PROGRESS_KEYWORDS)
 
+    hidden_tail = {i: deque(maxlen=FAILED_WORKER_TAIL_LINES) for i, _ in procs}
+
     def _handle_line(i: int, s: str):
         if not s:
             return
@@ -367,6 +444,8 @@ def spawn_and_monitor(
             return
         if should_print(s):
             print(f"  [{label} {i}] {s}", flush=True)
+        else:
+            hidden_tail[i].append(s)
 
     active = procs[:]
     failed: list[int] = []
@@ -379,6 +458,8 @@ def spawn_and_monitor(
                 for line in p.stdout.readlines():
                     _handle_line(i, line.strip())
                 if p.returncode != 0:
+                    for s in hidden_tail[i]:
+                        print(f"  [{label} {i}] {s}", flush=True)
                     print(
                         f"  [{label} {i}] ERROR: exited with code {p.returncode}",
                         flush=True,
@@ -389,11 +470,49 @@ def spawn_and_monitor(
     return failed
 
 
+# --n-workers auto: min(MAX_AUTO_WORKERS, ceil(n_structures / STRUCTURES_PER_AUTO_WORKER))
+STRUCTURES_PER_AUTO_WORKER = 200
+MAX_AUTO_WORKERS = 4
+
+
+def parse_n_workers(text):
+    """argparse type of --n-workers: "auto" or an integer >= 1."""
+    if str(text).lower() == "auto":
+        return "auto"
+    n = int(text)
+    if n < 1:
+        raise ValueError(f"--n-workers must be >= 1 or auto, got {text}")
+    return n
+
+
+def visible_gpu_ids(gpus=None) -> list[str]:
+    """GPU ids a run may use: ``--gpus`` if given, else CUDA_VISIBLE_DEVICES (respected,
+    "-1"/empty = none), else every GPU nvidia-smi lists; [] on a CPU-only machine."""
+    if gpus is None:
+        gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if gpus is not None:
+        return [g.strip() for g in str(gpus).split(",") if g.strip() not in ("", "-1")]
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True,
+                             timeout=30, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [str(i) for i, line in enumerate(
+        ln for ln in out.splitlines() if ln.startswith("GPU "))]
+
+
+def auto_n_workers(n_structures: int) -> int:
+    """--n-workers auto: min(4, ceil(n_structures / 200)) workers in total, at least 1
+    (spread round robin over the visible GPUs, or on CPU without one)."""
+    return max(1, min(MAX_AUTO_WORKERS, -(-n_structures // STRUCTURES_PER_AUTO_WORKER)))
+
+
 def resolve_threads_per_worker(value, n_workers: int) -> int:
     """Resolve `--threads-per-worker auto|<int>` to an int."""
     if isinstance(value, str) and value == "auto":
         cores = os.cpu_count() or 1
-        return max(1, cores // max(n_workers, 1))
+        n = n_workers if isinstance(n_workers, int) else 1  # --n-workers auto: unknown yet
+        return max(1, cores // max(n, 1))
     return int(value)
 
 

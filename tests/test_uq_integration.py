@@ -408,9 +408,32 @@ def test_savedmodel_exports_both_uq_signatures(uq_setup, tmp_path):
     # Calculator surfaces both modes and can switch.
     calc = TPCalculator(export_path, enable_uq_if_available=True)
     assert set(calc.available_uq_modes) == {"full", "gamma_only"}
-    # Default should pick "full" when both are available
-    assert calc._uq_state["mode"] == "full"
-    calc.enable_uq(mode="gamma_only")
+    # Default should pick the cheaper "gamma_only" when both are available
     assert calc._uq_state["mode"] == "gamma_only"
     calc.enable_uq(mode="full")
     assert calc._uq_state["mode"] == "full"
+    calc.enable_uq(mode="gamma_only")
+    assert calc._uq_state["mode"] == "gamma_only"
+
+
+def test_grace_fm_leaves_uq_off_by_default(monkeypatch):
+    """grace_fm passes enable_uq_if_available=False unless enable_uq=True."""
+    from tensorpotential.calculator import asecalculator, foundation_models as fm
+
+    seen = []
+    monkeypatch.setattr(fm, "get_or_download_model", lambda model: "/nowhere")
+    monkeypatch.setattr(asecalculator, "TPCalculator", lambda **kw: seen.append(kw))
+    name = fm.MODELS_NAME_LIST[0]
+    fm.grace_fm(name)
+    fm.grace_fm(name, enable_uq=True)
+    assert [kw["enable_uq_if_available"] for kw in seen] == [False, True]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_grace_fm_accepts_legacy_uq_keyword(monkeypatch, enabled):
+    from tensorpotential.calculator import asecalculator, foundation_models as fm
+
+    monkeypatch.setattr(fm, "get_or_download_model", lambda model: "/nowhere")
+    monkeypatch.setattr(asecalculator, "TPCalculator", lambda **kw: kw)
+    calc = fm.grace_fm(fm.MODELS_NAME_LIST[0], enable_uq_if_available=enabled)
+    assert calc["enable_uq_if_available"] is enabled

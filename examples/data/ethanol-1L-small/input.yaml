@@ -1,0 +1,44 @@
+seed: 1
+cutoff: 5.0
+
+data:
+  filename: train.pkl.gz
+  # held-out set used during the fit (not shipped): val.pkl.gz
+  # (to refit from the shipped file alone, add e.g. `test_size: 0.05` here)
+  reference_energy: auto
+  save_dataset: False
+
+potential:
+  param_dtype: float32
+  preset: GRACE_1LAYER_latest
+  kwargs: {lmax: 4, n_rad_max: 32, prod_func_n_max: 32, max_order: 4, n_mlp_dens: 10, n_rad_base: 8}
+  scale: True
+
+fit:
+  loss: {
+    energy: { weight: 16, type: huber , delta: 0.01 },
+    forces: { weight: 32, type: huber , delta: 0.01 },
+  }
+  target_total_updates: 12500
+  optimizer: Adam
+  opt_params: {
+            learning_rate: 0.008,
+            use_ema: True,
+            ema_momentum: 0.99,
+            weight_decay: null,
+            clipnorm: 1.0,
+        }
+  scheduler: cosine_decay
+  scheduler_params: { "minimum_learning_rate": 1.0e-4 } # what the shipped fit used (it was written with the ignored key minimal_learning_rate)
+  compute_convex_hull: False
+  batch_size: 16
+  test_batch_size: 64
+  jit_compile: True
+  eval_init_stats: False
+  reset_epoch_and_step: False
+  train_max_n_buckets: auto
+  test_max_n_buckets: auto
+  auto_bucket_max_padding: 0.3
+  checkpoint_freq: 2
+  progressbar: False
+  train_shuffle: True

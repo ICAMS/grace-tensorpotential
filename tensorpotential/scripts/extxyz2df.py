@@ -22,6 +22,14 @@ def sizeof_fmt(file_name_or_size, suffix="B"):
 
 
 
+def default_output_filename(extxyz_filename: str) -> str:
+    """``data.extxyz`` / ``data.xyz`` -> ``data.pkl.gz``; any other name gets ``.pkl.gz`` appended."""
+    for ext in (".extxyz", ".xyz"):
+        if extxyz_filename.endswith(ext):
+            return extxyz_filename[: -len(ext)] + ".pkl.gz"
+    return extxyz_filename + ".pkl.gz"
+
+
 def main(args=None):
     ##############################################################################################
     parser = argparse.ArgumentParser()
@@ -43,8 +51,11 @@ def main(args=None):
     extxyz_filename = os.path.abspath(args_parse.extxyz_filename)
     output_dataset_filename = args_parse.output_dataset_filename
     if output_dataset_filename is None:
-        output_dataset_filename = extxyz_filename.replace(".extxyz", ".pkl.gz")
-        output_dataset_filename = extxyz_filename.replace(".xyz", ".pkl.gz")
+        output_dataset_filename = default_output_filename(extxyz_filename)
+    if os.path.abspath(output_dataset_filename) == extxyz_filename:
+        raise ValueError(
+            f"Output file {output_dataset_filename} would overwrite the input file"
+        )
 
     logging.info(f"Input filename: {extxyz_filename}")
     logging.info(f"Output filename: {output_dataset_filename}")

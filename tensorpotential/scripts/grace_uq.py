@@ -6,6 +6,7 @@ Subcommands:
     info    - print a summary of an existing UQ .npz artifact
     predict - run E/F/S + per-atom gamma over a dataset
     select  - pick N structures from a candidate pool
+    hal     - run one uncertainty-biased (HAL) walker
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ _SUBCOMMANDS = {
     "info": ("tensorpotential.uq.cli.info", "info_main"),
     "predict": ("tensorpotential.uq.cli.predict", "predict_main"),
     "select": ("tensorpotential.uq.cli.select", "select_main"),
+    "hal": ("tensorpotential.uq.cli.hal", "hal_main"),
 }
 
 
@@ -55,8 +57,11 @@ def _print_top_help():
   {c}build{r}    Parallel GMM-UQ artifact generation (3 steps + optional SavedModel export).
   {c}info{r}     Summarize a UQ .npz artifact (D, K, elements, thresholds, diagnostics).
   {c}predict{r}  Run E/F/S + per-atom gamma over a dataset; multi-worker; pkl.gz/extxyz.
-  {c}select{r}   Pick N structures from a candidate pool (random/fps; gamma window;
-           per-element stratification).
+  {c}select{r}   Pick up to N structures for DFT: calm-greedy (default; stops at the
+           natural set), fps-extrap, random; gamma window; per-element floors.
+           Input: a predicted pool, or HAL walkers directly (--hal-dirs).
+  {c}hal{r}      Run one uncertainty-biased (HAL) walker: biased MD, collect frames,
+           update the live CALM model; writes extxyz + diagnostics PNG.
 
 Run `grace_uq <subcommand> --help` for subcommand-specific options.
 
@@ -89,7 +94,7 @@ Run `grace_uq <subcommand> --help` for subcommand-specific options.
 
   * Predict on a candidate pool using the exported SavedModel (multi-worker):
 {g}    grace_uq predict --model saved_model/ \\
-                     --dataset candidates.pkl.gz \\
+                     --dataset candidates.pkl.gz{r}
 
   * Predict using model.yaml + checkpoint + artifact (no SavedModel):
 {g}    grace_uq predict --model model.yaml \\
@@ -105,12 +110,23 @@ Run `grace_uq <subcommand> --help` for subcommand-specific options.
 
 {b}4. Selecting structures{r}
 
-  * Simplest case — point at a SavedModel + raw dataset; predict + select in one go:
+  * Simplest case — SavedModel + raw dataset; predict + calm-greedy select in one
+    go (calm-greedy, the default, needs the CALM artifact; stops early at the
+    natural set; `--strategy random-extrap` is the 0.6.1 default, no artifact):
 {g}    grace_uq select --model saved_model/ \\
+                    --uq UQ/gmm_artifacts.npz \\
                     --dataset candidates.pkl.gz \\
                     -n 200{r}
 
-  * Select 200 most-extrapolatory structures by Mini-batch FPS, gamma > 1.5:
+  * HAL walkers: select from their hal_features.npz sidecars (no prediction;
+    only the selected frames are read). Without -n calm-greedy returns its whole
+    natural set; -n caps it:
+{g}    grace_uq select --artifact UQ/gmm_artifacts.npz \\
+                    --hal-dirs hal_w0 hal_w1 hal_w2 \\
+                    --output selected.pkl.gz{r}
+
+  * Select 200 extrapolatory structures by whitened FPS (frames in first-hit
+    order), gamma > 1.5:
 {g}    grace_uq select --uq UQ/gmm_artifacts.npz \\
                     --predicted predicted.pkl.gz \\
                     -n 200 --strategy fps-extrap \\

@@ -44,6 +44,7 @@ def _model_paths(name, model_data):
 def _row_cells(name, model_data, ascii_mode):
     """Compute the table cells for one model (capabilities + local cache state)."""
     from tensorpotential.calculator.foundation_models import (
+        is_saved_model,
         PRECISION_KEY,
         UQ_KEY,
         PARALLEL_KEY,
@@ -58,7 +59,7 @@ def _row_cells(name, model_data, ascii_mode):
     uq = model_data.get(UQ_KEY)  # None if undeclared
     par = model_data.get(PARALLEL_KEY)
 
-    model_cached = os.path.isdir(model_path)
+    model_cached = is_saved_model(model_path)
     ckpt_applicable = (
         CHECKPOINT_URL_KEY in model_data or CHECKPOINT_PATH_KEY in model_data
     )
@@ -142,6 +143,7 @@ def _print_legend(ascii_mode):
 def _print_verbose(name, model_data):
     """Today's multi-line block, augmented with the declared capability line."""
     from tensorpotential.calculator.foundation_models import (
+        is_saved_model,
         LICENSE_KEY,
         CHECKPOINT_URL_KEY,
         KOKKOS_URL_KEY,
@@ -161,7 +163,7 @@ def _print_verbose(name, model_data):
         f"  parallel={model_data.get(PARALLEL_KEY, '?')}"
         f"  kokkos={'separate npz' if KOKKOS_URL_KEY in model_data else 'none'}"
     )
-    if os.path.isdir(model_path):
+    if is_saved_model(model_path):
         msg += f"\n\tPATH: {model_path}"
     else:
         msg += "\n\tPATH: [NOT DOWNLOADED]"
@@ -231,13 +233,14 @@ def _fmt_cutoff(cutoff, cutoff_matrix):
 def _download_hints(name, model_data, model_path, checkpoint_path):
     """(label, command) for each part of ``name`` that is available but not cached."""
     from tensorpotential.calculator.foundation_models import (
+        is_saved_model,
         KOKKOS_URL_KEY,
         CHECKPOINT_URL_KEY,
         CHECKPOINT_PATH_KEY,
     )
 
     hints = []
-    if not os.path.isdir(model_path):
+    if not is_saved_model(model_path):
         hints.append(("model", f"grace_models download {name}"))
     if (
         CHECKPOINT_URL_KEY in model_data or CHECKPOINT_PATH_KEY in model_data
@@ -258,6 +261,7 @@ def info_model(args):
     ``model.yaml`` (``param_dtype``), then flags any drift from the declared flags.
     """
     from tensorpotential.calculator.foundation_models import (
+        is_saved_model,
         MODELS_METADATA,
         MODELS_ALIASES_DICT,
         DESCRIPTION_KEY,
@@ -287,7 +291,7 @@ def info_model(args):
     print(f"  UQ        : {md.get(UQ_KEY, False)}")
     print(f"  parallel  : {md.get(PARALLEL_KEY, '?')}")
     print(f"  kokkos    : {'separate npz' if KOKKOS_URL_KEY in md else 'none'}")
-    print(f"  model dir : {model_path}  [{'cached' if os.path.isdir(model_path) else 'not downloaded'}]")
+    print(f"  model dir : {model_path}  [{'cached' if is_saved_model(model_path) else 'not downloaded'}]")
     print(f"  ckpt dir  : {checkpoint_path}  [{'cached' if os.path.isdir(checkpoint_path) else 'not downloaded'}]")
 
     # ---- introspect the downloaded artifact (TF-free) ----
@@ -370,6 +374,7 @@ def update_models(args):
     import shutil
 
     from tensorpotential.calculator.foundation_models import (
+        is_saved_model,
         FOUNDATION_CACHE_DIR,
         FOUNDATION_CHECKPOINTS_CACHE_DIR,
         MODELS_ALIASES_DICT,
@@ -409,8 +414,9 @@ def update_models(args):
             url = meta.get(url_key)
             override = meta.get(path_key)
             path = override or os.path.join(root, name)
-            if url is None or not os.path.isdir(path):
-                continue  # nothing to compare, or simply not cached
+            cached = is_saved_model(path) if payload == "model" else os.path.isdir(path)
+            if url is None or not cached:
+                continue  # nothing to compare, or simply not cached (a model dir with only kokkos.npz)
             rec = read_origin_sidecar(path)
             if rec is not None and rec.get("url") == url and not args.force:
                 n_ok += 1

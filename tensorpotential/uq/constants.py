@@ -13,6 +13,13 @@ VIRIAL_SIGMA: Final[str] = "virial_sigma"
 ATOMIC_GAMMA: Final[str] = "gamma"
 GMM_CLUSTER: Final[str] = "gmm_cluster"
 
+# Sentinel slots in step-1 / step-2 artifacts (and the padded slots of GMMUQModel's dense
+# tensors): centroid components written as SENTINEL_CENTROID_VALUE so atoms never bind
+# there at inference time. Detection uses a slightly looser threshold so any
+# large-magnitude centroid (incl. accidental drift) is also caught.
+SENTINEL_CENTROID_VALUE: Final[float] = 1e10
+SENTINEL_DETECTION_THRESHOLD: Final[float] = 1e9
+
 # Runtime UQ modes the calculator can switch between, and the
 # SavedModel signature name each mode is exported under.
 UQ_MODE_FULL: Final[str] = "full"
