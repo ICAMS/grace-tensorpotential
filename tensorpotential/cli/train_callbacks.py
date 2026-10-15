@@ -1,3 +1,4 @@
+import difflib
 import logging
 from abc import abstractmethod
 from typing import Any, Dict, Union, Protocol
@@ -317,6 +318,7 @@ class LRSchedulerFactory:
         cls = LRSchedulerFactory
         if not cls.if_lr_scheduler(fit_config):
             return None
+        cls.warn_unknown_scheduler_params(fit_config)
         if cls.LEGACY_LR_REDUCER_FIELD in fit_config:
             log.warning(
                 "DEPRECATION WARNING: input.fit.learning_rate_reduction is now deprecated. Configure it with input.fit.scheduler and input.fit.scheduler_params."
@@ -335,14 +337,36 @@ class LRSchedulerFactory:
             return LinearDecay(**kwargs)
         if fit_config[cls.LR_SCHEDULER_FIELD] == cls.EXPONENTIAL_DECAY_FIELD:
             kwargs["decay_rate"] = kwargs["min_lr"] / kwargs["warmup_target"]
-            kwargs["staircase"] = fit_config.get(
-                "staircase", cls.DEFAULT_VALUES["staircase"]
-            )
+            kwargs["staircase"] = cls.scheduler_or_fit_param(fit_config, "staircase")
             return ExponentialDecay(**kwargs)
 
         raise ValueError(
             f"Unsupported learning rate scheduler: {fit_config[cls.LR_SCHEDULER_FIELD]}"
         )
+
+    @staticmethod
+    def scheduler_or_fit_param(fit_config: Dict, key: str) -> Any:
+        """``key`` from ``scheduler_params``, else from the ``fit`` level (where older
+        inputs put ``stop_at_min`` and ``staircase``), else its default."""
+        cls = LRSchedulerFactory
+        params = fit_config.get(cls.LR_SCHEDULER_PARAMS_FIELD) or {}
+        if key in params:
+            return params[key]
+        return fit_config.get(key, cls.DEFAULT_VALUES[key])
+
+    @staticmethod
+    def warn_unknown_scheduler_params(fit_config: Dict) -> None:
+        """Warn about ``scheduler_params`` keys no scheduler reads (they are ignored),
+        e.g. the common typo ``minimal_learning_rate`` for ``minimum_learning_rate``."""
+        cls = LRSchedulerFactory
+        known = set(cls.DEFAULT_VALUES) - {"maxiter"}
+        for key in fit_config.get(cls.LR_SCHEDULER_PARAMS_FIELD) or {}:
+            if key not in known:
+                close = difflib.get_close_matches(key, sorted(known), n=1)
+                hint = f" Did you mean '{close[0]}'?" if close else ""
+                log.warning(
+                    f"input.fit.scheduler_params: unknown key '{key}' is ignored.{hint}"
+                )
 
     @staticmethod
     def if_lr_scheduler(fit_config: Dict) -> bool:
@@ -407,9 +431,7 @@ class LRSchedulerFactory:
         kwargs["monitor"] = fit_config[cls.LR_SCHEDULER_PARAMS_FIELD].get(
             "monitor", cls.DEFAULT_VALUES["monitor"]
         )
-        kwargs["stop_on_min_lr"] = fit_config.get(
-            "stop_at_min", cls.DEFAULT_VALUES["stop_at_min"]
-        )
+        kwargs["stop_on_min_lr"] = cls.scheduler_or_fit_param(fit_config, "stop_at_min")
         kwargs["cooldown"] = fit_config[cls.LR_SCHEDULER_PARAMS_FIELD].get(
             "cooldown", cls.DEFAULT_VALUES["cooldown"]
         )

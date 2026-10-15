@@ -48,7 +48,7 @@ from tensorpotential.uq.cli.info import info_main
 from tensorpotential.uq.cli.select import (
     _build_atom_pool,
     _collect_top_n,
-    _repair_stratification,
+    _repair_floors_greedy,
     _structure_element_counts,
 )
 from tensorpotential.uq.cli.strategies import (
@@ -735,6 +735,17 @@ def test_build_atom_pool_shapes(synthetic_df):
     assert pool["element"].max() == 3
 
 
+def test_build_atom_pool_gamma_window_filters_before_stacking(synthetic_df):
+    em = ["Mo", "Nb", "Ta", "W"]
+    full = _build_atom_pool(synthetic_df, em, need_features=True)
+    win = _build_atom_pool(synthetic_df, em, need_features=True,
+                                      gamma_window=(2.0, None))
+    keep = full["gamma"] >= 2.0
+    np.testing.assert_array_equal(win["struct_id"], full["struct_id"][keep])
+    np.testing.assert_array_equal(win["features"], full["features"][keep])
+    np.testing.assert_array_equal(win["element"], full["element"][keep])
+
+
 def test_structure_element_counts(synthetic_df):
     elem_map = ["Mo", "Nb", "Ta", "W"]
     counts = _structure_element_counts(synthetic_df, elem_map)
@@ -748,65 +759,28 @@ def test_collect_top_n_n_structures_only(synthetic_df):
     elem_counts = _structure_element_counts(synthetic_df, elem_map)
     rng = np.random.default_rng(0)
     atom_iter = get_strategy("random-all")(pool, rng=rng)
-    top, picks, _ = _collect_top_n(
-        atom_iter, pool, elem_counts, n_structures=3, floors=None
-    )
+    top, picks, _ = _collect_top_n(atom_iter, pool, n_structures=3)
     assert len(top) == 3
     assert all(0 <= s < 5 for s in top)
 
 
-def test_collect_top_n_meets_stratification(synthetic_df):
-    elem_map = ["Mo", "Nb", "Ta", "W"]
-    pool = _build_atom_pool(synthetic_df, elem_map, need_features=True)
-    elem_counts = _structure_element_counts(synthetic_df, elem_map)
-    floors = {0: 2, 1: 2, 2: 2, 3: 2}
-    rng = np.random.default_rng(0)
-    atom_iter = get_strategy("random-all")(pool, rng=rng)
-    top, _, _ = _collect_top_n(
-        atom_iter, pool, elem_counts, n_structures=2, floors=floors
-    )
-    out_counts = elem_counts[top].sum(axis=0)
-    for e, f in floors.items():
-        assert out_counts[e] >= f
-
-
-def test_repair_stratification_preserves_input_order_when_repair_impossible():
-    """Regression: when no donor can satisfy any unmet floor, the function
-    reaches its tail return path. It must return the input list with its
-    original ordering, not a hash-ordered ``list(set(top))`` conversion —
-    downstream consumers (``out_df.iloc[top]``, ``n_atoms_selected``) rely
-    on the pick-count ranking being preserved."""
-    # 4 structures, 1 element type. No structure has any atoms of element 0,
-    # so no swap can ever improve the selection — function falls through to
-    # the tail return.
+def test_floor_repair_keeps_order_when_repair_impossible():
+    """No donor can fill the floor: the selection comes back unchanged, in its order
+    (downstream ``out_df.iloc[top]`` and ``n_atoms_selected`` rely on it)."""
     elem_counts = np.zeros((4, 1), dtype=np.int64)
-    top = [3, 1, 0]  # deliberately unsorted; set order would be [0, 1, 3]
-    picks = {3: 5, 1: 5, 0: 5}
-    floors = {0: 5}  # unmet, impossible to fill
-
-    result = _repair_stratification(
-        top, picks, elem_counts, floors, n_total_structs=4
-    )
-
-    assert result == top, f"expected {top} (input order), got {result}"
+    top = [3, 1, 0]
+    repaired, added, evicted = _repair_floors_greedy(
+        top, elem_counts, {0: 5}, n_structures=3, n_total_structs=4)
+    assert repaired == top and not added and not evicted
 
 
-def test_repair_stratification_swaps_in_donor():
-    """When the strategy's top-N misses an element, repair swaps in a donor."""
-    elem_counts = np.array(
-        [
-            [4, 0, 0, 0],  # 0: pure Mo
-            [4, 0, 0, 0],  # 1: pure Mo
-            [4, 0, 0, 0],  # 2: pure Mo
-            [0, 0, 0, 4],  # 3: pure W (only donor for element 3)
-        ],
-        dtype=np.int64,
-    )
-    top = [0, 1, 2]
-    picks = {0: 5, 1: 5, 2: 5}
-    floors = {0: 2, 3: 2}
-    repaired = _repair_stratification(top, picks, elem_counts, floors, n_total_structs=4)
-    assert 3 in repaired
+def test_floor_repair_swaps_in_donor_at_n():
+    """At -n frames, a donor of the missing element replaces the latest pick."""
+    elem_counts = np.array([[4, 0, 0, 0], [4, 0, 0, 0], [4, 0, 0, 0], [0, 0, 0, 4]],
+                           dtype=np.int64)
+    repaired, added, evicted = _repair_floors_greedy(
+        [0, 1, 2], elem_counts, {0: 2, 3: 2}, n_structures=3, n_total_structs=4)
+    assert repaired == [0, 1, 3] and added == [3] and evicted == [2]
     out = elem_counts[repaired].sum(axis=0)
     assert out[0] >= 2 and out[3] >= 2
 
@@ -932,6 +906,8 @@ def test_select_requires_either_uq_or_model(tmp_path):
                 "-n",
                 "1",
                 "--no-element-stratified",
+                "--strategy",  # calm-greedy (default) already refuses without --artifact
+                "random-extrap",
             ]
         )
 
@@ -1374,6 +1350,102 @@ def test_load_uq_model_tolerates_checkpoint_without_intra_epoch_save(monkeypatch
     assert uq_constants.FEATURES in instructions
 
 
+def _write_checkpoint_without_intra_epoch_save(model_yaml, path):
+    """Write a checkpoint the way fits did before ``intra_epoch_save`` existed.
+
+    The trackables of ``TensorPotential.setup_checkpoint`` minus the mid-epoch
+    flag (added 2026-04-23) and minus the optimizer -- the layout of checkpoints
+    written by older fits and by the foundation models built before that date.
+    (Whether such a checkpoint also carries optimizer slots varies and does not
+    matter here: neither is read back.)
+
+    Perturbs one weight before writing and returns ``(index, value)`` for it, so
+    the caller can tell a real restore from a no-op: the writer and the model
+    ``export_savedmodel`` builds come from the same yaml and the same seed, so
+    at initialization every weight already agrees.
+    """
+    import tensorflow as tf
+
+    from tensorpotential.instructions.base import load_instructions
+    from tensorpotential.metadata_utils import resolve_param_dtype
+    from tensorpotential.tensorpot import TensorPotential
+
+    tp = TensorPotential(
+        potential=load_instructions(model_yaml),
+        param_dtype=resolve_param_dtype(model_yaml),
+    )
+    index, var = next(
+        (i, v) for i, v in enumerate(tp.model.variables) if v.dtype.is_floating
+    )
+    var.assign_add(1.0)
+    tf.train.Checkpoint(
+        model=tp.model,
+        step=tf.Variable(0, dtype=tf.int32, trainable=False),
+        epoch=tf.Variable(0, dtype=tf.int32, trainable=False),
+    ).write(path)
+    return index, var.numpy().copy()
+
+
+def test_export_savedmodel_tolerates_checkpoint_without_intra_epoch_save(
+    monkeypatch, tmp_path
+):
+    """``export_savedmodel`` reads the model subtree only, like ``load_uq_model``.
+
+    The export path used to omit ``model_only=True``, so the strict object
+    match tripped over the training-only ``intra_epoch_save`` trackable that
+    older / foundation checkpoints never wrote -- making ``grace_uq build
+    --export`` impossible for exactly the checkpoints UQ artifacts are built
+    on. Regression for ``AssertionError: Found 1 Python objects that were not
+    bound to checkpointed values ... dtype=bool``.
+
+    The GMM artifact and the SavedModel write are stubbed out: what is under
+    test is the checkpoint load, so the test also asserts the perturbed weight
+    actually arrived in the model handed to the writer.
+    """
+    import argparse as _ap
+    import tensorflow as tf
+
+    from tensorpotential.tensorpot import TensorPotential
+    from tensorpotential.uq.cli.build import workers as workers_mod
+
+    model_yaml = os.path.join(os.path.dirname(__file__), "model_grace.yaml")
+    checkpoint = str(tmp_path / "checkpoint")
+    index, expected = _write_checkpoint_without_intra_epoch_save(
+        model_yaml, checkpoint
+    )
+    # list_variables reports object-graph paths ("<name>/.ATTRIBUTES/..."), so
+    # this has to be a substring test to mean anything.
+    assert not any(
+        "intra_epoch_save" in name
+        for name, _ in tf.train.list_variables(checkpoint)
+    )
+
+    # Exercise the strict default path, not the GRACE_UQ_LENIENT_LOAD hatch.
+    monkeypatch.delenv("GRACE_UQ_LENIENT_LOAD", raising=False)
+    monkeypatch.setattr(workers_mod, "GMMUQModel", lambda *a, **kw: object())
+    exported = {}
+    monkeypatch.setattr(
+        TensorPotential,
+        "save_model_with_aux_computes",
+        # *a/**kw: the real signature takes six arguments, and this test has no
+        # stake in which of them the export passes.
+        lambda self, *a, **kw: exported.update(tp=self, kwargs=kw),
+    )
+
+    args = _ap.Namespace(
+        model_yaml=model_yaml,
+        checkpoint=checkpoint,
+        artifact_path="unused-stub",
+        export_path=str(tmp_path / "exported"),
+    )
+    workers_mod.export_savedmodel(args)
+
+    assert exported["kwargs"]["exact_path"] == str(tmp_path / "exported")
+    np.testing.assert_allclose(
+        exported["tp"].model.variables[index].numpy(), expected
+    )
+
+
 # ===========================================================================
 # predict worker: the *_predicted schema on top of predict_structures
 # ===========================================================================
@@ -1422,3 +1494,61 @@ def test_predict_columns_raise_errors_propagates():
             False,
             True,
         )
+
+
+def test_print_selection_summary_percentage_label(capsys):
+    """The selected-atoms share is of every atom of the pool's structures."""
+    from tensorpotential.uq.cli.select import _print_selection_summary
+
+    elem_counts = np.array([[3, 1], [0, 4], [2, 2]], dtype=np.int64)  # 12 atoms
+    out_df = pd.DataFrame({"ase_atoms": [None], "n_atoms_selected": [1]})
+    _print_selection_summary(out_df, [1], elem_counts, ["A", "B"], floors=None,
+                             strategy="random-all")
+    text = capsys.readouterr().out
+    assert "(33.3% of all pool atoms)" in text and "of candidate atoms" not in text
+
+
+def test_spawn_and_monitor_shows_failed_worker_output(capsys):
+    """Without --verbose a failed worker's last output lines (its traceback) are printed."""
+    from tensorpotential.uq.cli._common import spawn_and_monitor
+
+    cmd = [sys.executable, "-c", "print('quiet line'); raise ValueError('boom-xyz')"]
+    failed = spawn_and_monitor([(0, cmd)], gpus=["-1"], threads_per_worker=1, verbose=False)
+    out = capsys.readouterr().out
+    assert failed == [0]
+    assert "ValueError: boom-xyz" in out
+    assert "quiet line" in out
+
+
+_ALLI_DIR = os.path.join(os.path.dirname(__file__), "..", "examples", "data", "AlLi-1L-small")
+
+
+def test_grace_uq_build_creates_missing_output_dir(tmp_path):
+    """The folder of --artifact-path is created by the build, not required to exist."""
+    artifact_path = tmp_path / "UQ" / "gmm_artifacts.npz"
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "tensorpotential.uq.cli.build",
+            "--n-workers", "1", "--n-clusters", "1", "--rp-dim", "8",
+            "--frac", "0.05", "--no-export",
+            "--model-yaml", os.path.join(_ALLI_DIR, "model.yaml"),
+            "--checkpoint", os.path.join(_ALLI_DIR, "checkpoint"),
+            "--train-data", os.path.join(_ALLI_DIR, "train.pkl.gz"),
+            "--artifact-path", str(artifact_path),
+        ],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "TF_USE_LEGACY_KERAS": "1"},
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-2000:]
+    assert artifact_path.exists()
+
+
+@pytest.mark.parametrize("name", ["AlLi-1L-small", "ethanol-1L-small"])
+def test_example_train_data_is_plain_dataframe(name):
+    """Tutorial training data must load with pandas alone (no pyace subclass pickled)."""
+    df = pd.read_pickle(os.path.join(_ALLI_DIR, "..", name, "train.pkl.gz"))
+    assert type(df) is pd.DataFrame
+    assert {"ase_atoms", "energy", "forces"} <= set(df.columns)

@@ -5,6 +5,8 @@ theme:
 #  logo: "imgs/logo1.png"  # Path to your logo image
   icon:
     logo: material/library
+    admonition:
+      tip: material/lightbulb-on-outline   # tip blocks get a light bulb
   features:
     - content.code.copy
 #    - navigation.tabs # navigation on the top
@@ -51,7 +53,9 @@ nav:
   - CLI: gracemaker/cli.md
   - Utilities: gracemaker/utilities.md
   - Foundation models: gracemaker/foundation.md
-  - Tutorials: gracemaker/tutorials.md
+  - Tutorials:
+      - Fitting tutorials: gracemaker/tutorials.md
+      - UQ workflows: gracemaker/uq_workflows.md
   - Uncertainty Quantification: gracemaker/uq.md
   - Fitting Generic Tensors: gracemaker/gen_tensor.md
   - FAQs: gracemaker/faq.md

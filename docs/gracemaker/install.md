@@ -1,166 +1,176 @@
 ## GRACE
 
-To use GRACE models, including fitting and utilizing pre-fitted models, you need to install the `grace-tensorpotential` package by following these steps.
+To fit GRACE models and to use fitted or foundation models, install the `tensorpotential`
+package (repository: [grace-tensorpotential](https://github.com/ICAMS/grace-tensorpotential)).
 
-### Setting Up the Environment
+### 1. Environment
 
-#### Micromamba (recommended)
-
-For [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html), install it by running the following command:
+We recommend [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html):
 
 ```bash
 "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
-```
-
-Then, create a new environment:
-
-```bash
-micromamba create -n grace python=3.11 
+micromamba create -n grace python=3.11
 micromamba activate grace
 ```
 
-`conda`/`mamba` or a plain `python -m venv` environment work as well — replace
-`micromamba` with your tool of choice in the commands below.
+`conda`/`mamba` or a plain `python -m venv` environment work as well.
 
----
-
-### Installing TensorFlow and Tensorpotential
-
-Install `tensorpotential` from PyPI:
+### 2. Install `tensorpotential`
 
 ```bash
 pip install tensorpotential
 ```
 
-For the latest developer version, clone the `grace-tensorpotential` repository:
-
-```bash
-git clone https://github.com/ICAMS/grace-tensorpotential.git
-cd grace-tensorpotential
-pip install .
-```
-
-TensorFlow should be installed automatically. However, to manually install TensorFlow with GPU support:
+On Linux this also installs TensorFlow with GPU support (`tensorflow[and-cuda]<=2.20`); on macOS
+and Windows, TensorFlow for CPU. If TensorFlow does not find your GPU, install it by hand:
 
 ```bash
 pip install "tensorflow[and-cuda]<=2.20"
 ```
-#### TensorFlow & Keras Notes
 
-* **GPU Memory Leaks**: If you experience a GPU memory leak with TensorFlow, first try updating your NVIDIA drivers. 
-If the issue persists, you may need to downgrade your TensorFlow version:
-```bash
-pip install "tensorflow[and-cuda]==2.16.2" 
-```
+??? info "Developer version from source"
+    ```bash
+    git clone https://github.com/ICAMS/grace-tensorpotential.git
+    cd grace-tensorpotential
+    pip install .
+    ```
 
-* **Keras Compatibility**: This project requires the legacy Keras API that is bundled with TensorFlow. 
-If you have a separate keras>=3.0.0 package installed, you must set the following environment variable to force TensorFlow 
-to use its built-in version: 
-```bash
-export TF_USE_LEGACY_KERAS=1
-```
-
-* (Optional) Download foundation models (these will be stored in `$HOME/.cache/grace`):
+### 3. Check the installation
 
 ```bash
-grace_models download all
+python -c "import tensorpotential, tensorflow as tf; print(tensorpotential.__version__, tf.config.list_physical_devices('GPU'))"
 ```
 
-Learn more [here](../foundation/#pretrained-grace-foundation-models).
+This prints the version and the GPUs TensorFlow sees (an empty list `[]` means CPU only).
+
+### 4. Foundation models (optional)
+
+```bash
+grace_models list                   # available models
+grace_models download <model_name>  # one model, stored in $HOME/.cache/grace
+```
+
+`grace_models download all` downloads every model (many GB). See
+[foundation models](foundation.md#pretrained-grace-foundation-models).
+
+??? info "TensorFlow notes: Keras, GPU memory leaks"
+    **Keras.** GRACE needs the legacy Keras API (`tf_keras`, installed as a dependency).
+    `import tensorpotential` sets `TF_USE_LEGACY_KERAS=1` itself. Set it by hand only if your
+    script imports TensorFlow *before* tensorpotential:
+
+    ```bash
+    export TF_USE_LEGACY_KERAS=1
+    ```
+
+    **GPU memory leaks.** First update the NVIDIA driver. If the leak stays, downgrade TensorFlow:
+
+    ```bash
+    pip install "tensorflow[and-cuda]==2.16.2"
+    ```
 
 ---
 
 ## GRACE/FS (CPU)
 
-This is a standalone C++ implementation of the GRACE/FS model that can be executed on a CPU without the TensorFlow library and parallelized using standard MPI.
+A standalone C++ implementation of GRACE/FS models. It runs on CPU without TensorFlow and in
+parallel with MPI. In the same environment:
 
-* Activate the environment:
 ```bash
-micromamba activate grace   # or: conda activate grace
+pip install python-ace==0.4.0rc1
 ```
 
-* Clone the repository:
-```bash
-git clone -b feature/grace_fs https://github.com/ICAMS/python-ace.git
-```
+It also provides `pace_activeset`, which [builds the active set](quickstart.md#build-active-set-for-gracefs-only)
+(ASI) of GRACE/FS models fitted with `gracemaker`.
 
-* Install:
-```bash
-cd python-ace
-pip install .
-```
+??? info "Install from source"
+    ```bash
+    git clone -b feature/grace_fs https://github.com/ICAMS/python-ace.git
+    cd python-ace
+    pip install .
+    ```
 
-You may need to install `cmake`:
-```bash
-pip install cmake
-```
-
-Once installed, you can use the `pace_activeset` utility to [generate](../quickstart/#build-active-set-for-gracefs-only) the ASI for GRACE/FS models fitted with `gracemaker`.
+    A source install may need `cmake` (`pip install cmake`).
 
 ---
 
 ## LAMMPS with GRACE
 
-* Activate the environment (it should contain TensorFlow):
-```bash
-micromamba activate grace   # or: conda activate grace
-```
+Build LAMMPS in the activated `grace` environment (it provides TensorFlow):
 
-* Clone the LAMMPS repository:
 ```bash
 git clone -b grace --depth=1 https://github.com/yury-lysogorskiy/lammps.git
-```
-
-* Prepare the compilation folder:
-```bash
 cd lammps
 mkdir build
 cd build
 ```
 
-* Configure with CMake:
+### TensorFlow pair styles (`grace`, `grace/fs`)
+
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release -D BUILD_MPI=ON -DPKG_ML-PACE=ON -DPKG_MC=ON ../cmake
-```
-
-Ensure that the line `TensorFlow library is FOUND at ...` appears after running the above command.
-You can manually specify the path to the TensorFlow library file (e.g., ``libtensorflow_cc.so``, ``.dylib``, or ``.dll``) with ``-D TF_LIB_FILE=/path/to/library``.
-This overrides automatic discovery and downloading.
-
-* Compile:
-```bash
 cmake --build . -- -j 8
 ```
 
-**NOTE:** If you do **NOT** want TensorFlow support for LAMMPS but wish to use only exported `grace/fs` models, add the `-DNO_GRACE_TF=ON` flag:
+The `cmake` output must contain `TensorFlow library is FOUND at ...`. To use a given TensorFlow
+library file (`libtensorflow_cc.so`, `.dylib` or `.dll`) instead of the automatic search and
+download, add `-D TF_LIB_FILE=/path/to/library`.
+
+Only GRACE/FS models (`grace/fs`), no TensorFlow: add `-DNO_GRACE_TF=ON`.
+
+### Kokkos build (GPU or OpenMP) {#kokkos-build}
+
+Kokkos is available for `grace/fs` and for `grace/1l/kk`, `grace/2l/kk`, `grace/3l/kk`. The
+`grace/{1l,2l,3l}/kk` styles read a `.npz` weights file from
+[`grace_utils export_kokkos`](utilities.md#export-to-npz-for-lammps-kokkos-pair-style) and do not
+need TensorFlow at run time. The same build also has the TensorFlow styles (`grace`), unless you
+add `-DNO_GRACE_TF=ON`, so one binary runs all GRACE pair styles, e.g. the whole
+[UQ tutorial](uq_workflows.md).
+
+GPU (CUDA):
+
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release -D BUILD_MPI=ON -DPKG_ML-PACE=ON -DNO_GRACE_TF=ON ../cmake
+cmake ../cmake \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_MPI=ON \
+      -DPKG_ML-PACE=ON \
+      -DPKG_MC=ON \
+      -DPKG_KOKKOS=ON \
+      -DKokkos_ENABLE_CUDA=ON \
+      -DKokkos_ENABLE_OPENMP=ON \
+      -DKokkos_ARCH_NATIVE=ON
+cmake --build . -- -j 8
 ```
 
-#### KOKKOS build
-KOKKOS support is available for `grace/fs`, `grace/1l/kk`, `grace/2l/kk` and `grace/3l/kk`.
-The `grace/{1l,2l,3l}/kk` pair styles read a `.npz` weights file
-produced by `grace_utils export_kokkos` (see
-[utilities](../utilities/#export-to-npz-for-lammps-kokkos-pair-style))
-and do not require TensorFlow at runtime.
+`-DKokkos_ARCH_NATIVE=ON` tunes the code for the CPU of the build machine. The GPU is detected
+separately: `cmake` asks the GPU of the build machine for its architecture.
 
-Use following cmake configuration:
-```bash
-cmake ../cmake -DBUILD_MPI=ON -DCMAKE_BUILD_TYPE=Release -DPKG_MC=ON -DPKG_ML-PACE=ON -DPKG_KOKKOS=ON -DKokkos_ENABLE_CUDA=ON -DKokkos_ENABLE_OPENMP=ON -DKokkos_ARCH_NATIVE=ON
-```
-or `-DKokkos_ARCH_HOPPER90=ON` for H100/200 or `-DKokkos_ARCH_AMPERE80=ON` for A100.
+??? info "Building for another GPU (e.g. on a login node without a GPU)"
+    The binary runs only on the GPU architecture it was built for. When the build machine has no
+    GPU, or a different one, set the flag of the target GPU:
 
-!!! warning "Use CUDA >= 12.8 for the KOKKOS build"
+    | GPU | Flag |
+    |---|---|
+    | H100, H200 | `-DKokkos_ARCH_HOPPER90=ON` |
+    | A100, A30 | `-DKokkos_ARCH_AMPERE80=ON` |
+    | RTX 30xx, A40, A6000 | `-DKokkos_ARCH_AMPERE86=ON` |
+    | RTX 40xx, L40S | `-DKokkos_ARCH_ADA89=ON` |
+
+CPU only (OpenMP): leave out `-DKokkos_ENABLE_CUDA=ON`. A CUDA build cannot run on a machine
+without a GPU.
+
+!!! warning "Use CUDA >= 12.8 for the Kokkos build"
     With CUDA 12.2-12.6 the build can hang for many hours (without any error
     message) while compiling `pair_grace_2l_kokkos.cpp` and
     `pair_grace_2l_cpu_kokkos.cpp`. This is an `nvcc` bug that is fixed in
     CUDA 12.8; lowering the optimization level with `-Xptxas` does not help.
     See the FAQ entry
-    [LAMMPS KOKKOS build hangs for hours on `pair_grace_2l` files](../faq/#lammps-kokkos-build-hangs-for-hours-on-pair_grace_2l-files)
+    [LAMMPS KOKKOS build hangs for hours on `pair_grace_2l` files](faq.md#lammps-kokkos-build-hangs-for-hours-on-pair_grace_2l-files)
     for the diagnosis and for how to get a newer `nvcc` without touching your
     system modules.
 
-Note, that for running LAMMPS with KOKKOS acceleration:
+Run with Kokkos (the binary is `lmp` in `build/`):
+
 ```bash
-lmp_kk -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.lammps 
-``` 
+lmp -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.lammps   # one GPU
+lmp -k on t 8 -sf kk -pk kokkos newton on neigh half -in in.lammps   # 8 OpenMP threads
+```

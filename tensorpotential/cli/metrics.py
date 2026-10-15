@@ -4,7 +4,7 @@ from tensorpotential import constants
 
 
 def _process_metric(
-    key, value, metrics_dict, num_struct, num_atoms, normalization_spec
+    key, value, metrics_dict, num_struct, num_atoms, normalization_spec, total_metrics=None
 ):
     """
     Process a single metric key-value pair and update the metrics dictionary.
@@ -17,6 +17,9 @@ def _process_metric(
         num_struct (int): The total number of structures.
         num_atoms (int): The total number of atoms.
         normalization_spec (dict, optional): Dictionary containing normalization rules.
+            "norm" is "n_structures", "n_atoms", or the key of another accumulated metric
+            that holds the number of observations (e.g. "n/d_tensor/per_struct").
+        total_metrics (dict, optional): all accumulated metrics, for such a count key.
     """
 
     if "abs" in key:
@@ -34,6 +37,8 @@ def _process_metric(
         divisor = num_struct * factor
     elif norm_basis == "n_atoms":
         divisor = num_atoms * factor
+    elif total_metrics is not None and norm_basis in total_metrics:
+        divisor = total_metrics[norm_basis] * factor
     else:
         raise ValueError(
             f"Unknown normalization type '{norm_basis=}' in normalization_spec for {key=}"
@@ -73,7 +78,8 @@ def normalize_group_metrics(
     for k, v in total_metrics.items():
         if k in normalization_spec:
             _process_metric(
-                k, v, final_metrics, num_struct, num_atoms, normalization_spec
+                k, v, final_metrics, num_struct, num_atoms, normalization_spec,
+                total_metrics=total_metrics,
             )
         elif "loss" in k:
             final_metrics[k] = float(v) / n_batches if n_batches > 0 else 0

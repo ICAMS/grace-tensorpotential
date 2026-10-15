@@ -17,6 +17,7 @@ import time
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -27,12 +28,15 @@ from tensorpotential.uq.cli._common import (
     detect_model_kind,
     format_progress,
     is_extxyz_path,
+    auto_n_workers,
     load_dataset_any,
+    parse_n_workers,
     parse_progress,
     resolve_threads_per_worker,
     save_dataset_any,
     slice_dataset_for_worker,
     spawn_and_monitor,
+    visible_gpu_ids,
 )
 
 log = logging.getLogger("grace_uq.predict")
@@ -83,8 +87,33 @@ def _build_calculator(args):
 # --------------------------------------------------------------------------
 
 
+# per-row candidate columns written with --features-gamma-min (the HAL pool schema)
+CAND_KEYS = ("cand_atom_index", "cand_features", "cand_gamma")
+
+
+def _candidate_postprocess(features_gamma_min, keep_features):
+    """Per-structure: keep the features of the atoms with gamma >= features_gamma_min as
+    ``cand_*`` arrays; drop the all-atom features unless ``keep_features``."""
+
+    def post(values):
+        g = values.get(uq_constants.ATOMIC_GAMMA)
+        f = values.get(uq_constants.FEATURES)
+        if g is not None and f is not None:
+            g = np.asarray(g)
+            idx = np.flatnonzero(g >= features_gamma_min).astype(np.int32)
+            values["cand_atom_index"] = idx
+            values["cand_features"] = np.asarray(f)[idx].astype(np.float32)
+            values["cand_gamma"] = g[idx].astype(np.float32)
+        if not keep_features:
+            values.pop(uq_constants.FEATURES, None)
+        return values
+
+    return post
+
+
 def _predict_columns(
-    atoms, calc, save_features, raise_errors, sort_by_natoms=True, progress=None
+    atoms, calc, save_features, raise_errors, sort_by_natoms=True, progress=None,
+    features_gamma_min=None,
 ):
     """Dataframe columns for a list of structures, in input order.
 
@@ -94,10 +123,16 @@ def _predict_columns(
     writes. Optional columns are omitted entirely when the model produced none
     for any structure, because downstream code tests for column PRESENCE (see
     `select.py`: `if "gamma" not in df.columns`).
+
+    ``features_gamma_min``: the ``cand_*`` columns (features of the atoms with
+    gamma >= it), reduced per structure, so the all-atom features never outlive
+    their structure; the ``features`` column only with ``save_features``.
     """
     extra = [uq_constants.ATOMIC_GAMMA, uq_constants.ATOMIC_SIGMA]
-    if save_features:
+    if save_features or features_gamma_min is not None:
         extra.append(uq_constants.FEATURES)
+    post = (None if features_gamma_min is None
+            else _candidate_postprocess(features_gamma_min, save_features))
     out = predict_structures(
         atoms,
         calc,
@@ -106,6 +141,7 @@ def _predict_columns(
         sort_by_natoms=sort_by_natoms,
         on_error="raise" if raise_errors else "warn",
         progress=progress,
+        postprocess=post,
     )
     cols = {
         "energy_predicted": out["energy"],
@@ -113,10 +149,20 @@ def _predict_columns(
         "stress_predicted": out["stress"],
     }
     renamed = {uq_constants.ATOMIC_GAMMA: "gamma", uq_constants.ATOMIC_SIGMA: "sigma"}
-    for key in extra:
-        if any(v is not None for v in out[key]):
+    for key in extra + (list(CAND_KEYS) if features_gamma_min is not None else []):
+        if key in out and any(v is not None for v in out[key]):
             cols[renamed.get(key, key)] = out[key]
     return cols
+
+
+def _artifact_sha256(args) -> str:
+    """sha256 of --artifact (the CALM artifact of a yaml-mode model, or the one a
+    SavedModel was exported with, passed for the record); "" without one."""
+    if not args.artifact:
+        return ""
+    from tensorpotential.uq.hal.features import file_sha256
+
+    return file_sha256(args.artifact)
 
 
 def _emit_progress_line(done: int, total: int):
@@ -133,7 +179,9 @@ def run_worker(args, *, progress_emit=None) -> int:
         args.model,
         args.dataset,
     )
-    df = load_dataset_any(args.dataset)
+    df = getattr(args, "preloaded_df", None)
+    if df is None:
+        df = load_dataset_any(args.dataset, args.dump_elements)
     shard = slice_dataset_for_worker(df, args.worker_id, args.n_workers)
     log.info("Worker %d: %d structures assigned", args.worker_id, len(shard))
 
@@ -163,9 +211,21 @@ def run_worker(args, *, progress_emit=None) -> int:
             args.raise_errors,
             sort_by_natoms=args.sort_by_natoms,
             progress=_progress,
+            features_gamma_min=args.features_gamma_min,
         ),
         index=shard.index,
     )
+    if args.features_gamma_min is not None:
+        # what grace_uq select checks before using the candidate columns
+        pred_df["cand_feature_gamma_min"] = float(args.features_gamma_min)
+        pred_df["cand_artifact_sha256"] = _artifact_sha256(args)
+    # Input columns the prediction writes again (a HAL pool's cand_*, or an earlier
+    # prediction's gamma, ...) are replaced, never duplicated.
+    replaced = [c for c in shard.columns if c in pred_df.columns]
+    if replaced:
+        if args.worker_id == 0:
+            log.info("input columns replaced by this prediction: %s", ", ".join(replaced))
+        shard = shard.drop(columns=replaced)
     out_df = pd.concat([shard, pred_df], axis=1)
 
     out_path = os.path.join(
@@ -251,8 +311,12 @@ def _spawn_workers(args):
             cmd += ["--checkpoint", args.checkpoint]
         if args.artifact:
             cmd += ["--artifact", args.artifact]
+        if args.dump_elements:
+            cmd += ["--dump-elements", *args.dump_elements]
         if args.save_features:
             cmd += ["--save-features"]
+        if args.features_gamma_min is not None:
+            cmd += ["--features-gamma-min", repr(float(args.features_gamma_min))]
         if args.sort_by_natoms:
             cmd += ["--sort-by-natoms"]
         if args.raise_errors:
@@ -261,7 +325,7 @@ def _spawn_workers(args):
             cmd += ["--verbose"]
         cmds.append((i, cmd))
 
-    gpus = args.gpus.split(",")
+    gpus = visible_gpu_ids(args.gpus) or ["-1"]  # CUDA_VISIBLE_DEVICES respected; CPU
     progress_handler, progress_close = _make_progress_aggregator(args.n_workers)
     try:
         failed = spawn_and_monitor(
@@ -287,8 +351,15 @@ def _merge_shards(args) -> pd.DataFrame:
         if not os.path.exists(path):
             raise RuntimeError(f"missing worker shard: {path}")
         parts.append(pd.read_pickle(path, compression="gzip"))
-    merged = pd.concat(parts, axis=0).sort_index()
-    return merged
+    merged = pd.concat(parts, axis=0)
+    # Worker shards carry shard-local indices (0, 1, ... in every shard), so the input
+    # order is only recoverable from the ``_orig_index`` column written by
+    # ``slice_dataset_for_worker``; a single worker has no such column.
+    if "_orig_index" in merged.columns:
+        merged = merged.sort_values("_orig_index", kind="stable").drop(
+            columns="_orig_index"
+        )
+    return merged.reset_index(drop=True)
 
 
 def _cleanup_shards(args):
@@ -320,6 +391,7 @@ def run_master(args):
             )
         finally:
             bar.close()
+            args.preloaded_df = wargs.preloaded_df = None  # free before the merge
     else:
         _spawn_workers(args)
 
@@ -365,6 +437,13 @@ Examples
                    --n-workers 4 --gpus 0,1,2,3 \\
                    --save-features
 
+  # 3b. Candidate-only features (atoms with gamma >= 1), the input of
+  #     `grace_uq select` without all-atom features in memory:
+  grace_uq predict --model model.yaml --checkpoint checkpoint.best_test_loss \\
+                   --artifact UQ/gmm_artifacts.npz \\
+                   --dataset candidates.pkl.gz --output predicted.pkl.gz \\
+                   --features-gamma-min 1.0
+
   # 4. Save as extxyz (per-atom features are dropped — extxyz cannot store them):
   grace_uq predict --model saved_model/ \\
                    --dataset candidates.pkl.gz \\
@@ -403,18 +482,41 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--artifact",
-        help="UQ .npz artifact. Required iff --model is a model.yaml.",
+        help="UQ .npz artifact. Required if --model is a model.yaml. With a SavedModel "
+        "and --features-gamma-min, pass it too: its sha256 is recorded in the output "
+        "and `grace_uq select --uq/--artifact` checks it.",
     )
     p.add_argument(
-        "--dataset", required=True, help="Input dataset (.pkl.gz default; .xyz/.extxyz)."
+        "--dataset",
+        required=True,
+        help="Input dataset (.pkl.gz default; .xyz/.extxyz; LAMMPS text dump).",
+    )
+    p.add_argument(
+        "--dump-elements",
+        nargs="+",
+        metavar="EL",
+        help="LAMMPS dump --dataset without an element column: element of atom type 1, "
+        "2, ... (e.g. --dump-elements Al Li). Ignored when the dump has the column.",
     )
     p.add_argument(
         "--output",
         default="predicted.pkl.gz",
         help="Output path (extension drives format).",
     )
-    p.add_argument("--n-workers", type=int, default=4)
-    p.add_argument("--gpus", default="0")
+    p.add_argument(
+        "--n-workers",
+        type=parse_n_workers,
+        default="auto",
+        help="worker processes, or auto: min(4, ceil(n_structures / 200)), round robin "
+        "over the visible GPUs (CUDA_VISIBLE_DEVICES respected; CPU without one); a "
+        "single worker runs in this process.",
+    )
+    p.add_argument(
+        "--gpus",
+        default=None,
+        help="comma-separated GPU ids for the workers (round robin); default: the "
+        "visible GPUs with --n-workers auto, GPU 0 with an explicit --n-workers.",
+    )
     p.add_argument("--threads-per-worker", default="auto")
     p.add_argument(
         "--no-ase-atoms",
@@ -425,6 +527,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--save-features",
         action="store_true",
         help="Add per-atom features [nat, D] column (model-native dtype).",
+    )
+    p.add_argument(
+        "--features-gamma-min",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Store only the features of atoms with gamma >= X, as the per-row "
+        "cand_atom_index / cand_features (float32) / cand_gamma columns of a HAL pool "
+        "(plus cand_feature_gamma_min, cand_artifact_sha256 of --artifact); "
+        "`grace_uq select` then selects from them like from a HAL pool, without "
+        "all-atom features in memory. With a SavedModel, pass --artifact (the npz it "
+        "was exported with) to record its hash for select --artifact. Combine with "
+        "--save-features to also keep the all-atom `features` column.",
     )
     p.add_argument(
         "--sort-by-natoms",
@@ -468,11 +583,61 @@ def predict_main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     _resolve_paths(args)
+    if args.features_gamma_min is not None and is_extxyz_path(args.output):
+        parser.error("--features-gamma-min needs a .pkl.gz --output (extxyz cannot store "
+                     "the candidate columns)")
+    if args.features_gamma_min is not None and args.no_ase_atoms:
+        parser.error("--features-gamma-min cannot be combined with --no-ase-atoms: "
+                     "grace_uq select needs the structures (element counts, output) "
+                     "next to the candidate columns")
+    if (args.worker_id is None and args.features_gamma_min is not None
+            and not args.artifact):
+        log.warning("--features-gamma-min without --artifact: the candidate columns carry "
+                    "no artifact hash, so `grace_uq select --artifact` will refuse them; "
+                    "pass the CALM artifact the model was exported with.")
 
     if args.worker_id is not None:
         return run_worker(args)
+    resolve_n_workers(args)
     run_master(args)
     return 0
+
+
+def single_worker_device(gpus_arg, gpus, environ):
+    """CUDA_VISIBLE_DEVICES for the one in-process auto worker, or None to leave it.
+
+    ``--gpus`` given: its first GPU, or "-1" (CPU) when it names none. Otherwise a
+    CUDA_VISIBLE_DEVICES already set is left alone; with nothing set, the first GPU
+    found (so a multi-GPU host does not hand TF every device), or None without one.
+    """
+    if gpus_arg is not None:
+        return gpus[0] if gpus else "-1"
+    if environ.get("CUDA_VISIBLE_DEVICES") is not None:
+        return None
+    return gpus[0] if gpus else None
+
+
+def resolve_n_workers(args):
+    """--n-workers auto -> min(4, ceil(n_structures / 200)) workers, round robin over the
+    visible GPUs (on CPU without one); a single worker runs in this process and reuses
+    the dataset read here for its size."""
+    if args.n_workers != "auto":
+        return
+    df = load_dataset_any(args.dataset, args.dump_elements)
+    n = auto_n_workers(len(df))
+    gpus = visible_gpu_ids(args.gpus)
+    args.n_workers = n
+    if n == 1:
+        args.preloaded_df = df  # the in-process worker does not read the file again
+        device = single_worker_device(args.gpus, gpus, os.environ)
+        if device is not None:  # before TF creates its devices
+            os.environ["CUDA_VISIBLE_DEVICES"] = device
+    else:
+        args.gpus = ",".join(gpus) if gpus else "-1"  # "-1": CPU workers
+    del df
+    where = ("in this process" if n == 1
+             else f"on GPUs {args.gpus}" if gpus else "on CPU")
+    log.info("--n-workers auto: %d worker(s) %s (%d visible GPU(s))", n, where, len(gpus))
 
 
 if __name__ == "__main__":

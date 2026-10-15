@@ -90,3 +90,36 @@ def uq_setup(tmp_path_factory):
         "element_indices": element_indices,
         "feature_spec": feature_spec,
     }
+
+
+@pytest.fixture(scope="session")
+def hal_uq_setup(uq_setup, tmp_path_factory):
+    """uq_setup plus calibrated interp_thresholds, so UQ calculators return gamma.
+
+    Thresholds follow the production robust fence median + 3 * 1.4826 * MAD of the
+    training sigma per (element, cluster); clusters with < 2 atoms take the
+    element-wide maximum.
+    """
+    from tensorpotential.uq.gmmuq import GMMUQModel
+
+    gmm = GMMUQModel(uq_setup["artifact_path"])
+    sigma, _, assign = gmm(
+        uq_setup["features"], uq_setup["element_indices"], verbose=False
+    )
+    sigma, assign = sigma.numpy(), assign.numpy()
+    eidx = np.asarray(uq_setup["element_indices"])
+    thr = np.full((gmm.n_elements, gmm.K_max), np.nan)
+    for e in range(gmm.n_elements):
+        for k in range(gmm.K_max):
+            s = sigma[(eidx == e) & (assign == k)]
+            if len(s) >= 2:
+                med = np.median(s)
+                thr[e, k] = med + 3 * 1.4826 * np.median(np.abs(s - med))
+        fallback = np.nanmax(thr[e]) if np.any(np.isfinite(thr[e])) else 1.0
+        thr[e] = np.where(np.isfinite(thr[e]) & (thr[e] > 0), thr[e], fallback)
+    with np.load(uq_setup["artifact_path"], allow_pickle=True) as d:
+        data = {k: d[k] for k in d.files}
+    data["interp_thresholds"] = thr
+    path = str(tmp_path_factory.mktemp("hal_uq") / "gmm_artifacts.npz")
+    np.savez(path, **data)
+    return {**uq_setup, "artifact_path": path, "thresholds": thr}

@@ -426,8 +426,8 @@ def _tp_version() -> str:
 # ---------------------------------------------------------------------------
 # Provenance sidecar
 #
-# The cache is keyed by MODEL NAME only (`get_or_download_*` short-circuits on
-# `os.path.isdir`), so upgrading the package silently leaves an old payload in place.
+# The cache is keyed by MODEL NAME only (`get_or_download_*` short-circuits on an
+# existing payload), so upgrading the package silently leaves an old payload in place.
 # Record the exact origin URL -- which contains the immutable release tag -- next to
 # the payload, and compare it at load. The comparison is a local string compare: no
 # network, offline-safe, and cheap enough to run on every load.
@@ -516,6 +516,12 @@ def check_origin(path: str, model: str, payload: str, expected_url: str | None) 
     return False
 
 
+def is_saved_model(path) -> bool:
+    """True if ``path`` holds a SavedModel. A cache dir can exist without one: ``kokkos.npz``
+    (get_or_download_kokkos, grace-native) is downloaded into the same ``<cache>/<model>/``."""
+    return os.path.isfile(os.path.join(path, "saved_model.pb"))
+
+
 def download_extract_rename(url, model_path):
     model_path = model_path[:-1] if model_path.endswith("/") else model_path
     # sciebo/Nextcloud public-share links require a trailing "/download";
@@ -539,8 +545,17 @@ def download_extract_rename(url, model_path):
     os.remove(local_filename)
     extracted_model_path = os.path.join(root_folder, top_folder_name)
     if extracted_model_path != model_path:
+        if os.path.isdir(model_path):
+            # keep files fetched before the model (kokkos.npz): move them into the payload,
+            # then swap the payload in with one rename, so a half-moved model is never cached
+            for name in os.listdir(model_path):
+                os.replace(
+                    os.path.join(model_path, name),
+                    os.path.join(extracted_model_path, name),
+                )
+            os.rmdir(model_path)
         os.rename(extracted_model_path, model_path)
-    assert os.path.isdir(model_path), f"Path {model_path} does not exist"
+    assert is_saved_model(model_path), f"No SavedModel in {model_path}"
 
 
 def get_or_download_model(model):
@@ -548,10 +563,11 @@ def get_or_download_model(model):
     model = MODELS_ALIASES_DICT.get(model) or model
 
     model_metadata = MODELS_METADATA[model]
-    model_path = model_metadata.get(MODEL_PATH_KEY) or os.path.join(
-        FOUNDATION_CACHE_DIR, model
-    )
-    if not os.path.isdir(model_path):
+    explicit_path = model_metadata.get(MODEL_PATH_KEY)
+    model_path = explicit_path or os.path.join(FOUNDATION_CACHE_DIR, model)
+    # an explicit path is a directory the user curates; a cache dir may hold only kokkos.npz
+    cached = os.path.isdir(model_path) if explicit_path else is_saved_model(model_path)
+    if not cached:
         # download model
         url = model_metadata.get(MODEL_URL_KEY)
         if url is None:
@@ -637,6 +653,7 @@ def grace_fm(
     pad_atoms_number: int | None = 10,
     max_number_reduction_recompilation: int | None = 2,
     min_dist=None,
+    enable_uq: bool = False,
     **kwargs,
 ):
     from tensorpotential.calculator.asecalculator import TPCalculator
@@ -645,12 +662,15 @@ def grace_fm(
 
     model_path = get_or_download_model(model)
 
+    # Preserve the calculator option historically accepted through **kwargs.
+    enable_uq = kwargs.pop("enable_uq_if_available", enable_uq)
     calc = TPCalculator(
         model=model_path,
         pad_neighbors_fraction=pad_neighbors_fraction,
         pad_atoms_number=pad_atoms_number,
         max_number_reduction_recompilation=max_number_reduction_recompilation,
         min_dist=min_dist,
+        enable_uq_if_available=enable_uq,
         **kwargs,
     )
     return calc
@@ -661,6 +681,9 @@ grace_fm.__doc__ = f"""
     extend_fake_neighbors_fraction:  (float) Fraction of atoms to extend (padding for JIT)
     extend_fake_atoms_number:  (int) Number of atoms to extend (padding for JIT)
     min_dist:  (float) Minimum distance. Raise exception if atoms are closer
+    enable_uq:  (bool) Switch on uncertainty quantification (mode "gamma_only") for
+        models that ship it (UQ column of the model tables); off by default because
+        it slows the calculator down. calc.enable_uq() / calc.disable_uq() switch later.
     
     Returns:  ASE calculator (TPCalculator)
 """

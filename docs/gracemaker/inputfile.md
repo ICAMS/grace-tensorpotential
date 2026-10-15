@@ -1,250 +1,432 @@
 # Input file `input.yaml`
 
-Example of `input.yaml` can be found in `examples/grace` folder
+Generate the input file with `gracemaker -t` (interactive), then edit it if needed. This page
+lists the options. Defaults are the values the code uses when a key is left out.
 
-```{ .yaml }
-seed: 42
+## Minimal input
+
+A fit from scratch, as `gracemaker -t` writes it:
+
+```yaml
+seed: 1
 cutoff: 6
 
-# cutoff_dict: {Mo: 4, MoNb: 3, W: 5, Ta*: 7 } ## Defining cutoff for each bond type separately, used by certain models
-## possible defaults: DEFAULT_CUTOFF_1L, DEFAULT_CUTOFF_2L, CUTOFF_2L
+data:
+  filename: train.pkl.gz
+  test_size: 0.05            # 5 % of the structures as test set
+  reference_energy: 0
+
+potential:
+  preset: GRACE_1LAYER_latest
+  kwargs: {n_rad_max: 32, prod_func_n_max: 64, n_mlp_dens: 12}   # see Presets
+  scale: True
+
+fit:
+  loss: {
+    energy: { type: huber, weight: 16, delta: 0.01 },
+    forces: { type: huber, weight: 32, delta: 0.01 },
+  }
+  target_total_updates: 50000
+  optimizer: Adam
+  opt_params: { learning_rate: 0.008, use_ema: True, ema_momentum: 0.99, clipnorm: 1.0 }
+  scheduler: cosine_decay
+  scheduler_params: { minimum_learning_rate: 6.7e-4 }
+  batch_size: 16
+  test_batch_size: 64
+  jit_compile: True
+  checkpoint_freq: 2
+```
+
+The [presets](presets.md#models-hyperparameters) page describes `preset` and `kwargs`.
+
+## All options
+
+```yaml
+seed: 42        # random seed: model initialization, data split; the fit folder is seed/<seed>/
+cutoff: 6       # cutoff radius (Å)
+
+# cutoff_dict: {Mo: 4, MoNb: 3, W: 5, Ta*: 7}   # cutoff per bond type (GRACE presets)
+# cutoff_dict: DEFAULT_CUTOFF_1L   # or a built-in table: DEFAULT_CUTOFF_1L, DEFAULT_CUTOFF_2L,
+#                                  # CUTOFF_2L, BIG_CUTOFF_2L (per-element radii; pair = mean of
+#                                  # the two; other elements use `cutoff`)
 
 ######################
 ##       DATA       ##
 ######################
 data:
-  filename: /path/to/train.pckl.gzip
-  # filename: /path/to/train.extxyz
-  #  train_size: 100
-  test_filename: /path/to/test.pckl.gzip
-  #  test_size: 0.05 # 
-  reference_energy: 0 
-  # reference_energy: auto          # auto: least-squares fit of per-element E0 from train set
+  filename: /path/to/train.pkl.gz       # pkl.gz, extxyz, or a list of files
+  # train_size: 0.5                     # use part of the training data: < 1 fraction, >= 1 number
+  test_filename: /path/to/test.pkl.gz
+  # test_size: 0.05                     # see "Train and test split" below
+  reference_energy: 0                   # free-atom energies subtracted from `energy`
+  # reference_energy: auto              # least-squares per-element E0 from the train set
   # reference_energy: {Al: -1.23, Li: -3.56}
-  # save_dataset: False # default is True
-  # stress_units: eV/A3 # eV/A3 (default) or GPa or kbar or -kbar
-  # max_workers: 6 # for parallel data builder
+  # save_dataset: True                  # save the processed train/test sets into seed/<seed>/
+  # stress_units: eV/A3                 # eV/A3 (default), GPa, kbar or -kbar
+  # max_workers: 6                      # parallel data builder
 
-  ## Data pipeline mode: "in_memory" (default) or "streaming"
-  ## "streaming" computes neighbour lists on-the-fly, keeping only one batch in memory.
-  ## Recommended for large datasets that do not fit in RAM.
-  ## NOTE: weight normalization is not supported in streaming mode (normalize_weights must be False).
-  # pipeline: streaming
-  # streaming:
-  #   target_metric: 3000          # total metric value per batch (e.g. total neighbours)
-  #   metric_strategy: neighbours  # grouping metric: "neighbours", "atoms", or "structures"
-  #   num_bins: 10                 # number of parallel accumulation bins
-  #   sorting_buffer_size: 32      # sort structures every N arrivals for load balancing
-  #   growth_fraction: 0.1         # bucket growth on overflow: <1 = relative (10%), >=1 = absolute (+N slots)
-  #                                # per-axis dict also supported: {atom: 0.1, bond: 0.05, structure: 5}
-  #   outlier_strategy: expand     # "expand" (grow bucket), "warn_skip" (drop), or "error" (raise)
-  #   verbose: false               # log bucket discovery events
-  #   prefetch_queue_size: 0       # set to >0 to thread prefetching
-
-  ## Extra input/reference DataBuilder/s required for model
-  # extra_components: {
-  #   MagMomDataBuilder: {},
-  # }
+  # pipeline: in_memory                 # or streaming, see "Large datasets" below
 
 ######################
 ##    POTENTIAL     ##
 ######################
 potential:
-  #  elements: [C, H, O] # If not provided - determined automatically from data
+  # elements: [C, H, O]                 # default: all elements of the data
 
+  ## Option 1. Preset
+  preset: GRACE_1LAYER_latest           # FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
+  # kwargs: {n_rad_max: 32}             # preset parameters
 
-  ## Option 1. Presets
-  preset: GRACE_1LAYER_latest # FS, GRACE_1LAYER_latest, GRACE_2LAYER_latest
-  # kwargs: {n_rad_max: 16}  # kw-arguments that will be passed to preset or custom model
+  ## Option 2. Custom model in a Python file (advanced)
+  # custom: model.custom_model          # function custom_model from model.py
 
-  ## Option 2. Custom model in python file (advanced)
-  # custom: model.custom_model # custom model from model.py file, function custom_model
+  ## Option 3. Model from model.yaml (e.g. to continue a fit)
+  # filename: model.yaml                # architecture only, no weights
+  # checkpoint_name: /path/to/checkpoint.index
 
+  ## Option 4. Fine-tune a foundation model (see Foundation models)
+  # finetune_foundation_model: GRACE-1L-OMAT-medium-ft-AM
+  # reduce_elements: False              # True: keep only the elements of the data
 
-
-  ## Option 3. Model in model.yaml
-  # filename: model.yaml # configuration (WITHOUT weights!) of the model
-  # checkpoint_name: /path/to/checkpoint.index  #  path to checkpoint index file  
-
-
-  ## Option 4. Fine-tune foundation model
-  # finetune_foundation_model: GRACE-1L-OAM
-  # reduce_elements: True #  default - False, reduce elements to those provided in dataset
-  
-  ## Option 4a. LORA (experimental, not supported)
-  # lora: {all: {rank: 16, alpha: 1}, Z: {rank: 8, alpha: 1}, I: {rank: 4, alpha: 1, keep_dims: 1} }
-  ## reduce_lora: True # reduce LORA model
-  
-  ## Other parameters:
-  # shift: False # True/False/"auto" - automatic shift by energy
-  #   True  — least-squares per-element shift on training energies (for training from scratch)
-  #   "auto" — when finetuning a foundation model, computes per-element shifts by comparing
-  #            FM predictions with reference DFT data and injects them into the model
-  # scale: False # False/True or float  - automatic scale data by force RMSE
-  # avg_n_neigh: 40 # Average number of neighbours. By default - automatically determined
-  # float_dtype: float64 # float64, float32
-  # custom ZBL core repulsion for model:  kwargs: {zbl_cutoff: {Mo: 1, MoNb: 2, W: 1, Ta*: 3 }}
-  # dense_nbr: False # Dense (reshape) equivariant neighbour aggregation. When True the model runs
-  #                  # a batched matmul over a per-atom-uniform [n_atoms*max_neigh] bond layout
-  #                  # instead of the per-bond einsum + segment_sum scatter. It is compute-bound
-  #                  # (faster on GPU, esp. deeper models / higher coordination) but materializes
-  #                  # padded neighbour slots, so it pays off only when the per-batch padding is
-  #                  # low -- tune the fit::dense_* batching knobs below. The data pipeline emits
-  #                  # the matching layout automatically. Bit-exact with the default path.
+  ## Other parameters
+  # param_dtype: float32                # float32 (default) or float64 (float_dtype: deprecated alias)
+  # shift: False                        # True: least-squares per-element energy shift (from scratch)
+  #                                     # auto: per-element shift from foundation-model predictions
+  #                                     #       vs your DFT data (fine-tuning)
+  # scale: False                        # True: scale by the force RMSE, or a float (e.g. 2.0,
+  #                                     # not 2: an integer is read as True)
+  # avg_n_neigh: 40                     # average number of neighbours; default: from the data
+  # dense_nbr: False                    # dense neighbour aggregation, see "Dense batching" below
 
 ######################
 ##       FIT        ##
 ######################
 fit:
-  # Explicit specification of the train and compute functions for the model with optional parameters
-  #compute_function: ComputeStructureEnergyAndForcesAndVirial
-  #train_function: ComputeBatchEnergyAndForces
-  #compute_function_config: {}
   loss: {
-    energy: { type: huber, weight: 16,  delta: 0.01}, # or { type: square, weight: 1} 
-    forces: { type: huber, weight: 32., delta: 0.01}, 
-  # stress: { type: huber, weight: 32., delta: 0.01},   #
-
-  ## Change weights for energy/forces/stress loss components
-  ## and learning_rate after "after_iter" epochs (or fraction: 0.75 = 75% of maxiter, or "auto" = 0.75)
-  ## NOTE: switch requires `scheduler: reduce_on_plateau` (set automatically by `gracemaker -t`)
-  #    switch: { after_iter: 0.75,  # or e.g. 350
-  #              energy: { weight: 5.0 }, 
-  #              forces: { weight: 2.0 }, 
-  #              stress: {weight: 0.001},
-  #               learning_rate: 0.001}    
+    energy: { type: huber, weight: 16, delta: 0.01 },   # or { type: square, weight: 1 }
+    forces: { type: huber, weight: 32, delta: 0.01 },
+    # stress: { type: huber, weight: 32, delta: 0.01 },
+    # l2_reg: 1.0e-8                                    # L2 regularization of the weights
+    # switch: { after_iter: 0.75, energy: { weight: 5.0 }, forces: { weight: 2.0 },
+    #           learning_rate: 0.001 }                  # see "Loss" below
   }
 
-  
-  maxiter: auto # Max number of optimization epochs.
-    ## "auto" mode: ~50k total updates for scratch, ~10k for finetuning.
-    ## For BFGS, "auto" is ~500 epochs (scratch) or ~100 (finetuning).
-  # target_total_updates: 50000 
-    ## Alternative to maxiter: specify total gradient updates. 
-    ## maxiter will be auto-computed. Recommended ~100-500 for BFGS.
-  optimizer: Adam
-    # Optimization with Adam: good for large number of parameters, first-order method
-  opt_params: { learning_rate: 0.008, use_ema: True, ema_momentum: 0.99,  weight_decay: 1.e-20, clipnorm: 1.0}
-  # reset_optimizer: True  # reset optimizer state, after being loaded from checkpoint
-  # reset_epoch_and_step: False # reset epoch and step internal counters (stored in checkpoint)
-  scheduler: cosine_decay # scheduler for learning-rate reduction during training 
-    # available options are: reduce_on_plateau, cosine_decay, linear_decay, exponential_decay
-  scheduler_params: {"minimum_learning_rate": 0.0001}
-  #scheduler_params: {"warmup_epochs": 2, "cold_learning_rate": 0.1, "minimum_learning_rate": 0.05}
-    # If :warmup_epochs: > 0, begin optimization with :cold_learning_rate: and reach :opt_params::learning_rate:
-    # within :warmup_epochs: (can be < 1). Else, begin optimization with :opt_params::learning_rate: and decay down to
-    # minimum_learning_rate within :maxiter: epochs
-    # NOTE: the correct key is `minimum_learning_rate`. Using `minimal_learning_rate` (common typo) is silently ignored
-    #       and the default (1e-4) is used instead.
-  ## reduce_on_plateau scheduler (new API)
-  # scheduler: reduce_on_plateau
-  # scheduler_params: { patience: 10, reduction_factor: 0.8, minimum_learning_rate: 5.0e-4,
-  #                     stop_at_min: False, resume_lr: True, cooldown: 0, monitor: test_loss }
-  # legacy format for reduce_on_plateau lr scheduler (DEPRECATED — uses keys `factor` and `min`)
-  # learning_rate_reduction: { patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True, resume_lr: True, }
-  
-  
-  ## Optimization with BFGS: good for SMALL number of parameters (up to 10k), "second"-order method.
-  ## scipy optimizer on CPU will be used
-  #  optimizer: L-BFGS-B # 'L-BFGS-B' for memory limited or 'BFGS' for full method
-  #  opt_params: {maxcor: 100, maxls: 20 }  # options for L-BFGS-B
+  maxiter: auto                 # number of epochs; auto: ~50k updates from scratch,
+                                # ~10k for fine-tuning (BFGS: ~500 / ~100 epochs), 10-5000 epochs
+  # target_total_updates: 50000 # number of updates instead; overrides maxiter
 
-  
-  batch_size: 32 # Important hyperparameter for Adam and irrelevant (but must be) for L-BFGS-B/BFGS
-  test_batch_size: 200 # test batch size (optional)
+  optimizer: Adam               # Adam, or L-BFGS-B / BFGS (scipy, CPU; up to ~10k parameters)
+  opt_params: { learning_rate: 0.008, use_ema: True, ema_momentum: 0.99, weight_decay: 1.e-20,
+                clipnorm: 1.0 }  # passed to the Keras Adam optimizer (amsgrad, beta_1,
+                                 # clipvalue, global_clipnorm, ... work too)
+                                 # default without opt_params: {learning_rate: 0.01, amsgrad: True}
+  # opt_params: { maxcor: 100, maxls: 20 }   # for L-BFGS-B
+  scheduler: cosine_decay       # see "Learning-rate schedulers" below
+  scheduler_params: { minimum_learning_rate: 1.0e-4 }
+  # reset_optimizer: False      # reset the optimizer state after loading a checkpoint
+  # reset_epoch_and_step: False # reset the epoch and step counters stored in the checkpoint
 
+  batch_size: 32                # default 8; important for Adam, ignored by (L-)BFGS
+  test_batch_size: 200          # default 1: set it
 
-  ## Uniform weighting is used if not specified
-  ## Energy based weighting can be used as:  
-  #  weighting: {type: energy_based}  # the simplest default
+  # weighting: { type: energy_based }   # see "Weighting" below
+  # compute_convex_hull: False  # distance to the convex hull of train+test (needed by weighting)
+  # eval_init_stats: False      # metrics before the first epoch
 
-  # compute_convex_hull: False ## for train+test dataset compute convex hull and distance to it 
-  # eval_init_stats: False  ## Compute train/test metrics before start fitting 
+  jit_compile: True             # XLA compilation, keep it on
+  train_max_n_buckets: auto     # number of padded batch shapes; auto: 1-32, chosen to keep the
+  test_max_n_buckets: auto      #   neighbour padding below auto_bucket_max_padding
+  # auto_bucket_max_padding: 0.3   # 0.3 = 30 % (0.15 with dense_nbr)
 
-  jit_compile: True  # for XLA compilation, must be used in almost all cases
-  ## To use jit_compile efficiently, data must be padded.
-  ## Bucket is a group of batches padded to the same shape for efficient JIT execution.
-  ## max_n_buckets can be an integer or "auto".
-  ## In "auto" mode, the bucket count is chosen automatically (see `auto_bucket_max_padding` below).
-  ## `train_max_n_buckets`: "auto" (default) or integer. Max number of distinct buffer shapes (buckets) for training.
-  ##   - "auto": dynamically determines the minimum number of buckets (1-32) that keeps padding overhead below `auto_bucket_max_padding`.
-  ## `test_max_n_buckets`: "auto" (default) or integer. Same for test set.
-  ## `auto_bucket_max_padding`: 0.3 (default). Target maximum padding overhead fraction for neighbours when using `"auto"` bucketing. 0.3 means 30%.
-  ##   NOTE: in dense mode (potential::dense_nbr: True) this knob is REPURPOSED as the unified net
-  ##   neighbour-padding target and defaults to 0.15 (see the dense batching block below).
-  train_max_n_buckets: auto  ## max number of buckets in train set
-  test_max_n_buckets: auto   ## same for test
+  checkpoint_freq: 10           # regular checkpoint every N epochs (the best-test-loss one is extra)
+  # save_all_regular_checkpoints: False
+  # checkpoint_freq_steps: 500  # also every N steps within an epoch (Adam), see below
+  # progressbar: False
+  # train_shuffle: False        # shuffle batches every epoch (True by default in streaming)
+  # strategy: mirrored          # several GPUs on one machine, same as `gracemaker -m`
 
-  ## ---- Dense (reshape) batching (only used when potential::dense_nbr: True) ----
-  ## In the dense layout the atom and neighbour axes are bound (a padding/"fake" atom occupies a
-  ## full reshape `width` of neighbour slots), and neighbour padding is what drives the wasted
-  ## compute. So a single target controls everything:
-  ## `auto_bucket_max_padding`: in dense mode this is the UNIFIED target on the NET neighbour-padding
-  ##   fraction  1 - (real neighbours) / (sum of n_atoms*max_neigh over batches).  Default 0.15.
-  ##   An adaptive search splits this budget between (a) the max_neigh "width" bucketing -- structures
-  ##   are sorted by per-atom max_neigh and cut into contiguous buckets, each padded to its OWN max
-  ##   (a DP-optimal partition of the max_neigh histogram, not fixed tiers) -- and (b) the per-atom
-  ##   (nat) bucketing (fake atoms), choosing the allocation that meets the target with the FEWEST
-  ##   distinct buffer shapes. The segment_sum path keeps the 0.3 default and pads the two axes
-  ##   independently.
-  # dense_max_shapes: 64       ## HARD cap on the number of distinct (n_atoms, max_neigh) buffer shapes
-  #                            ## == XLA recompiles (the compile budget). shapes <= this by construction;
-  #                            ## if the padding target needs more, the cap wins (padding rises) and a
-  #                            ## warning is logged. A LARGER batch_size hits the target with fewer shapes.
-  # dense_slot_budget: auto    ## max n_atoms*max_neigh per batch (caps per-batch memory / isolates
-  #                            ## high-coordination outliers). auto = batch_size*mean(nat)*mean(max_neigh).
-  # dense_n_neigh_buckets: auto ## explicit number of max_neigh width buckets (overrides the adaptive search)
-  # dense_max_neigh_cap:       ## drop structures whose per-atom max_neigh exceeds this (broken/degenerate
-  #                            ## cells); default off. Never truncates neighbours.
-  ## A run logs, per dataset: "dense bucketing: N batches, S/cap distinct shapes, net neighbour padding X%".
-
-  checkpoint_freq: 10 # frequency for **REGULAR** checkpoints. 
-  # save_all_regular_checkpoints: False # to store ALL regular checkpoints
-  # checkpoint_freq_steps: 500 # opt-in mid-epoch checkpoint every N training steps (Adam only).
-  #                            # A crash loses at most N steps. Overwrites the default `checkpoint`
-  #                            # file; on `-rl` restart, train_adam rewinds to the start of the
-  #                            # interrupted epoch and fast-forwards the data iterator past the
-  #                            # already-trained batches (gradients are preserved in the restored
-  #                            # optimizer state). Use `--no-intra-epoch-redo` to skip the rewind.
-  # progressbar: True # show batch-evaluation progress bar
-  # train_shuffle: True # shuffle train batches on every epoch
-  # strategy: mirrored # or -m flag # for parallel multi-GPU parameterization
-
-  # trainable_variable_names: ["rho/reducing_", "Z/ChemicalEmbedding"] ### specify trainable variables name pattern
-  
-  ## technical parameters for normalization
-  #  loss_norm_by_batch_size: False # normalization of total loss by global batch size (for backward compat)
-  #  normalize_weights: True ## norm per-sample weights to sum-up to one
-  #  normalize_force_per_structure: True ## force-weights is divided by number of atoms
+  # trainable_variable_names: ["rho/reducing_"]   # train only these weights (frozen-weights
+  #                                               # fine-tuning, see Foundation models)
+  # normalize_weights: False            # normalize per-structure weights to sum to one
+  # normalize_force_per_structure: False  # divide force weights by the number of atoms
 ```
 
-This is the complete list of parameters. For most practical purposes
-it is sufficient to generate the input file with the `gracemaker -t` utility.
+## Train and test split
 
-Detailed weighting option (`weighting` belongs to the `fit` section):
+| Keys | Test set |
+|---|---|
+| `test_filename` | that file |
+| `test_filename` + `test_size: N` (N > 1) | N random structures of that file |
+| `test_size: f` (f < 1), no `test_filename` | a fraction f of the training data, removed from it |
+| neither | no test set |
 
-```{ .yaml }
+`train_size` (fraction below 1, number from 1) reduces the training data first. With
+`test_filename`, a fractional `test_size` is ignored.
 
+## Loss
+
+Loss types per component:
+
+| Component | Types |
+|---|---|
+| `energy` (per atom) | `square`, `huber` (`delta`), `mae`, `piecewise_linear` |
+| `forces` | `square`, `huber` (`delta`), `piecewise_linear` |
+| `stress` | `square`, `huber` (`delta`), `mae`, `piecewise_linear` |
+| `virial` | `square`, `huber` (`delta`) |
+
+`switch` changes the loss weights once, after `after_iter` epochs (an integer) or a fraction of
+`maxiter` (`0.75`, or `auto` = 0.75). With a test set, the fit then continues from the best
+checkpoint so far (saved as `checkpoint.stage1.best_test_loss`). The new learning rate is `learning_rate`, or the
+current one times `learning_rate_reduction_factor`. `switch` needs `scheduler: reduce_on_plateau`;
+`gracemaker -t` sets it.
+
+## Learning-rate schedulers
+
+`scheduler` and its `scheduler_params`:
+
+| `scheduler` | `scheduler_params` (default) |
+|---|---|
+| `cosine_decay`, `linear_decay`, `exponential_decay` | `minimum_learning_rate` (1e-4), `warmup_epochs` (0), `cold_learning_rate` (1e-7); `exponential_decay` also `staircase` (False) |
+| `reduce_on_plateau` | `patience` (10), `reduction_factor` (0.8), `minimum_learning_rate` (1e-4), `stop_at_min` (False), `cooldown` (0), `resume_lr` (True), `monitor` (`test_loss`) |
+
+* The decays go from `opt_params: learning_rate` to `minimum_learning_rate` over `maxiter`
+  epochs. With `warmup_epochs` > 0 (can be < 1), they first rise from `cold_learning_rate` to
+  `learning_rate`.
+* `stop_at_min: True` stops the fit when `reduce_on_plateau` reaches `minimum_learning_rate`. It is
+  the only early stopping.
+* Unknown keys are ignored with a warning in the log, e.g. `minimal_learning_rate` for
+  `minimum_learning_rate`.
+
+??? info "Legacy `learning_rate_reduction` (deprecated)"
+    `learning_rate_reduction: {patience: 5, factor: 0.98, min: 5.0e-4, stop_at_min: True,
+    resume_lr: True}` still works (with a warning) as `reduce_on_plateau`. It cannot be combined
+    with `scheduler`.
+
+## Weighting
+
+By default all structures have the same weight: 1 for the energy and 1 for each force
+component. Let `fit: weighting` compute weights, or set your own in the training data.
+
+### Energy-based weighting
+
+Gives low-energy structures more weight:
+
+```yaml
 fit:
-  weighting: {type: energy_based, 
-    ## number of structures to randomly select from the initial dataset
-    nfit: 10000,
-    ## only the structures with energy up to E_min + DEup will be selected
-    DEup: 10.0,  ## eV, upper energy range (E_min + DElow, E_min + DEup)        
-    ## only the structures with maximal force on atom  up to DFup will be selected
-    DFup: 50.0, ## eV/A
-    ## lower energy range (E_min, E_min + DElow)
-    DElow: 1.0,  ## eV
-    ## delta_E  shift for weights, see paper
-    DE: 1.0,
-    ## delta_F  shift for weights, see paper
-    DF: 1.0,
-    ## 0<wlow<1 or None: if provided, the renormalization weights of the structures on lower energy range (see DElow)
-    wlow: 0.75,
-    ##  "convex_hull" or "cohesive" or "zero_formation_energy": method to compute the E_min
-    energy: convex_hull,
-    ## structures types: all (default), bulk or cluster
-    reftype: all,
-    ## random number seed
+  compute_convex_hull: True     # needed for energy: convex_hull (the default)
+  weighting: {type: energy_based,
+    nfit: 10000,                # number of structures to select (default: all)
+    DElow: 1.0,                 # eV/atom; structures in (E_min, E_min + DElow) are all kept
+                                #   (if fewer than nfit)
+    DEup: 10.0,                 # eV/atom; structures above E_min + DEup are dropped
+    DFup: 50.0,                 # eV/Å; structures with a larger force are dropped (default: none)
+    DE: 1.0,                    # energy shift of the weights
+    DF: 1.0,                    # force shift of the weights
+    wlow: 0.75,                 # 0 < wlow < 1: total weight of the low-energy range (default: none)
+    energy: convex_hull,        # E_min from: convex_hull, cohesive or zero_formation_energy
+    reftype: all,               # all, bulk or cluster
     seed: 42}
 ```
+
+Without `compute_convex_hull: True`, use `energy: cohesive` or `zero_formation_energy`.
+
+### Custom weights
+
+Add these columns to the training (and test) DataFrame:
+
+| Column | Value per structure | Default |
+|---|---|---|
+| `energy_weight` | a number: weight of the energy | 1 |
+| `force_weight` | an array with one number per atom: weight of each atom's force | 1 per atom |
+| `virial_weight` | a number: weight of the stress (only when `stress` is in the loss) | 1 periodic, 0 non-periodic |
+
+```python
+import numpy as np
+import pandas as pd
+
+df = pd.read_pickle("train.pkl.gz")
+non_periodic = df["ase_atoms"].map(lambda at: not at.pbc.all())   # e.g. molecules, clusters
+df["energy_weight"] = np.where(non_periodic, 5.0, 1.0)
+df["force_weight"] = [np.full(len(at), w) for at, w in zip(df["ase_atoms"], df["energy_weight"])]
+df.to_pickle("train_weighted.pkl.gz")
+```
+
+* `force_weight` must be one number **per atom**; a single number per structure stops the fit
+  with a shape error.
+* The weights multiply the `weight` of the loss component. They are used as given; with
+  `normalize_weights: True` they are divided by their sum.
+* `test_size` keeps the weights of the structures it moves to the test set; a separate
+  `test_filename` needs its own columns (default 1).
+* Weights in the `info` of an extxyz file are not read: convert it to a DataFrame
+  ([`extxyz2df`](utilities.md#extxyz2df)) and add the columns.
+* `fit: weighting` (above) replaces `energy_weight` and `force_weight`.
+
+## Large datasets
+
+There are three ways to feed the data to the fit:
+
+| Mode | How | Use it for |
+|---|---|---|
+| in memory (default) | all batches and neighbour lists in RAM | small and medium datasets |
+| streaming | neighbour lists computed on the fly, one batch in memory | datasets that do not fit in RAM |
+| precomputed shards | `grace_preprocess` writes padded batches to disk once; the fit reads them | very large datasets, many GPUs or nodes |
+
+### Streaming data pipeline
+
+`data: pipeline: streaming` computes the neighbour lists on the fly and keeps one batch in
+memory: for datasets that do not fit in RAM.
+`normalize_weights` has no effect in streaming mode.
+
+```yaml
+data:
+  pipeline: streaming
+  streaming:
+    target_metric: 3000          # total metric per batch (e.g. total neighbours)
+    metric_strategy: neighbours  # neighbours, atoms or structures
+    num_bins: 10                 # number of parallel accumulation bins
+    sorting_buffer_size: 32      # sort structures every N arrivals (load balancing)
+    growth_fraction: 0.1         # bucket growth on overflow: < 1 relative, >= 1 absolute (+N)
+                                 # per axis: {atoms: 0.1, neighbours: 0.05, structures: 5}
+    outlier_strategy: expand     # expand (grow the bucket), warn_skip (drop) or error
+    verbose: false               # log bucket discovery
+    prefetch_queue_size: 0       # > 0: threaded prefetching
+```
+
+### Precomputed shards (`grace_preprocess`) {#precomputed-shards}
+
+[`grace_preprocess`](utilities.md#grace_preprocess) computes the neighbour lists, groups the
+structures into padded batches and saves them as TensorFlow datasets, split into N shards. It
+runs on CPU, in four stages; stages 1-3 run for each shard separately (in parallel, e.g. as a
+job array), stage 4 once:
+
+```bash
+N=8   # number of shards
+ARGS="train.pkl.gz -o tf_dataset --total-task-num $N -c 6 -e MP -s neighbours -b 3000 -bu 4"
+for i in $(seq 0 $((N-1))); do grace_preprocess $ARGS --task-id $i --stage-1 & done; wait  # per-structure data
+for i in $(seq 0 $((N-1))); do grace_preprocess $ARGS --task-id $i --stage-2 & done; wait  # padding bounds
+for i in $(seq 0 $((N-1))); do grace_preprocess $ARGS --task-id $i --stage-3 & done; wait  # padded batches
+grace_preprocess $ARGS --task-id 0 --stage-4                                                # statistics
+```
+
+* `-b 3000 -s neighbours`: each batch holds about 3000 neighbours (`-s`: `structures`
+  (default), `atoms` or `neighbours`); `-bu`: number of padding buckets.
+* `-c` and `-cd` (cutoff, `cutoff_dict`) must match `input.yaml`; add `--is-fit-stress` to fit
+  stress. `-e`: the element list, or `MP`, `Alexandria`, `ALL`.
+* Input: one or more `pkl.gz` files; with `--sharded-input`, each task reads whole files
+  instead of every N-th row.
+* `--remove_stage1` frees the disk space of stage 1 during stage 3; `--rerun` overwrites.
+* The full script: [tests/data_distrib/compute_distributed_data.sh](https://github.com/ICAMS/grace-tensorpotential/blob/master/tests/data_distrib/compute_distributed_data.sh).
+
+Then point the fit to the shards:
+
+```yaml
+data:
+  distributed: True
+  path: tf_dataset/stage3        # the shards (shard_*-of-*)
+  # test_path: test/stage3       # shards of a separate test set, made the same way
+  # test_shards: 1               # or: the last N shards of path as test set (< 1: fraction)
+  # train_size: 1000             # use only N batches (here sizes count batches)
+  # test_size: 50
+```
+
+The element list, the data scale and the average number of neighbours come from the statistics
+of stage 4. `batch_size` and the bucket options of `fit:` do not apply: the batches are already
+made. On several GPUs each GPU reads its own shards, so use at least as many shards as GPUs (in
+all nodes).
+
+### Checkpoints within an epoch
+
+`checkpoint_freq_steps: N` (Adam) saves a checkpoint every N training steps, so a crash loses
+at most N steps. It overwrites the default `checkpoint` file. On a `gracemaker -rl` restart the
+fit rewinds to the start of the interrupted epoch and skips the batches already trained (the
+gradients are in the restored optimizer state). `--no-intra-epoch-redo` turns the rewind off.
+
+## Several GPUs and nodes
+
+**One machine.** `gracemaker -m` (or `fit: strategy: mirrored`) fits on all visible GPUs in
+parallel. `batch_size` and `test_batch_size` are per GPU: the global batch is `batch_size` times
+the number of GPUs. It works with all three data modes.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 gracemaker input.yaml -m
+```
+
+**Several nodes.** Use [precomputed shards](#precomputed-shards) (at least as many as GPUs in
+total) and start one `gracemaker` per node with `TF_CONFIG` set (TensorFlow
+MultiWorkerMirroredStrategy). A complete SLURM script:
+[examples/slurm_multinode/submit.sbatch](https://github.com/ICAMS/grace-tensorpotential/blob/master/examples/slurm_multinode/submit.sbatch).
+
+!!! tip "A multi-GPU fit hangs at the start"
+    On machines whose GPUs talk only over PCIe (no NVLink), NCCL can hang. Try
+    `export NCCL_P2P_DISABLE=1`.
+
+## Dense neighbour batching (GPU speed)
+
+`potential: dense_nbr: True` sums neighbours with a batched matmul over a per-atom-uniform
+`[n_atoms * max_neigh]` layout instead of the per-bond `segment_sum`. It is faster on GPU
+(especially for deeper models and high coordination) but computes the padded neighbour slots,
+so it pays off only when the padding is low. Results are bit-exact with the default.
+
+In dense mode `auto_bucket_max_padding` is the single target for the net neighbour padding
+(default 0.15). An adaptive search splits it between the `max_neigh` width buckets and the
+per-atom buckets, with the fewest distinct buffer shapes.
+
+```yaml
+fit:
+  # dense_max_shapes: 64         # hard cap on distinct (n_atoms, max_neigh) shapes (= XLA
+  #                              # compilations); above it the padding rises, with a warning
+  # dense_slot_budget: auto      # max n_atoms*max_neigh per batch; auto = batch_size*mean(nat)*mean(max_neigh)
+  # dense_n_neigh_buckets: auto  # fixed number of max_neigh buckets (instead of the search)
+  # dense_max_neigh_cap:         # drop structures with a larger per-atom max_neigh (off)
+```
+
+The log reports, per dataset: `dense bucketing: N batches, S/cap distinct shapes, net
+neighbour padding X%`.
+
+## Custom training
+
+To fit something other than energy, forces and stress, or with your own model, combine these
+keys. The example fits a second-rank tensor (the complete version:
+[Fitting generic tensors](gen_tensor.md)):
+
+```yaml
+potential:
+  preset: TENSOR_2L                   # a model with the extra output, or your own:
+  # custom: model.custom_model        #   function custom_model in ./model.py
+  kwargs: {tensor_components: [0, 2]} # passed to the preset or your function
+
+data:
+  extra_components: {                 # extra data builders: read more columns from the data
+    ReferenceTensorDataBuilder: {tensor_rank: 2, per_structure: False},
+  }
+
+fit:
+  train_function: ComputeBatchEFTensor     # what the model computes during training
+  compute_function: ComputeBatchEFTensor   # ... and in the exported model
+  compute_function_config: {tensor_components: [0, 2]}
+  loss: {
+    energy: { type: huber, weight: 1, delta: 0.01 },
+    extra_components: {                    # extra loss terms
+      WeightedTensorLoss: { weight: 10, type: huber, delta: 0.1 },
+    },
+  }
+```
+
+| Key | What | Where it is found |
+|---|---|---|
+| `potential: custom` | function that builds the model; called with `element_map`, `rcut`, `cutoff_dict`, `avg_n_neigh`, `constant_out_shift`, `constant_out_scale`, `atomic_shift_map` and `kwargs`, returns the instructions (like the presets in `presets.py`) | your file: `model.custom_model` = function `custom_model` in `./model.py` |
+| `data: extra_components` | data builders, each called with its settings and `float_dtype` | `tensorpotential.extra.extra_data_builders` |
+| `fit: loss: extra_components` | loss terms, each called with its `weight` and the other settings | `tensorpotential.extra.extra_losses` |
+| `fit: train_function`, `compute_function` | built with `compute_function_config` | `tensorpotential.tpmodel`, then `tensorpotential.extra.model_computes` |
+
+* Defaults: `train_function: ComputeBatchEnergyAndForces` (`ComputeBatchEnergyForcesVirials` when
+  stress or virial is in the loss), `compute_function: ComputeStructureEnergyAndForcesAndVirial`.
+* Only the model can come from your own file. A new data builder, loss term or compute function
+  must be added to one of the modules in the table (for example, imported into
+  `tensorpotential/extra/extra_losses.py`).
+
+## Rarely needed keys
+
+* `fit: loss_norm_by_batch_size: False`: normalize the total loss by the global batch size
+  (backward compatibility).
+* Legacy loss weights without `loss:`: `energy_loss_weight` (1.0), `forces_loss_weight` (100.0).

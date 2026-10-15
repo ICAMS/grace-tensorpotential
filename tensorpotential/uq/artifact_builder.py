@@ -11,12 +11,15 @@ from sklearn.cluster import MiniBatchKMeans
 from tqdm.auto import tqdm
 
 from tensorpotential.uq import constants as uq_constants
+from tensorpotential.uq.calm_numpy import nearest_cluster
 
 log = logging.getLogger(__name__)
 
 
-def atomic_savez(path: str, **save_dict) -> None:
+def atomic_savez(path: str, *, compressed: bool = False, **save_dict) -> None:
     """``np.savez`` that won't leave a corrupt half-written file on crash.
+
+    ``compressed=True`` writes with ``np.savez_compressed`` (read back the same way).
 
     Why: long pipeline runs that die mid-write left readers staring at a
     truncated ``.npz`` they couldn't tell from a healthy one. Writing to a
@@ -31,7 +34,7 @@ def atomic_savez(path: str, **save_dict) -> None:
     tmp_path = os.path.join(directory, f".{base}.tmp.{os.getpid()}")
     try:
         with open(tmp_path, "wb") as fh:
-            np.savez(fh, **save_dict)
+            (np.savez_compressed if compressed else np.savez)(fh, **save_dict)
         os.replace(tmp_path, path)
     except BaseException:
         if os.path.exists(tmp_path):
@@ -251,10 +254,7 @@ class GMMUQArtifactBuilder:
                         _warned_missing.add(elem)
                     continue
                 centroids = self.get_centroids(elem)
-                dists = np.sum(
-                    (elem_feats[:, None, :] - centroids[None, :, :]) ** 2, axis=-1
-                )
-                assignments = np.argmin(dists, axis=1)
+                assignments = nearest_cluster(elem_feats, centroids)
                 elem_w = None if batch_unweighted else weights[mask]
 
                 for k in range(K):
@@ -646,10 +646,11 @@ class GMMUQArtifactBuilder:
                 if diag_key in data and data[diag_key] is not None:
                     save_dict[f"{diag_key}_{elem}"] = data[diag_key]
         # fp32-only storage (schema v3): GMM stats are computed in float64 for a
-        # stable covariance inversion but stored float32. The model runs float32,
-        # so GMMUQModel casts every stat down to float32 at load anyway — storing
-        # float32 just does the same f64->f32 rounding at save time and halves the
-        # artifact (validated lossless: gamma and all UQ metrics unchanged).
+        # stable covariance inversion but stored float32, which halves the artifact
+        # (validated lossless for the model's gamma: its TF tensors run in the
+        # stored float32 anyway). GMMUQModel upcasts the working stats (centroids,
+        # inv_cov, scatter, effective counts) to float64 in memory for updates and
+        # re-inversion; saving rounds them back to float32 here.
         # Intermediate build saves pass store_fp32=False to keep scatter float64
         # for the downstream inversion.
         #
@@ -780,8 +781,12 @@ class GMMUQArtifactBuilder:
         regularization=1e-6,
         alpha=None,
         weights=None,
+        mode="convex",
     ):
-        """Incrementally update artifacts with new data. Centroids stay fixed.
+        """Incrementally update artifacts with new data.
+
+        Centroids stay fixed; only clusters that receive atoms are re-inverted.
+        Untouched clusters keep their stored inv_cov, scatter and counts.
 
         Parameters
         ----------
@@ -799,12 +804,23 @@ class GMMUQArtifactBuilder:
             When None (default), uses accumulative mode (original behavior).
         weights : np.ndarray [N], optional
             Per-atom weights. Defaults to all-ones.
+        mode : {"convex", "additive"}
+            How ``alpha`` combines the covariances. ``"convex"`` (default):
+            ``C_new = (1 - alpha) * C_old + alpha * C_batch``; the old data keep the
+            weight ``prod(1 - alpha)`` over updates, so a live HAL tower forgets the
+            training set. ``"additive"``: ``C_new = C_old + alpha * C_batch``; then
+            ``C_new >= C_old`` in the PSD order, so with fixed centroids and thresholds
+            no atom's gamma ever rises above its value before the update. Needs ``alpha``.
 
         Returns
         -------
         artifacts : dict
             Updated in-place and returned for convenience.
         """
+        if mode not in ("convex", "additive"):
+            raise ValueError(f"mode must be 'convex' or 'additive', got {mode!r}")
+        if mode == "additive" and alpha is None:
+            raise ValueError("mode='additive' needs a blending factor alpha")
         features = np.asarray(features, dtype=np.float64)
         element_indices = np.asarray(element_indices, dtype=np.int32)
         if weights is None:
@@ -836,13 +852,10 @@ class GMMUQArtifactBuilder:
             centroids = a[uq_constants.CENTROIDS]
             K = centroids.shape[0]
 
-            # Assign to nearest centroid (Euclidean)
-            dists = np.sum(
-                (elem_feats[:, None, :] - centroids[None, :, :]) ** 2, axis=-1
-            )
-            assignments = np.argmin(dists, axis=1)
+            assignments = nearest_cluster(elem_feats, centroids)
 
-            # Update scatter and counts per cluster
+            # Update scatter and counts per cluster; re-invert only clusters
+            # that received atoms.
             for k in range(K):
                 k_mask = assignments == k
                 if not np.any(k_mask):
@@ -869,7 +882,10 @@ class GMMUQArtifactBuilder:
                         if w_batch > 0
                         else np.zeros_like(a[uq_constants.SCATTER][k])
                     )
-                    cov_new = (1 - alpha) * cov_old + alpha * cov_batch
+                    if mode == "additive":
+                        cov_new = cov_old + alpha * cov_batch
+                    else:
+                        cov_new = (1 - alpha) * cov_old + alpha * cov_batch
                     n_total = n_old + n_batch
                     w_total = w_old + w_batch
                     a[uq_constants.SCATTER][k] = cov_new * w_total
@@ -881,17 +897,22 @@ class GMMUQArtifactBuilder:
                     a[uq_constants.COUNTS][k] += k_mask.sum()
                     a[uq_constants.EFFECTIVE_COUNT][k] += w_batch
 
-            # Recompute inv_cov for all clusters of this element
-            for k in range(K):
-                if a[uq_constants.EFFECTIVE_COUNT][k] > 0:
-                    cov_k = (
-                        a[uq_constants.SCATTER][k] / a[uq_constants.EFFECTIVE_COUNT][k]
-                        + eps_I
-                    )
-                else:
-                    cov_k = eps_I
-                # Use pseudoinverse for better stability
-                inv_k, _ = GMMUQArtifactBuilder._safe_invert(cov_k)
-                a[uq_constants.INV_COV][k] = inv_k
+                # Re-invert this cluster only (it received atoms)
+                GMMUQArtifactBuilder.reinvert_cluster(a, k, eps_I)
 
         return artifacts
+
+    @staticmethod
+    def reinvert_cluster(a, k, eps_I):
+        """Recompute ``INV_COV[k]`` of one element's artifacts from its scatter.
+
+        ``cov_k = SCATTER[k] / EFFECTIVE_COUNT[k] + eps_I`` (just ``eps_I`` when the
+        effective count is 0), inverted with :meth:`_safe_invert`. In place.
+        """
+        if a[uq_constants.EFFECTIVE_COUNT][k] > 0:
+            cov_k = a[uq_constants.SCATTER][k] / a[uq_constants.EFFECTIVE_COUNT][k] + eps_I
+        else:
+            cov_k = eps_I
+        # Use pseudoinverse for better stability
+        inv_k, _ = GMMUQArtifactBuilder._safe_invert(cov_k)
+        a[uq_constants.INV_COV][k] = inv_k

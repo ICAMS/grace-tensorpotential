@@ -60,6 +60,35 @@ _ROBUST_K: float = 3.0
 _MAD_TO_STD: float = 1.4826  # 1 / Phi^-1(0.75): MAD -> std for a normal distribution
 
 
+# ---------------------------------------------------------------------------
+# Sigma-histogram grid: 1000 log-spaced bins on [0.01, 1000)
+# ---------------------------------------------------------------------------
+# One grid for the step-3 workers (sigma_bin_index) and the master estimator
+# (sigma_hist_edges); sigma outside the range is clipped into the first/last bin.
+# Each bin is 1.16 % wide relative to its sigma, so the resolution follows the
+# sigma scale of the model: on the tutorial Al-Li rebuilds (K = 1..8) the binned
+# median+3*MAD threshold is within 1 % of the exact one (the old uniform grid of
+# width 0.4 was off by up to 24 % for clusters with sigma ~ 2).
+# New builds store the edges as hist_bin_edges. Older builds stored the left
+# edges of a uniform grid as hist_bins (np.linspace(0, 100, 250) or width 0.4);
+# read_artifact_metadata rebuilds their edges, and their thresholds are kept.
+SIGMA_HIST_N_BINS: int = 1000
+SIGMA_HIST_LOW: float = 1e-2
+SIGMA_HIST_HIGH: float = 1e3
+
+
+def sigma_hist_edges() -> np.ndarray:
+    """Edges of the sigma-histogram bins (``SIGMA_HIST_N_BINS + 1`` values)."""
+    return np.logspace(np.log10(SIGMA_HIST_LOW), np.log10(SIGMA_HIST_HIGH),
+                       SIGMA_HIST_N_BINS + 1)
+
+
+def sigma_bin_index(s) -> np.ndarray:
+    """Histogram bin of each sigma (int64), clipped into [0, n_bins - 1]."""
+    idx = np.searchsorted(sigma_hist_edges(), np.asarray(s), side="right") - 1
+    return np.clip(idx, 0, SIGMA_HIST_N_BINS - 1).astype(np.int64)
+
+
 def _hist_cdf_parts(h):
     """Precompute (h, total, exclusive-prefix-sums) for the piecewise-linear CDF."""
     h = np.asarray(h, dtype=np.float64)
@@ -68,7 +97,7 @@ def _hist_cdf_parts(h):
     return h, s, c_before
 
 
-def _interp_quantile(h, s, c_before, bins, bw, q):
+def _interp_quantile(h, s, c_before, edges, q):
     """Quantile ``q`` of the piecewise-linear CDF implied by the histogram (mass
     assumed uniform within each bin). Interpolating WITHIN the bin makes the
     estimate independent of the bin grid: splitting a bin into equal-density
@@ -79,36 +108,33 @@ def _interp_quantile(h, s, c_before, bins, bw, q):
     i = int(np.searchsorted(cum_upper, target, side="left"))
     i = min(i, len(h) - 1)
     if h[i] <= 0:
-        return float(bins[i])
+        return float(edges[i])
     frac = (target - c_before[i]) / h[i]
-    return float(bins[i] + bw * min(max(frac, 0.0), 1.0))
+    return float(edges[i] + (edges[i + 1] - edges[i]) * min(max(frac, 0.0), 1.0))
 
 
-def _cdf_at(x, h, s, c_before, bins, bw):
+def _cdf_at(x, h, s, c_before, edges):
     """Value of the piecewise-linear (uniform-within-bin) CDF at ``x``."""
-    if x <= bins[0]:
+    if x <= edges[0]:
         return 0.0
-    if x >= bins[-1] + bw:
+    if x >= edges[-1]:
         return 1.0
-    i = int((x - bins[0]) / bw)
-    i = min(max(i, 0), len(h) - 1)
-    frac = min(max((x - bins[i]) / bw, 0.0), 1.0)
+    i = min(int(np.searchsorted(edges, x, side="right")) - 1, len(h) - 1)
+    frac = min(max((x - edges[i]) / (edges[i + 1] - edges[i]), 0.0), 1.0)
     return (c_before[i] + frac * h[i]) / s
 
 
-def _mad_from_hist(h, s, c_before, bins, bw, median):
+def _mad_from_hist(h, s, c_before, edges, median):
     """median(|x - median|) via the folded CDF ``G(t) = F(median+t) - F(median-t)``,
     solved for ``G(t) = 0.5`` by bisection. Uses the same bin-size-proof
     piecewise-linear ``F`` as the median, so the MAD is also grid-independent.
     (The one irreducible case is a pure single-bin spike, where the uniform
-    within-bin assumption yields MAD = bw/4 — but for sigma the resulting GAMMA
-    is still bin-size-invariant, since median and MAD both scale with bw and
-    cancel in the ratio.)"""
-    lo, hi = 0.0, max(median - bins[0], (bins[-1] + bw) - median)
+    within-bin assumption yields MAD = width/4.)"""
+    lo, hi = 0.0, max(median - edges[0], edges[-1] - median)
     for _ in range(60):  # 60 bisections -> width far below machine eps * range
         t = 0.5 * (lo + hi)
-        g = (_cdf_at(median + t, h, s, c_before, bins, bw)
-             - _cdf_at(median - t, h, s, c_before, bins, bw))
+        g = (_cdf_at(median + t, h, s, c_before, edges)
+             - _cdf_at(median - t, h, s, c_before, edges))
         if g < 0.5:
             lo = t
         else:
@@ -116,7 +142,7 @@ def _mad_from_hist(h, s, c_before, bins, bw, median):
     return 0.5 * (lo + hi)
 
 
-def _robust_threshold_from_hist(h, bins, bw):
+def _robust_threshold_from_hist(h, edges):
     """``median + _ROBUST_K * (1.4826 * MAD)`` from a sigma histogram (NaN if empty).
 
     This is the per-cluster threshold value. See the block comment above for the
@@ -125,12 +151,12 @@ def _robust_threshold_from_hist(h, bins, bw):
     h, s, c_before = _hist_cdf_parts(h)
     if s <= 0:
         return np.nan
-    median = _interp_quantile(h, s, c_before, bins, bw, 0.5)
-    sigma_hat = _MAD_TO_STD * _mad_from_hist(h, s, c_before, bins, bw, median)
+    median = _interp_quantile(h, s, c_before, edges, 0.5)
+    sigma_hat = _MAD_TO_STD * _mad_from_hist(h, s, c_before, edges, median)
     return median + _ROBUST_K * sigma_hat
 
 
-def _percentile_threshold_from_hist(h, bins, bw, q):
+def _percentile_threshold_from_hist(h, edges, q):
     """Tail-quantile threshold: the ``q``-th percentile of the sigma histogram.
 
     OPT-IN alternative to the robust ``median + k*MAD`` estimator, selected with
@@ -156,32 +182,102 @@ def _percentile_threshold_from_hist(h, bins, bw, q):
     h, s, c_before = _hist_cdf_parts(h)
     if s <= 0:
         return np.nan
-    return _interp_quantile(h, s, c_before, bins, bw, q / 100.0)
+    return _interp_quantile(h, s, c_before, edges, q / 100.0)
 
 
-def _p99_midpoint_from_hist(h, bins, bw):
-    """p99 as the MIDPOINT of the bin holding it.
+# A cluster whose p99 sigma is below this is too concentrated near sigma = 0 for
+# its own histogram to define a trustworthy spread: it borrows a sibling's
+# threshold (backfill) instead. 0.8 is the old gate "p99 in bin 0 or 1" of the
+# uniform width-0.4 grid, kept as an absolute value so the reliable-cluster set
+# does not depend on the grid.
+_RELIABLE_P99_MIN: float = 0.8
 
-    NOT the threshold anymore — used ONLY for the reliability GATE in
-    ``_compute_dual_thresholds``, so the reliable-cluster SET (and every backfill
-    decision) stays byte-identical to the validated midpoint-era behavior. A
-    cluster whose p99 sits in bin 0/1 (<= 1.5*bw) is too concentrated for its own
-    histogram to define a trustworthy spread, so it borrows a sibling's threshold
-    via backfill instead of using its own median+k*MAD value.
+
+def _too_concentrated(h, edges) -> bool:
+    """True when the histogram's p99 lies below ``_RELIABLE_P99_MIN`` (False if empty)."""
+    h, s, c_before = _hist_cdf_parts(h)
+    return s > 0 and _interp_quantile(h, s, c_before, edges, 0.99) < _RELIABLE_P99_MIN
+
+
+def _bin_width_at(edges, x) -> float:
+    """Width of the histogram bin that holds ``x``."""
+    i = int(np.clip(np.searchsorted(edges, x, side="right") - 1, 0, len(edges) - 2))
+    return float(edges[i + 1] - edges[i])
+
+
+# A cluster is "narrow" when its binned sigma MAD is below this many widths of the
+# bin holding its median. Tight peaks split across neighbouring bins read a binned
+# MAD above one bin width although the true MAD is far smaller (old uniform grid,
+# tutorial Al-Li K=2: binned 1.23 bw, true 0.20 bw, threshold +123 %). 1.4 caught
+# every cluster with a threshold bias above 10 % in those rebuilds. On the log
+# grid this means a MAD below ~1.6 % of the median sigma.
+_NARROW_MAD_BINS: float = 1.4
+
+
+def narrow_sigma_clusters(raw_hists, eff_hists, edges, min_atoms):
+    """Clusters whose sigma spread is too narrow for the histogram bins.
+
+    When the MAD of sigma is about one bin width or less, the uniform-within-bin
+    CDF misplaces median and MAD; the threshold usually comes out too high and
+    gamma too small (more clusters narrow each cluster and make it worse).
+    Flagged: binned MAD < ``_NARROW_MAD_BINS`` widths of the bin at the median.
+    Only clusters that keep their own threshold are reported: at least
+    ``min_atoms`` raw atoms and not too concentrated near zero (the reliability
+    gate in ``_compute_dual_thresholds``); the others are backfilled from a
+    sibling. The spread is read from the effective histogram when given, as the
+    threshold is.
+
+    Returns a list of ``(element, cluster, median, mad)``.
     """
-    h = np.asarray(h, dtype=np.float64)
-    s = float(h.sum())
-    if s <= 0:
-        return np.nan
-    idx = int(np.searchsorted(np.cumsum(h) / s, 0.99))
-    idx = min(idx, len(h) - 1)
-    return float(bins[idx] + bw / 2.0)
+    found = []
+    for e in sorted(raw_hists):
+        raw = raw_hists[e]
+        eff = eff_hists.get(e) if eff_hists else None
+        if eff is None:
+            eff = raw
+        for k in range(raw.shape[0]):
+            if raw[k].sum() < min_atoms or _too_concentrated(raw[k], edges):
+                continue
+            h, s, c_before = _hist_cdf_parts(eff[k])
+            if s <= 0:
+                continue
+            median = _interp_quantile(h, s, c_before, edges, 0.5)
+            mad = _mad_from_hist(h, s, c_before, edges, median)
+            if mad < _NARROW_MAD_BINS * _bin_width_at(edges, median):
+                found.append((int(e), k, median, mad))
+    return found
+
+
+def print_narrow_sigma_warning(found, element_names, n_clusters):
+    """Build-time report of ``narrow_sigma_clusters`` findings (silent if none)."""
+    if not found:
+        return
+    print(
+        f"  [Master] WARNING: {len(found)} cluster(s) have a sigma spread too narrow "
+        f"for the histogram bins (binned MAD < {_NARROW_MAD_BINS:g} bin widths):"
+    )
+    for e, k, median, mad in found:
+        lbl = format_elem_label(e, element_names)
+        print(f"    {lbl} cluster {k}: median sigma={median:.3g}, MAD={mad:.3g}")
+    print(
+        "    Their thresholds are unreliable, usually too high (by tens of percent,\n"
+        "    more the narrower the cluster), so gamma there reads low."
+    )
+    if n_clusters > 1:
+        print(
+            "    More clusters make this worse: splitting the data narrows each\n"
+            "    cluster's sigma. Rebuild with fewer clusters (e.g. --n-clusters 1)."
+        )
+    print(
+        "    Or rebuild with --threshold-percentile 99: a tail quantile is barely\n"
+        "    moved by the bin width (gamma is then not comparable with default builds)."
+    )
 
 
 def _compute_dual_thresholds(
     total_hists: dict,
     total_eff_hists: dict,
-    bins: np.ndarray,
+    edges: np.ndarray,
     n_clusters: int,
     min_atoms_for_threshold: int,
     n_elements: int,
@@ -219,13 +315,12 @@ def _compute_dual_thresholds(
     elementwise_fallback_warnings : list of (elem, n_pop, fill) for elements with no reliable cluster
 
     A cell is *reliable* iff its raw count ≥ ``min_atoms_for_threshold`` and its
-    p99 clears bin 0/1 (the gate still uses p99 so the reliable SET is identical
-    to the validated baseline). Non-reliable cells are backfilled with the
+    p99 is at least ``_RELIABLE_P99_MIN`` (the gate uses p99, not the threshold
+    value, so the reliable SET does not depend on the estimator). Non-reliable cells are backfilled with the
     element-wide max of reliable cells, falling back to the element-wide max of
     any populated cells, and finally to 1.0 when the row is entirely empty (the
     case for elements absent from the calibration histograms).
     """
-    bin_width = bins[1] - bins[0]
     underpop_warnings: list = []
 
     def _threshold_from_hist(h):
@@ -233,18 +328,24 @@ def _compute_dual_thresholds(
 
         Default: robust median + k*MAD (see _ROBUST_K). --threshold-percentile
         swaps in a tail quantile; the reliability GATE below is deliberately
-        left on the p99 midpoint either way, so the reliable-cluster SET and
+        left on p99 either way, so the reliable-cluster SET and
         every backfill decision are unchanged.
         """
         if threshold_percentile is None:
-            return _robust_threshold_from_hist(h, bins, bin_width)
-        return _percentile_threshold_from_hist(h, bins, bin_width, threshold_percentile)
+            return _robust_threshold_from_hist(h, edges)
+        return _percentile_threshold_from_hist(h, edges, threshold_percentile)
 
     raw_thresh = np.full((n_elements, n_clusters), np.nan, dtype=np.float64)
     eff_thresh = np.full((n_elements, n_clusters), np.nan, dtype=np.float64)
     reliable_mask = np.zeros((n_elements, n_clusters), dtype=bool)
 
     for e, h_raw_full in total_hists.items():
+        if h_raw_full.shape[-1] != len(edges) - 1:
+            # e.g. step-3 worker files of an older version (other grid) resumed
+            raise ValueError(
+                f"sigma histogram of element {e} has {h_raw_full.shape[-1]} bins, "
+                f"the grid has {len(edges) - 1}: rerun step 3 from scratch"
+            )
         h_eff_full = total_eff_hists.get(e)
         for k in range(n_clusters):
             h_raw = h_raw_full[k]
@@ -256,16 +357,11 @@ def _compute_dual_thresholds(
             eff_thresh[e, k] = (
                 _threshold_from_hist(h_eff_full[k]) if h_eff_full is not None else np.nan
             )
-            # Reliability GATE (deliberately unchanged from the midpoint era):
-            # raw-sample confidence AND not-too-concentrated. The gate still uses
-            # the p99 midpoint so the reliable SET — and thus every backfill
-            # decision — is byte-identical to the validated baseline; only the
-            # cell VALUES above switched to the robust estimator.
-            gate_p99 = _p99_midpoint_from_hist(h_raw, bins, bin_width)
+            # Reliability GATE: raw-sample confidence AND not-too-concentrated.
             if n_calib <= 0:
                 rel = False
-            elif gate_p99 <= 1.5 * bin_width:
-                # p99 in bin 0/1 -> too concentrated to define its own spread;
+            elif _too_concentrated(h_raw, edges):
+                # p99 near zero -> too concentrated to define its own spread;
                 # this cluster backfills from a reliable sibling instead.
                 rel = False
             else:

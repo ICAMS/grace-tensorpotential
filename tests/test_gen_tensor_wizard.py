@@ -150,9 +150,10 @@ class TestSymmetryChecksMap:
         traceless, symmetric, antisymmetric = _SYMMETRY_CHECKS[str([0, 2])]
         assert not traceless and symmetric and not antisymmetric
 
-    def test_antisym_traceless(self):
+    def test_l1_plus_l2_is_traceless_only(self):
+        # A1 (antisymmetric) + A2 (symmetric traceless): any traceless tensor
         traceless, symmetric, antisymmetric = _SYMMETRY_CHECKS[str([1, 2])]
-        assert traceless and not symmetric and antisymmetric
+        assert traceless and not symmetric and not antisymmetric
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +324,13 @@ class TestCheckTensorSymmetry:
         labels = {r[0] for r in _check_tensor_symmetry(df, s)}
         assert "Traceless |trace|" not in labels
 
-    # ── [1, 2]  Antisymmetric + traceless ─────────────────────────────────
+    # ── [1, 2]  Traceless, any symmetry (A1 + A2) ─────────────────────────
 
     def test_antisym_valid_passes(self):
         df = _df_with_tensor(_antisymmetric)
         s = _make_state([1, 2])
         results = _check_tensor_symmetry(df, s)
-        assert len(results) == 2
+        assert len(results) == 1
         for _, mx, _, passed in results:
             assert passed, f"Expected pass, max={mx:.2e}"
 
@@ -340,12 +341,13 @@ class TestCheckTensorSymmetry:
         for _, _, _, passed in _check_tensor_symmetry(df, s):
             assert not passed
 
-    def test_antisym_checks_both_traceless_and_antisymmetric(self):
-        df = _df_with_tensor(_antisymmetric)
+    def test_traceless_non_symmetric_passes(self):
+        # symmetric traceless + antisymmetric parts: a valid [1, 2] tensor
+        df = _df_with_tensor(lambda n: _symmetric_traceless(n) + _antisymmetric(n))
         s = _make_state([1, 2])
-        labels = {r[0] for r in _check_tensor_symmetry(df, s)}
-        assert "Traceless |trace|" in labels
-        assert "Antisymmetric |T+Tᵀ|" in labels
+        results = _check_tensor_symmetry(df, s)
+        assert [r[0] for r in results] == ["Traceless |trace|"]
+        assert all(passed for *_, passed in results)
 
     # ── Per-structure tensors work too ────────────────────────────────────
 

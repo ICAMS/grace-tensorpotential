@@ -156,3 +156,6 @@ static
 /.idea/
 !/.idea/vcs.xml
 !/.idea/vcs.xml
+
+# working folder of the UQ tutorial (docs/gracemaker/uq_workflows.md)
+/UQ/

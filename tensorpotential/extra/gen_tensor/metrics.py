@@ -15,6 +15,10 @@ class TensorMetrics(AbstractMetrics):
             "shape": [None, None],
             "dtype": "float",
         },
+        cc.DATA_REFERENCE_TENSOR_WEIGHT: {
+            "shape": [None, 1],
+            "dtype": "float",
+        },
     }
 
     def __call__(
@@ -31,23 +35,26 @@ class TensorMetrics(AbstractMetrics):
             num_segments=tot_struc_real,
         )
 
-        d_tensor = (
-            input_data[cc.DATA_REFERENCE_TENSOR] - predictions[cc.PREDICT_TENSOR]
+        ref_tensor = input_data[cc.DATA_REFERENCE_TENSOR]
+        # rows are atoms (per-atom tensors) or structures (per-structure tensors);
+        # padding rows have zero weight and are left out
+        mask = tf.cast(input_data[cc.DATA_REFERENCE_TENSOR_WEIGHT] > 0, ref_tensor.dtype)
+        d_tensor = (ref_tensor - predictions[cc.PREDICT_TENSOR]) * mask
+        n_components = tf.reduce_sum(mask) * tf.cast(
+            tf.shape(ref_tensor)[1], ref_tensor.dtype
         )
 
-        abs_tensor_reduce = tf.reduce_sum(tf.math.abs(d_tensor))
-
-        sqr_tensor_reduce = tf.reduce_sum(d_tensor**2)
-
         return {
-            "abs/d_tensor/per_struct": abs_tensor_reduce,
-            "sqr/d_tensor/per_struct": sqr_tensor_reduce,
+            "abs/d_tensor/per_struct": tf.reduce_sum(tf.math.abs(d_tensor)),
+            "sqr/d_tensor/per_struct": tf.reduce_sum(d_tensor**2),
+            "n/d_tensor/per_struct": n_components,
             "nat/per_struct": nat_per_struct,
         }
 
     @property
     def normalization_spec(self) -> dict[str, dict]:
+        # mean over all real tensor components (per atom or per structure)
         return {
-            "abs/d_tensor/per_struct": {"norm": "n_atoms", "factor": 1.0},
-            "sqr/d_tensor/per_struct": {"norm": "n_atoms", "factor": 1.0},
+            "abs/d_tensor/per_struct": {"norm": "n/d_tensor/per_struct"},
+            "sqr/d_tensor/per_struct": {"norm": "n/d_tensor/per_struct"},
         }

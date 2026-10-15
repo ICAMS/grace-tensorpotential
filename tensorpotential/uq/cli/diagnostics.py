@@ -10,11 +10,11 @@ Checks
 - sigma_imbalance : the dominant cluster's *typical* gamma (median sigma /
   threshold) is far below 1, i.e. the threshold is set by a small outlier tail
   and ordinary atoms can never approach gamma=1 (over-lenient UQ). This is the
-  "99% of sigma in bin 0" pathology: a sparse set of extreme-feature atoms
+  "99% of sigma below 0.4" pathology: a sparse set of extreme-feature atoms
   inflates the covariance, so the bulk sits at sigma~0. Healthy chi-like
   clusters give typical gamma ~0.85.
 - zero_threshold      : threshold <= 0 -> gamma blows up to ~1e9 (legacy bin-0 bug).
-- floored_threshold   : 0 < threshold <= ~1 bin width -> p99 fell in bin 0/1;
+- floored_threshold   : 0 < threshold <= 0.8 -> sigma piles up near zero;
   cluster has no usable calibration, gamma there is a floor artifact.
 - dominant_cluster    : one cluster holds ~all atoms (KMeans collapsed onto one
   mode) -> gamma resolution limited; satellites are tiny.
@@ -26,6 +26,8 @@ Checks
   covariance under-determined (collinear features / too few atoms).
 - saturated_threshold : threshold at the histogram ceiling -> right-censored p99
   (the true p99 is >= ceiling).
+- narrow_sigma        : sigma MAD below ~1.4 histogram bins -> the binned threshold
+  is unreliable, usually too high, so gamma reads low (small / narrow models).
 - corruption          : NaN/Inf in centroids/inv_cov/thresholds, or an
   element_map length mismatch.
 """
@@ -46,7 +48,9 @@ _SEV_MARK = {FAIL: "✗", WARN: "⚠", INFO: "ℹ"}
 _LENIENT_GAMMA = 0.1     # typical gamma below this -> over-lenient calibration
 _DOMINANT_FRAC = 0.95    # one cluster holding this share -> collapsed clustering
 _CEILING_TAIL = 1e-3     # fraction of sigma at the ceiling worth calling out
-_BIN0_NOTE_MIN = 0.05    # only mention "X% of sigma in bin 0" above this share
+_LOW_SIGMA = 0.4         # sigma below this is "near zero" (bin 0 of the old 0.4-wide grid)
+_LOW_NOTE_MIN = 0.05     # only mention "X% of sigma below 0.4" above this share
+_FLOORED_THR = 0.8       # threshold at or below this is a floor artifact (build _RELIABLE_P99_MIN)
 _COND_WARN = 1e10        # condition number above this -> unstable inv_cov
 
 
@@ -91,16 +95,27 @@ def _cref_list(rows, extra=None) -> str:
     return ", ".join(_cref(r, extra(r) if extra else "") for r in rows)
 
 
-def _hist_stats(h, bins, bw):
+def _frac_below(h, edges, x):
+    """Histogram mass below ``x``, with the mass uniform within each bin."""
+    i = int(np.searchsorted(edges, x, side="right")) - 1
+    if i < 0:
+        return 0.0
+    if i >= len(h):
+        return float(np.sum(h))
+    frac = (x - edges[i]) / (edges[i + 1] - edges[i])
+    return float(np.sum(h[:i]) + frac * h[i])
+
+
+def _hist_stats(h, edges):
     s = float(np.sum(h))
     if s <= 0:
         return None
-    cum = np.cumsum(h) / s
-    med = float(bins[np.searchsorted(cum, 0.5)] + bw / 2.0)
+    i = int(np.searchsorted(np.cumsum(h) / s, 0.5))
+    med = float(0.5 * (edges[i] + edges[i + 1]))
     return {
         "n": s,
         "median": med,
-        "frac_bin0": float(h[0]) / s,
+        "frac_low": _frac_below(h, edges, _LOW_SIGMA) / s,
         "frac_ceiling": float(h[-1]) / s,
     }
 
@@ -113,8 +128,7 @@ def _iter_real_clusters(meta):
     """
     arts = meta["artifacts"]
     emap = meta["element_map"]
-    bins = meta.get("hist_bins")
-    bw = float(bins[1] - bins[0]) if bins is not None else None
+    edges = meta.get("hist_bin_edges")
     eff_thr = meta.get("eff_interp_thresholds")
     thr = eff_thr if eff_thr is not None else meta.get("interp_thresholds")
     eff_hist = meta.get("eff_hist_arrays") or {}
@@ -136,8 +150,8 @@ def _iter_real_clusters(meta):
             if smask[k]:
                 continue
             stats = None
-            if he is not None and bins is not None and k < he.shape[0]:
-                stats = _hist_stats(he[k], bins, bw)
+            if he is not None and edges is not None and k < he.shape[0]:
+                stats = _hist_stats(he[k], edges)
             rows.append({
                 "k": k,
                 "count": int(counts[k]),
@@ -148,14 +162,14 @@ def _iter_real_clusters(meta):
                 "ntrunc": int(ntr[k]) if ntr is not None else None,
                 "stats": stats,
             })
-        yield e, format_elem_label(e, emap), rows, bw
+        yield e, format_elem_label(e, emap), rows
 
 
 def _check_sigma_imbalance(meta):
     g = Group(WARN, "sigma_imbalance",
               "Over-lenient gamma (sigma imbalance): threshold set by the outlier "
               "tail; typical atoms read gamma << 1 (healthy ~0.85)", asc=True)
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         if not rows:
             continue
         dom = max(rows, key=lambda r: r["count"])  # cluster atoms actually land in
@@ -173,13 +187,13 @@ def _check_sigma_imbalance(meta):
             else:
                 pop = f"{_fmt_count(dom['count'])} atoms"
             # Describe where the imbalance comes from, omitting non-informative
-            # clauses: bin-0 share only when the bulk actually piles there, and
-            # the ceiling share only when atoms reach it. When the bulk sits
-            # above bin 0 with no ceiling mass, the median<<threshold gap in the
+            # clauses: the near-zero share only when the bulk actually piles there,
+            # and the ceiling share only when atoms reach it. When the bulk sits
+            # above 0.4 with no ceiling mass, the median<<threshold gap in the
             # leading text already tells the story (a thin mid-range tail).
             notes = []
-            if st["frac_bin0"] >= _BIN0_NOTE_MIN:
-                notes.append(f"{st['frac_bin0']:.0%} of sigma in bin 0")
+            if st["frac_low"] >= _LOW_NOTE_MIN:
+                notes.append(f"{st['frac_low']:.0%} of sigma below {_LOW_SIGMA:g}")
             if st["frac_ceiling"] >= _CEILING_TAIL:
                 notes.append(f"{st['frac_ceiling']:.2%} at the ceiling")
             note = f"; {', '.join(notes)}" if notes else ""
@@ -195,23 +209,22 @@ def _check_thresholds(meta):
     zero = Group(FAIL, "zero_threshold",
                  "Zero threshold: gamma = sigma/threshold blows up (~1e9)")
     floored = Group(WARN, "floored_threshold",
-                    "Floored threshold: p99 fell in bin 0/1 -> no usable "
-                    "calibration; gamma there is a floor artifact")
+                    f"Floored threshold (<= {_FLOORED_THR:g}): sigma piles up near "
+                    "zero -> no usable calibration; gamma there is a floor artifact")
     def _thr(r):
         return f"thr={r['thr']:.3g}"
 
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         with_thr = [r for r in rows if r["thr"] is not None]
         if not with_thr:
             continue
         zrows = [r for r in with_thr if r["thr"] <= 0]
-        frows = ([r for r in with_thr if 0 < r["thr"] <= 1.5 * bw]
-                 if bw is not None else [])
+        frows = [r for r in with_thr if 0 < r["thr"] <= _FLOORED_THR]
         if zrows:
             zero.items.append((lbl, f"{len(zrows)}/{len(with_thr)} with threshold <= 0: "
                                f"{_cref_list(zrows)}", len(zrows)))
         if frows:
-            floored.items.append((lbl, f"{len(frows)}/{len(with_thr)} at the bin-0/1 floor: "
+            floored.items.append((lbl, f"{len(frows)}/{len(with_thr)} at the floor: "
                                   f"{_cref_list(frows, _thr)}", len(frows)))
     return [zero, floored]
 
@@ -220,7 +233,7 @@ def _check_dominant_cluster(meta):
     g = Group(WARN, "dominant_cluster",
               "Collapsed clustering: one cluster holds nearly all atoms; gamma "
               "resolution limited (more clusters won't help if inertia is flat)")
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         if len(rows) < 2:
             continue
         tot = sum(r["count"] for r in rows)
@@ -239,7 +252,7 @@ def _check_underpopulated(meta):
     g = Group(WARN, "underpopulated",
               f"Under-populated clusters (< {minat} atoms): threshold backfilled / "
               "covariance regularization-dominated")
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         under = [r for r in rows if r["count"] < minat]
         if under:
             g.items.append((lbl, f"{len(under)}/{len(rows)} below {minat} atoms: "
@@ -259,7 +272,7 @@ def _check_covariance(meta):
     def _rnk(r):
         return f"rank={r['rank']}/{D}, trunc={r['ntrunc'] or 0}"
 
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         bad_cond = sorted((r for r in rows if r["cond"] is not None and r["cond"] > _COND_WARN),
                           key=lambda r: r["cond"], reverse=True)
         if bad_cond:
@@ -282,7 +295,7 @@ def _check_saturation(meta):
     if bins is None:
         return g
     ceiling = float(bins[-1]) - 1e-6
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         sat = [r for r in rows if r["thr"] is not None and r["thr"] >= ceiling]
         if sat:
             g.items.append((lbl, f"{len(sat)}/{len(rows)} at the ceiling: "
@@ -290,9 +303,45 @@ def _check_saturation(meta):
     return g
 
 
+def _check_narrow_sigma(meta):
+    # imported here: the build package loads the whole build pipeline (slow `info`)
+    from tensorpotential.uq.cli.build.thresholds import (
+        _NARROW_MAD_BINS,
+        _bin_width_at,
+        narrow_sigma_clusters,
+    )
+
+    g = Group(WARN, "narrow_sigma",
+              f"Sigma spread too narrow for the histogram bins (MAD < "
+              f"{_NARROW_MAD_BINS:g} bins): threshold "
+              "unreliable, usually too high (gamma reads low); more clusters "
+              "make it worse, --threshold-percentile avoids it")
+    edges = meta.get("hist_bin_edges")
+    raw = meta.get("hist_arrays")
+    if edges is None or not raw:
+        return g
+    if str(meta.get("threshold_mode") or "").startswith("percentile"):
+        return g  # a tail quantile, not median + k*MAD: the bin width barely moves it
+    minat = max(50, meta["D"])
+    found = narrow_sigma_clusters(raw, meta.get("eff_hist_arrays"), edges, minat)
+    rows_by_elem = {e: (lbl, {r["k"]: r for r in rows})
+                    for e, lbl, rows in _iter_real_clusters(meta)}
+    by_elem = {}
+    for e, k, median, mad in found:
+        if e in rows_by_elem and k in rows_by_elem[e][1]:
+            by_elem.setdefault(e, []).append(
+                (rows_by_elem[e][1][k], mad, _bin_width_at(edges, median)))
+    for e, hits in by_elem.items():
+        lbl, rows = rows_by_elem[e]
+        refs = ", ".join(_cref(r, f"MAD={mad:.2g}, bin {w:.2g}") for r, mad, w in hits)
+        g.items.append((lbl, f"{len(hits)}/{len(rows)} with MAD < "
+                        f"{_NARROW_MAD_BINS:g} bin widths: {refs}", len(hits)))
+    return g
+
+
 def _check_corruption(meta):
     g = Group(FAIL, "corruption", "Corrupted artifact (NaN/Inf or shape mismatch)")
-    for e, lbl, rows, bw in _iter_real_clusters(meta):
+    for e, lbl, rows in _iter_real_clusters(meta):
         a = meta["artifacts"][e]
         cents = a[uq_constants.CENTROIDS]
         ic = a.get(uq_constants.INV_COV)
@@ -330,6 +379,7 @@ def diagnose(meta) -> list:
     groups.append(_check_underpopulated(meta))
     groups.extend(_check_covariance(meta))
     groups.append(_check_saturation(meta))
+    groups.append(_check_narrow_sigma(meta))
     groups = [g for g in groups if g.items]
     groups.sort(key=lambda g: _SEV_ORDER[g.severity])
     return groups

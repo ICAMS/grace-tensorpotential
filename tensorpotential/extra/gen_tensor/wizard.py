@@ -47,7 +47,7 @@ _TENSOR_CHOICES_MAP = {
     "[1]": ([1], "[1]       — First-rank vector (e.g. Forces as tensor)"),
     "[2]": ([2], "[2]       — Symmetric, traceless L=2 (e.g. EFG)"),
     "[0, 2]": ([0, 2], "[0, 2]    — Symmetric, non-traceless (e.g. Stress)"),
-    "[1, 2]": ([1, 2], "[1, 2]    — Antisymmetric, traceless"),
+    "[1, 2]": ([1, 2], "[1, 2]    — Traceless, non-symmetric"),
     "[0, 1, 2]": ([0, 1, 2], "[0, 1, 2] — General non-symmetric (e.g. BEC)"),
 }
 
@@ -276,7 +276,7 @@ _SYMMETRY_CHECKS = {
     str([1]):       (False, False, False),
     str([2]):       (True,  True,  False),
     str([0, 2]):    (False, True,  False),
-    str([1, 2]):    (True,  False, True),
+    str([1, 2]):    (True,  False, False),  # A1 + A2: any traceless tensor
     str([0, 1, 2]): (False, False, False),
 }
 
@@ -755,7 +755,7 @@ fit:
   opt_params: {{learning_rate: 0.008, use_ema: True, ema_momentum: 0.99,
                weight_decay: null, clipnorm: 1.0}}
   scheduler: cosine_decay
-  scheduler_params: {{minimal_learning_rate: 0.0006}}
+  scheduler_params: {{minimum_learning_rate: 0.0006}}
 
   batch_size: {s.batch_size}
   test_batch_size: {s.batch_size * 5}

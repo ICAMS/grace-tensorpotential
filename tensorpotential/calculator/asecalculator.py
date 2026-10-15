@@ -369,13 +369,18 @@ class PaddingManager:
 
         return batch
 
+    # A bound carries the pad fraction of headroom by construction; reduce (and
+    # recompile) only when the padding exceeds this multiple of it, so a structure
+    # with slightly fewer neighbours reuses the bound instead of recompiling.
+    REDUCTION_PADDING_FACTOR = 2.0
+
     def is_large_padding(self, nreal_atoms, nreal_neigh, upper_bound):
         npad_atoms = upper_bound[0] - nreal_atoms
         npad_neigh = upper_bound[1] - nreal_neigh
         padding_fraction = (npad_atoms + npad_neigh) / (nreal_atoms + nreal_neigh)
-        return (
-            npad_atoms + npad_neigh > 1000
-        ) and padding_fraction > self.pad_neighbors_fraction
+        return (npad_atoms + npad_neigh > 1000) and padding_fraction > (
+            self.REDUCTION_PADDING_FACTOR * self._current_pad_neighbors_fraction
+        )
 
 
 def _snap_up_hybrid(x: int, step: int = 16, linear_max: int = 128,
@@ -999,11 +1004,10 @@ class TPCalculator(Calculator):
 
         Only works when the calculator was loaded from a SavedModel that
         carries at least one UQ signature.  ``mode`` is one of
-        ``"full"`` (the HAL compute, with ``dsigma/dr`` and
-        ``virial_sigma``) or ``"gamma_only"`` (cheaper, scalar
-        uncertainty fields only).  Defaults to ``"full"`` when available,
-        otherwise ``"gamma_only"``.  Snapshots the original state so
-        ``disable_uq()`` can restore it."""
+        ``"gamma_only"`` (γ and σ, no extra backward pass) or ``"full"``
+        (the HAL compute, adds ``dsigma_dr`` and ``virial_sigma``).
+        Defaults to ``"gamma_only"`` when available, otherwise ``"full"``.
+        Snapshots the original state so ``disable_uq()`` can restore it."""
         from tensorpotential.uq import constants as uq_constants
 
         if not self._saved_model_uq_sigs:
@@ -1013,9 +1017,9 @@ class TPCalculator(Calculator):
             )
         if mode is None:
             mode = (
-                uq_constants.UQ_MODE_FULL
-                if uq_constants.UQ_MODE_FULL in self._saved_model_uq_sigs
-                else uq_constants.UQ_MODE_GAMMA_ONLY
+                uq_constants.UQ_MODE_GAMMA_ONLY
+                if uq_constants.UQ_MODE_GAMMA_ONLY in self._saved_model_uq_sigs
+                else uq_constants.UQ_MODE_FULL
             )
         if mode not in self._saved_model_uq_sigs:
             raise ValueError(

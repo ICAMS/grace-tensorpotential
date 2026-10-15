@@ -961,7 +961,7 @@ def _apply_state(s: _WizardState, template: str) -> str:
         scheduler_params = (
             f'{{ "patience": 50, "reduction_factor": 0.8, "minimum_learning_rate": {min_lr}, "stop_at_min": True }}'
             if s.use_switch
-            else f'{{ "minimal_learning_rate": {min_lr} }}'
+            else f'{{ "minimum_learning_rate": {min_lr} }}'
         )
         optimizer_block = (
             f"  optimizer: Adam\n"

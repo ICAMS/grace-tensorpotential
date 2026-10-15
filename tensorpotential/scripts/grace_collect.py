@@ -176,7 +176,7 @@ def main(args=None):
     parser.add_argument("-wd", "--working-dir", help="top directory where keep calculations",
                         type=str, default='.', dest="working_dir")
 
-    parser.add_argument("--output-dataset-filename", help="pickle filename, default is collected.pckl.gzip",
+    parser.add_argument("--output-dataset-filename", help="pickle filename, default is collected.pkl.gz",
                         type=str, default="collected.pkl.gz", dest="output_dataset_filename")
 
     parser.add_argument('--free-atom-energy',

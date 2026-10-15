@@ -45,6 +45,7 @@ def predict_structures(
     sort_by_natoms=True,
     on_error="raise",
     progress=None,
+    postprocess=None,
 ):
     """Evaluate ``calc`` on every structure in ``atoms``.
 
@@ -82,6 +83,13 @@ def predict_structures(
         and stores ``None`` for that structure.
     progress : callable(done, total) or None
         Called after each structure. Use for a progress bar or log line.
+    postprocess : callable(dict) -> dict, or None
+        Applied per structure to the harvested ``extra`` values (key -> array, keys
+        the calculator did not provide are absent) before they are stored; the
+        returned dict replaces them and may drop keys or add new ones (new keys get
+        a ``None`` entry for every other structure). Use it to keep only part of a
+        large per-atom array (e.g. the features of some atoms) so the full array
+        never outlives its structure.
 
     Returns
     -------
@@ -134,9 +142,11 @@ def predict_structures(
                     if prop not in optional:
                         raise
             results = getattr(calc, "results", None) or {}
-            for key in extra:
-                if key in results:
-                    out[key][i] = np.asarray(results[key])
+            values = {key: np.asarray(results[key]) for key in extra if key in results}
+            if postprocess is not None:
+                values = postprocess(values)
+            for key, v in values.items():
+                out.setdefault(key, [None] * total)[i] = v
         except Exception as exc:
             if on_error == "raise":
                 raise

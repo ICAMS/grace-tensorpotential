@@ -417,6 +417,31 @@ def test_dynamic_padding_reducing_limit():
     print("padding history=", calc.padding_manager.padding_bounds)
 
 
+
+def test_padding_not_reduced_for_small_neighbor_drop():
+    """A structure with slightly fewer neighbours than the current bound reuses it.
+
+    The bound carries ``pad_neighbors_fraction`` of headroom by construction, so a
+    padding just above that fraction is not "too large": reducing it would recompile
+    to save a few neighbour slots. Only a clearly smaller structure triggers a reduction.
+    """
+    pm = _make_padding_manager(max_number_reduction_recompilation=10)
+    big = bulk("W", a=3.165, cubic=True) * (4, 4, 4)  # 128 atoms
+    pm.get_data(big)
+    assert len(pm.padding_bounds) == 1
+
+    one_less = big.copy()
+    del one_less[0]  # ~1 % fewer neighbours
+    pm.get_data(one_less)
+    assert len(pm.padding_bounds) == 1
+    assert pm.number_reduction_recompilation == 0
+
+    half = bulk("W", a=3.165, cubic=True) * (2, 4, 4)  # 64 atoms
+    pm.get_data(half)
+    assert len(pm.padding_bounds) == 2
+    assert pm.number_reduction_recompilation == 1
+
+
 def test_calculator_with_fake_atoms():
     calc = TPCalculator(
         model="./test_calculator_model",

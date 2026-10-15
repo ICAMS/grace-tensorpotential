@@ -12,8 +12,11 @@ from tensorpotential.uq import constants as uq_constants
 from tensorpotential.uq.cli.diagnostics import diagnose, print_diagnostics
 
 
-BINS = np.linspace(0.0, 100.0, 250)  # 250 left edges, as the build writes them
+# Uniform grid of older builds: 250 left edges as they stored them (hist_bins).
+# read_artifact_metadata adds the edges; new builds store log-spaced edges.
+BINS = np.linspace(0.0, 100.0, 250)
 BW = float(BINS[1] - BINS[0])
+EDGES = np.append(BINS, BINS[-1] + BW)
 
 
 def _hist_with_median_in_bin(b, n=10000, nbins=250):
@@ -86,6 +89,7 @@ def _make_meta(
         "interp_thresholds": thr_row[None, :],
         "eff_interp_thresholds": None,
         "hist_bins": BINS,
+        "hist_bin_edges": EDGES,
         "hist_arrays": {0: hist_arr},
         "eff_hist_arrays": None,
     }
@@ -125,9 +129,9 @@ def test_sigma_imbalance_reports_effective_count_when_weighted():
     assert "2.5k" in msg
 
 
-def test_sigma_imbalance_omits_bin0_clause_when_bulk_above_bin0():
-    # At-type case: bulk in bin ~5 (median ~2.2), nothing in bin 0, far tail.
-    # "0% of sigma in bin 0" is noise and must not appear; the ceiling note may.
+def test_sigma_imbalance_omits_low_sigma_clause_when_bulk_above_it():
+    # At-type case: bulk in bin ~5 (median ~2.2), nothing below 0.4, far tail.
+    # "0% of sigma below 0.4" is noise and must not appear; the ceiling note may.
     meta = _make_meta(
         counts=[10000],
         thr=[float(BINS[150] + BW / 2.0)],   # ~60
@@ -136,17 +140,17 @@ def test_sigma_imbalance_omits_bin0_clause_when_bulk_above_bin0():
     g = _codes(meta)
     assert "sigma_imbalance" in g
     msg = g["sigma_imbalance"].items[0][1]
-    assert "in bin 0" not in msg
+    assert "of sigma below" not in msg
 
 
-def test_sigma_imbalance_keeps_bin0_clause_when_bulk_piles_there():
+def test_sigma_imbalance_keeps_low_sigma_clause_when_bulk_piles_there():
     meta = _make_meta(
         counts=[10000],
         thr=[float(BINS[60] + BW / 2.0)],
         hist=[_spike_tail_hist(spike_bin=0, tail_bin=60, spike=9990, tail=10)],
     )
     msg = _codes(meta)["sigma_imbalance"].items[0][1]
-    assert "of sigma in bin 0" in msg
+    assert "of sigma below 0.4" in msg
 
 
 def test_sigma_imbalance_silent_on_healthy_cluster():
@@ -287,3 +291,45 @@ def test_clean_artifact_reports_no_problems(capsys):
     assert diagnose(meta) == []
     print_diagnostics(meta)
     assert "no problems detected" in capsys.readouterr().out
+
+
+def _two_bin_hist(b, n=6000, nbins=250):
+    """All mass split evenly over bins b, b+1 -> MAD = bw/2, well below one bin."""
+    h = np.zeros(nbins, dtype=np.int64)
+    h[b] = n // 2
+    h[b + 1] = n - n // 2
+    return h
+
+
+def test_narrow_sigma_warns_when_mad_below_bin_width():
+    meta = _make_meta(counts=[6000], thr=[9.0], hist=[_two_bin_hist(20)])
+    g = _codes(meta)
+    assert "narrow_sigma" in g
+    assert g["narrow_sigma"].severity == "WARN"
+    msg = g["narrow_sigma"].items[0][1]
+    assert "cluster 0" in msg and "6.0k" in msg and "MAD=" in msg
+
+
+def test_narrow_sigma_silent_on_underpopulated_cluster():
+    # 10 atoms < max(50, D): its own threshold is not used (backfilled), and
+    # under-population is already reported by its own check.
+    meta = _make_meta(counts=[10], thr=[9.0], hist=[_two_bin_hist(20, n=10)])
+    assert "narrow_sigma" not in _codes(meta)
+
+
+def test_narrow_sigma_silent_on_floored_cluster():
+    # sigma piled near zero is the floored_threshold finding; do not report it twice.
+    meta = _make_meta(
+        counts=[6000], thr=[float(BINS[1] + BW / 2.0)], hist=[_two_bin_hist(0)]
+    )
+    g = _codes(meta)
+    assert "floored_threshold" in g
+    assert "narrow_sigma" not in g
+
+
+def test_narrow_sigma_silent_for_percentile_thresholds():
+    # --threshold-percentile artifacts take a tail quantile, which the bin width
+    # barely moves (<= 3 % on the tutorial model); the MAD warning does not apply.
+    meta = _make_meta(counts=[6000], thr=[9.0], hist=[_two_bin_hist(20)])
+    meta["threshold_mode"] = "percentile_99"
+    assert "narrow_sigma" not in _codes(meta)

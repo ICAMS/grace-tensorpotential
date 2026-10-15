@@ -1,409 +1,310 @@
-## Stages of Model Parameterization
+## Stages of model fitting
 
-1. [Data Collection](#data-collection)
-2. [Input File Setup](#input-file-setup)
-3. [Parameterization with `gracemaker`](#grace-model-parameterization)
-4. [Export model](#export-model)
-5. [Build active set (for GRACE/FS only)](#build-active-set-for-gracefs-only)  
-6. Usage in [ASE](#usage-in-ase) and [LAMMPS](#usage-in-lammps)
-_____
-### Data Collection
+1. [Data collection](#data-collection)
+2. [Input file](#input-file-setup)
+3. [Fit with `gracemaker`](#grace-model-parameterization), [checkpoints and restart](#restart-from-checkpoint)
+4. [Export the model](#export-model)
+5. [Extrapolation grade](#extrapolation-grade) (uncertainty)
+6. Use in [ASE](#usage-in-ase) and [LAMMPS](#usage-in-lammps)
 
-You can either use [`grace_collect`](../utilities#grace_collect) 
+---
+
+### Data collection
+
+Use [`grace_collect`](utilities.md#grace_collect):
+
 ```bash
 grace_collect
 ```
 
-or build a `pandas.DataFrame` on your own. It must contain the following columns:
- 
-* `ase_atoms` - Atomic structures represented as ASE Atoms
-* `energy` - Total energy (should be force-consistent), shape: single number 
-* `energy_corrected` (optional) - Cohesive energy, i.e., total energy after subtraction of free atoms energies, shape: single number
-* `forces` - Per-atom forces, shape: (number_of_atoms, 3)
-* `stress` - six components of stress
+or build a `pandas.DataFrame` yourself, with these columns:
 
-Note, that the `energy_corrected` column is not mandatory and can be constructed automatically by _gracemaker_, 
-if you provide `reference_energy`.
+* `ase_atoms` - atomic structures as ASE `Atoms`
+* `energy` - total energy (force-consistent), one number
+* `energy_corrected` (optional) - cohesive energy, i.e. the total energy minus the free-atom
+  energies, one number. _gracemaker_ computes it if you give `reference_energy`.
+* `forces` - per-atom forces, shape (number of atoms, 3)
+* `stress` - six components of the stress
 
-Alternatively, datasets in extended xyz format can either be converted to the
-format above using the [`extxyz2df`](../utilities/#extxyz2df) tool shipped with this package or used
-directly in the input file.
+Datasets in extended XYZ format can be used directly in the input file, or converted to this
+format with [`extxyz2df`](utilities.md#extxyz2df).
 
-_____
+---
 
-### Input File Setup
+### Input file setup
 
-You can use `gracemaker -t` for an interactive interface to configure simple input file
-and then adjust it manually, if needed. Check [model hyperparameters](../presets/#models-hyperparameters) for more details.
-For complete information about input file, see [Input file](../inputfile).
+Run `gracemaker -t` for an interactive set-up of a simple input file, then edit it if needed.
+See [model hyperparameters](presets.md#models-hyperparameters) and the full
+[input file](inputfile.md) reference.
 
-_____
+---
 
-### GRACE Model Parameterization
+### GRACE model parameterization
 
-To start `gracemaker`, simply run
 ```bash
 gracemaker
 ```
 
-The `seed` entry of the input file sets the random seed for initializing the model parameters.
-When `gracemaker` starts, it creates a working subfolder named after that seed (e.g. _seed/1/_ for
-`seed: 1`) containing the following output files:
+The `seed` entry of the input file sets the random seed of the model parameters. The fit writes
+into a folder named after it (`seed/1/` for `seed: 1`):
 
-* **log.txt** — Redirected log output.
-* **train_metrics.yaml** and **test_metrics.yaml** — Various training and testing metrics in YAML format.
-* **checkpoints/** — Model checkpoints
-* **model.yaml** — Stores model architecture and hyperparameters.
+* **log.txt** - the log
+* **train_metrics.yaml**, **test_metrics.yaml** - training and test metrics
+* **checkpoints/** - model checkpoints
+* **model.yaml** - model architecture and hyperparameters
 
-_____
+### Checkpoints and restart {#restart-from-checkpoint}
 
-### Checkpointing 
+_gracemaker_ saves a checkpoint each time the test loss reaches a new best value:
+`seed/*/checkpoints/checkpoint.best_test_loss.*`. It also saves a regular checkpoint every
+`checkpoint_freq` epochs and keeps only the last one, unless `save_all_regular_checkpoints: True`.
 
-During fit _gracemaker_ saves current model state every time new best test_loss is observed.
-This checkpoint can be found in _seed/\*/checkpoints/checkpoint.best_test_loss.\*_. 
+To continue a fit from `checkpoint.best_test_loss` and `model.yaml` in `seed/*/`:
 
-In addition, regular checkpointing is performed and its frequency is controlled  via `checkpoint_freq` flag. 
-Only the last one is kept by default, but every regular checkpoint can be kept specifying `save_all_regular_checkpoints: True`  
-
-_____
-
-### Restart from checkpoint 
-
-To initialize fitting from a previously saved state, simply run
 ```bash
 gracemaker -r
 ```
-This will try restarting fit from the `checkpoint.best_test_loss` and `model.yaml` from the default 
-locations at `./seed/*/checkpoints/checkpoint.best_test_loss` and `./seed/*/` respectively.
 
-You can also explicitly provide path to the checkpoint and model configuration file:
-  
+For a fine-tuning fit, also give the model file: `gracemaker -r -p seed/1/model.yaml`.
+
+Other files can be given on the command line or in `input.yaml`:
+
 ```bash
 gracemaker -r -p /path/to/model.yaml -cn /path/to/checkpoint.index
 ```
-
-or in `input.yaml`:
 
 ```yaml
 potential:
   filename: /path/to/model.yaml
   checkpoint_name: /path/to/checkpoint.index
 ```
-_____
 
-### Export Model 
+---
 
-#### TensorFlow's SavedModel
-After `gracemaker` completes successfully, the model is exported in TensorFlow [SavedModel](https://www.tensorflow.org/guide/saved_model) 
-format and is saved in the `seed/1/final_model` directory.
+### Export model
 
-To export GRACE model from a checkpoint at any time, use:
+#### TensorFlow SavedModel {#tensorflows-savedmodel}
+
+At the end of a fit, the model is saved in TensorFlow
+[SavedModel](https://www.tensorflow.org/guide/saved_model) format in `seed/1/final_model/`.
+To export it from a checkpoint at any time:
 
 ```bash
-gracemaker -r -s
+gracemaker -r -s     # best test loss; -rl instead of -r: latest checkpoint
 ```
-to export the model with the _best test loss_. Replace `-r` with `-rl` flag to export the model from the _latest saved checkpoint_.
 
-In all cases, the model will be saved in the `seed/1/saved_model` folder and can be used with [ASE](#grace-tensorflow) or [LAMMPS](#lammps-grace-tensorflow).
+This writes `seed/1/saved_model/`, for [ASE](#grace-tensorflow) and
+[LAMMPS](#lammps-grace-tensorflow).
 
-#### GRACE/FS
+#### GRACE/FS {#gracefs}
 
-To export the GRACE/FS model in _YAML_ format (for using with a custom C++ implementation), add the `-sf` flag to the above commands:
+Add `-sf` to also write the GRACE/FS model in YAML format, for the C++ implementation in
+[ASE](#ase-gracefs) and [LAMMPS](#lammps-gracefs):
+
 ```bash
-gracemaker -r -s -sf
+gracemaker -r -s -sf     # export from the checkpoint: writes seed/1/saved_model.yaml
+gracemaker -sf           # or at the end of a fit: writes seed/1/FS_model.yaml
 ```
-Here `-r` flag stands for reading checkpoint with best test loss (usually, it is `seed/1/checkpoints/checkpoint.best_test_loss.*` ),
-`-s` flag is for saving the model immediately (without running fit) into TensorFlow SavedModel format and `-sf` is for also saving into GRACE/FS YAML format.
 
-This will generate the `seed/1/FS_model.yaml` file, which can be used in [ASE](#gracefs) or [LAMMPS](#lammps-gracefs).
+The two files are the same model; this page calls it `FS_model.yaml`.
 
 #### LAMMPS Kokkos `.npz` (GRACE-1L / GRACE-2L / GRACE-3L)
 
-For TensorFlow-free GPU/OpenMP runs with `pair_style grace/1l/kk`, `grace/2l/kk`
-or `grace/3l/kk`, export the model weights to `.npz` using
-[`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style):
+For the TensorFlow-free [Kokkos pair styles](#lammps-grace-1l-grace-2l-grace-3l-kokkos-no-tensorflow),
+export the weights with [`grace_utils export_kokkos`](utilities.md#export-to-npz-for-lammps-kokkos-pair-style).
+The architecture (1L, 2L or 3L) is detected automatically.
 
 ```bash
 grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
 ```
 
-The architecture (1L, 2L, or 3L) is auto-detected. The resulting `.npz` is loaded directly
-by the matching Kokkos pair style — see [LAMMPS: GRACE-1L / GRACE-2L / GRACE-3L (Kokkos, no TensorFlow)](#lammps-grace-1l-grace-2l-grace-3l-kokkos-no-tensorflow).
-
 ---
 
-### Uncertainty quantification 
+### Extrapolation grade
 
-#### Uncertainty quantification (UQ) artifact (for GRACE-1L/2L/3L models)
+The extrapolation grade γ says, per atom, how far the structure is from the training data
+(γ > 1: extrapolation). See [Uncertainty Quantification](uq.md) for the methods.
 
-To equip a fitted model with a per-atom extrapolation grade (`gamma`), build a
-NCM-UQ artifact (nearest-cluster Mahalanobis distance) from the training set with
-[`grace_uq build`](../uq/#grace_uq-build):
+#### GRACE-1L / 2L / 3L: CALM artifact {#uncertainty-quantification-uq-artifact-for-grace-1l2l3l-models}
+
+Build the CALM artifact with [`grace_uq build`](uq.md#grace_uq-build). In the fit folder no
+arguments are needed:
 
 ```bash
-grace_uq build --model-yaml /path/to/model.yaml \
-               --checkpoint /path/to/checkpoint/checkpoint.best_test_loss.index \
-               --train-data train.pkl.gz \
-               --artifact-path gmm_artifacts.npz
+cd seed/1
+grace_uq build
 ```
 
-This writes `gmm_artifacts.npz` plus a `saved_model/` carrying the `compute_uq`
-signature next to it. See the [Uncertainty Quantification](../uq/) page for the
-full pipeline and options, and [`export_kokkos --uq-artifacts`](../utilities/#baking-in-uq-uncertainty-quantification-artifacts)
-to bake the artifact into the Kokkos `.npz` for LAMMPS.
+This writes `gmm_artifacts.npz` and a `saved_model/` that also computes γ. Step by step, with γ in
+[ASE](uq_workflows.md#1-evaluate-in-ase) and
+[LAMMPS](uq_workflows.md#2-md-in-lammps-monitor-and-collect-extrapolative-frames): the
+[UQ workflows](uq_workflows.md) tutorial. For the Kokkos pair styles, put the artifact into the
+`.npz` with [`export_kokkos --uq-artifacts`](utilities.md#baking-in-uq-uncertainty-quantification-artifacts).
 
+#### GRACE/FS: active set {#build-active-set-for-gracefs-only}
 
-#### Build Active Set (for GRACE/FS Only)
-
-For the GRACE/FS model, you can generate an active set (ASI) file to compute the extrapolation grade using D-optimality. 
-Before doing this, ensure that `python-ace` is installed (see the [installation guide](../install/#gracefs-cpu)).
-
-To create active set, use the `pace_activeset` utility, following a process similar 
-to [ML-PACE](https://pacemaker.readthedocs.io/en/latest/pacemaker/active_learning/#extrapolation_grade_and_active_learning).
-
-Example:
+The GRACE/FS model computes γ with D-optimality from an active set (ASI) file. Build it with
+`pace_activeset` from `python-ace` ([installation](install.md#gracefs-cpu)), as in
+[ML-PACE](https://pacemaker.readthedocs.io/en/latest/pacemaker/active_learning/#extrapolation_grade_and_active_learning):
 
 ```bash
 cd seed/1
 pace_activeset -d training_set.pkl.gz FS_model.yaml
 ```
 
+Use γ in [ASE](#ase-gracefs) or [monitor it in LAMMPS](#monitoring-the-extrapolation-grade-in-lammps-gracefs).
+
 ---
 
 ### Usage in ASE
 
-You can use the exported GRACE model with ASE-compatible calculators, such as `TPCalculator` or `PyGRACEFSCalculator`.
-
-#### GRACE (TensorFlow)
-To use it as an ASE calculator:
+#### GRACE (TensorFlow) {#grace-tensorflow}
 
 ```python
-from tensorpotential.calculator import TPCalculator
-calc = TPCalculator("/path/to/saved_model")
+from tensorpotential.calculator import TPCalculator, grace_fm
+
+calc = TPCalculator("/path/to/saved_model")   # your model
+calc = grace_fm("name_of_the_model")          # a foundation model
 ```
 
-To load foundation models:
-```python
-from tensorpotential.calculator import grace_fm
-
-calc = grace_fm('name_of_the_model') 
-```
-
-For both functions (TPCalculator and grace_fm), you can adjust options for padding and minimal allowed bond distance:
+Both take options for padding and a minimal allowed bond distance:
 
 ```python
-calc = TPCalculator('path/to/saved_model',
-                     pad_neighbors_fraction = 0.05,
-                     pad_atoms_number = 2,
-                     min_dist=0.5)
+calc = TPCalculator("/path/to/saved_model",
+                    pad_neighbors_fraction=0.05,
+                    pad_atoms_number=2,
+                    min_dist=0.5)
 ```
-If `min_dist` is given, calculator will raise an exception when it encounters a distance shorter than `min_dist`
-(useful for preventing non-physical short distances during relaxation).
 
-##### Aggregation engine: the `mode` argument
+With `min_dist`, the calculator raises an exception for a distance shorter than `min_dist` (useful
+to stop a relaxation that runs into non-physical short distances).
 
-!!! warning "Be aware: GRACE is XLA-JIT-compiled per input shape"
-    Under the hood the calculator is XLA-JIT-compiled for a **specific input shape** —
-    the padded number of atoms *and* number of neighbours. The **first** evaluation of
-    each new shape triggers a fresh compilation that takes **~20 seconds**; afterwards
-    that shape runs at full speed. If the padding settings and the order in which
-    structures are evaluated are not chosen well, the calculator keeps hitting new
-    shapes and **recompiles frequently**, which can dominate the wall-clock time and
-    make overall performance very poor — even though each individual evaluation is fast.
+`mode` selects how neighbours are summed. Match it to your workload:
 
-    To avoid this, pick a strategy that keeps the shape stable (or slowly changing):
-    match the `mode` below to your workload, tune the padding (`pad_neighbors_fraction`,
-    `pad_atoms_number`), and — for heterogeneous scans — feed structures largest-first
-    (see the tips further down).
-
-`TPCalculator` has two neighbor-aggregation engines, selected with `mode`:
-
-| `mode` | Engine | Use it for | Why |
-|---|---|---|---|
-| `"uniform"` | dense (reshape) | a **single structure**, an **MD / relaxation trajectory**, or a **uniform dataset** (all evaluated structures have ~the same size) | up to ~1.7× faster per structure. Pads tight from the start. |
-| `"diverse"` (default) | segment_sum | scanning **many very different structures** (a heterogeneous dataset) | tolerant of size variation without exploding the number of XLA compiles |
-
+| `mode` | Use it for |
+|---|---|
+| `"uniform"` | one structure, an MD or relaxation trajectory, or a dataset of structures of about the same size; up to ~1.7× faster |
+| `"diverse"` (default) | many structures of very different sizes |
 
 ```python
-# single structure / MD / relaxation / uniform dataset
-calc = TPCalculator('path/to/saved_model', mode="uniform")
-
-# scanning a heterogeneous dataset
-calc = TPCalculator('path/to/saved_model', mode="diverse")  # the default
+calc = TPCalculator("path/to/saved_model", mode="uniform")
 ```
 
-!!! note "Why two modes (and no automatic switch)"
-    The dense engine is generally faster for heavy models for any *given* structure,
-     but it pads tightly, so a stream of differently-sized structures forces a fresh 
-     XLA compile per distinct size.
-     The calculator evaluates one structure per call and cannot see the whole sequence in advance, so it
-    cannot reliably auto-detect the regime.
+??? warning "Recompilation: why `mode` and padding matter"
+    The calculator is XLA-compiled for one input shape: the padded number of atoms and of
+    neighbours. Each new shape triggers a new compilation of **~20 seconds**; after that, the shape
+    runs at full speed. If the shape keeps changing, recompilation can take most of the run time.
+    Keep the shape stable: choose `mode` as above, tune the padding (`pad_neighbors_fraction`,
+    `pad_atoms_number`), and in a `"diverse"` scan give the structures **largest first**, so the
+    first compiled shape covers the rest (smallest first is the worst case: about ten times more
+    compilations).
 
-!!! tip "Sort `diverse` scans by decreasing atom count"
-    Feeding structures **largest first** lets the first compiled shape cover all the
-    rest, minimizing recompiles. Ascending (smallest first) is the worst case: it can
-    mint a fresh compile at nearly every size step (an order of magnitude more compiles
-    than descending).
+    `"uniform"` (dense engine) is faster for any given structure, but it pads tightly, so every
+    new size compiles again. The calculator sees one structure per call and cannot detect the
+    regime itself, so you choose it.
 
-**Fallback:** if the model cannot run the requested engine (an in-memory model is single-engine, fixed at
-build time; a SavedModel may export only `compute`), the calculator falls back to the available engine and
-logs a warning. SavedModels exported from a dense-capable model carry both engines and switch freely.
+    If the model cannot run the requested engine (an in-memory model has one engine, fixed when it
+    is built; a SavedModel may export only `compute`), the calculator uses the available one and
+    logs a warning. SavedModels exported from a dense-capable model have both engines.
 
----
+#### GRACE/FS {#ase-gracefs}
 
-#### GRACE/FS
-
-**Note:** The `python-ace` package is required (see the [installation guide](../install/#gracefs-cpu)).
-
-To use the **GRACE/FS** calculator (with C++ implementations), you need first build active set (see [here](#build-active-set-for-gracefs-only)) and then use the following code:
+Needs `python-ace` ([installation](install.md#gracefs-cpu)) and the
+[active set](#build-active-set-for-gracefs-only):
 
 ```python
 from pyace.asecalc import PyGRACEFSCalculator
+
 calc = PyGRACEFSCalculator("/path/to/FS_model.yaml")
 calc.set_active_set("/path/to/FS_model.asi")
 
 at.calc = calc
 at.get_potential_energy()
-at.calc.results['gamma'] # per-atom extrapolation grades
+at.calc.results["gamma"]  # per-atom extrapolation grade
 ```
 
-_____
+---
 
 ### Usage in LAMMPS
 
-All GRACE pair styles require `units metal`. The right style depends on your model type and parallelization needs:
+All GRACE pair styles need `units metal`.
 
-| `pair_style` | Model | TF required | MPI parallel | Virials/stress |
-|---|---|---|---|---|
-| `grace` | 1-layer | yes | yes | needs `pair_forces` |
-| `grace` | 2-layer | yes | single process | needs `pair_forces` |
-| `grace/1layer/chunk` | 1-layer | yes | yes | always available |
-| `grace/2layer/chunk` | 2-layer | yes | yes | always available |
-| `grace/2layer/parallel` | 2-layer | yes | yes | always available |
-| `grace/1l/kk` | 1-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
-| `grace/2l/kk` | 2-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
-| `grace/3l/kk` | 3-layer (Kokkos) | no | yes + GPU/OpenMP | always available |
-| `grace/fs` | FS | no | yes | always available |
-| `grace/fs/kk` | FS (Kokkos) | no | yes + GPU/OpenMP | always available |
+#### LAMMPS: GRACE (TensorFlow) {#lammps-grace-tensorflow}
 
-#### LAMMPS: GRACE (TensorFlow)
+`pair_style grace` loads a SavedModel folder; for foundation models it is
+`~/.cache/grace/<model_name>/`. A GPU is optional but strongly recommended: TensorFlow is much
+slower on CPU.
 
-The TensorFlow-based styles load a `saved_model` directory. For downloaded foundation models the path is `~/.cache/grace/<model_name>/`.
-
-The simplest invocation:
 ```
 pair_style grace
 pair_coeff * * /path/to/saved_model Al Li
 ```
 
-**Key options for `grace`:**
+!!! warning "2-layer models on several MPI ranks: use `grace/2layer/parallel` or `grace/2layer/chunk`"
+    `pair_style grace` runs a GRACE-2L model in a single process only. For a 2-layer model on
+    several MPI ranks (or GPUs), use `grace/2layer/parallel` or `grace/2layer/chunk`
+    (see the table below).
 
-- `padding <frac>` — fraction of neighbors to pad to reduce JIT recompilations (default: 0.01)
-- `pad_verbose` — print a message whenever recompilation is triggered
-- `pair_forces` — compute pairwise forces; **required for virials/stress** and automatically enabled when running with more than one MPI rank for GRACE-1L models
+Options of `grace`:
 
-```
-pair_style grace padding 0.05 pad_verbose pair_forces
-pair_coeff * * /path/to/saved_model Al Li
-```
-
-**For single-layer models with LARGE structures**, use `grace/1layer/chunk`. It processes atoms in blocks (`chunksize`, default 4096), always supports virials, and does not need `pair_forces`:
-
-```
-pair_style grace/1layer/chunk chunksize 2048 padding 0.05
-pair_coeff * * /path/to/saved_model Al Li
-```
-
-**For two-layer models with LARGE structures and (optionally) MPI**, use `grace/2layer/chunk` or `grace/2layer/parallel`, correspondingly:
+- `padding <frac>` - fraction of extra neighbours, fewer recompilations (default 0.01)
+- `pad_verbose` - print a message at each recompilation
+- `no_pair_forces` - switch off the pairwise forces (on by default). They are needed for per-atom
+  stress, for several MPI ranks (switched on again automatically) and for the HAL keywords. Older
+  LAMMPS builds had them off by default: there, add `pair_forces`.
 
 ```
-pair_style grace/2layer/chunk
-pair_coeff * * /path/to/2layer_saved_model Al Li
+pair_style grace padding 0.05 pad_verbose
 ```
 
-> **Note:** GPU usage is optional but strongly recommended — TensorFlow is significantly less efficient on CPU-only runs.
+Extrapolation grade γ: see [γ in LAMMPS](uq_workflows.md#2-md-in-lammps-monitor-and-collect-extrapolative-frames)
+in the UQ tutorial.
 
-#### Multi-GPU / MPI parallelization
+??? info "Other pair styles: large structures, MPI, Kokkos, GRACE/FS"
+    Choose the style by model and parallelization:
 
-* Use `grace` for single-process runs for both single-layer and two-layer models.
-* For single-layer models parallelization also use `grace` (with CUDA-aware mpirun command)
-* For two-layer models parallelization use `grace/2layer/parallel` (with CUDA-aware mpirun command)
-* For memory-reduced version use `grace/1layer/chunk` or `grace/2layer/chunk` - both of them support MPI parallelism.
-* For GRACE/FS models use `grace/fs` (or `grace/fs/kk` for GPU/OpenMP).
-* For TensorFlow-free GPU/OpenMP runs of GRACE-1L or GRACE-2L models use
-  `grace/1l/kk` / `grace/2l/kk` after exporting weights to `.npz` with
-  [`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style).
+    | `pair_style` | Model | TensorFlow | Parallel | Virials/stress |
+    |---|---|---|---|---|
+    | `grace` | 1-layer | yes | MPI | yes |
+    | `grace` | 2-layer | yes | single process | yes |
+    | `grace/1layer/chunk` | 1-layer | yes | MPI | yes |
+    | `grace/2layer/chunk` | 2-layer | yes | MPI | yes |
+    | `grace/2layer/parallel` | 2-layer | yes | MPI | yes |
+    | `grace/1l/kk`, `grace/2l/kk`, `grace/3l/kk` | 1/2/3-layer | no | MPI + GPU/OpenMP | yes |
+    | `grace/fs` | FS | no | MPI | yes |
+    | `grace/fs/kk` | FS | no | MPI + GPU/OpenMP | yes |
 
-If you don't have CUDA-aware MPI, use
-```bash
-mpirun -np 4 --bind-to none bash -c \
-  'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
+    For **large structures**, `grace/1layer/chunk` (1-layer) and `grace/2layer/chunk` (2-layer)
+    process the atoms in blocks (`chunksize`, default 4096) and always give virials. For 2-layer
+    models on several MPI ranks use `grace/2layer/parallel`.
+
+    ```
+    pair_style grace/1layer/chunk chunksize 2048 padding 0.05
+    pair_coeff * * /path/to/saved_model Al Li
+    ```
+
+    The TensorFlow styles run with a CUDA-aware `mpirun` on several GPUs. Without CUDA-aware MPI,
+    give each rank its own GPU:
+
+    ```bash
+    mpirun -np 4 --bind-to none bash -c \
+      'CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_RANK % 4)) lmp -in in.lammps'
+    ```
+
+    The [Kokkos styles](#lammps-grace-1l-grace-2l-grace-3l-kokkos-no-tensorflow) and
+    [GRACE/FS](#lammps-gracefs) are described below.
+
+#### LAMMPS: GRACE/FS {#lammps-gracefs}
+
+A native C++ implementation: no TensorFlow, no GPU needed, full MPI support. `grace/fs/kk` adds GPU
+and OpenMP (needs `newton on`).
+
 ```
-
-#### LAMMPS: GRACE/FS
-
-GRACE/FS has a native C++ implementation — no TensorFlow or GPU required, with full MPI support:
-
-```
-pair_style grace/fs
+pair_style grace/fs        # or grace/fs/kk
 pair_coeff * * FS_model.yaml Mo Nb Ta W
 ```
 
-A Kokkos-accelerated variant (`grace/fs/kk`) adds GPU and OpenMP support (`newton on` required):
-
-```
-pair_style grace/fs/kk
-pair_coeff * * FS_model.yaml Mo Nb Ta W
-```
-
-#### LAMMPS: GRACE-1L / GRACE-2L / GRACE-3L (Kokkos, no TensorFlow)
-
-`grace/1l/kk`, `grace/2l/kk` and `grace/3l/kk` run GRACE-1L / GRACE-2L /
-GRACE-3L models on GPU/OpenMP without TensorFlow at LAMMPS runtime. They read a
-`.npz` weights file produced from a fitted `model.yaml` + checkpoint by
-[`grace_utils export_kokkos`](../utilities/#export-to-npz-for-lammps-kokkos-pair-style).
-
-!!! warning "Standard architectures only"
-    The Kokkos pair styles support the **standard GRACE-1L / GRACE-2L / GRACE-3L
-    architectures** ([built-in presets](../presets/) and
-    [foundation models](../foundation/)). Custom GRACE models with
-    non-standard instruction graphs, unsupported activations, or
-    dimensions exceeding the Kokkos compile-time caps are not supported —
-    `export_kokkos` will reject them with a clear error. For arbitrary
-    custom architectures use the TensorFlow-based pair styles
-    (`grace`, `grace/2layer/parallel`, …) or GRACE-FS instead.
-
-```bash
-grace_utils -p /path/to/model.yaml -c /path/to/checkpoint/checkpoint.index export_kokkos -o grace_weights.npz
-```
-
-Then in the LAMMPS input:
-
-```
-pair_style grace/1l/kk    # or grace/2l/kk, grace/3l/kk
-pair_coeff * * grace_weights.npz Mo Nb Ta W
-```
-
-`newton on` is required (set automatically by the standard `lmp_kk -k on g 1 -sf kk -pk kokkos newton on neigh half ...` invocation).
-
-**Runtime precision.** `export_kokkos` always writes the `.npz` in float64, but
-the LAMMPS pair style picks the compute precision:
-
-| `pair_style` | NN math | Geometry |
-|---|---|---|
-| `grace/{1l,2l}/kk`       | fp64 | fp64 |
-| `grace/{1l,2l}/kk/mixed` | fp32 | fp64 |
-| `grace/{1l,2l}/kk/fp32`  | fp32 | fp32 |
-| `grace/3l/kk`            | fp32 | fp64 |
-| `grace/3l/kk/fp32`       | fp32 | fp32 |
-
-The same `.npz` works with all variants — choose by your accuracy / throughput
-trade-off. Empirically, `fp32` and `mixed` agree with `fp64` to roughly
-**1e-6 relative precision** on energies and forces — well within typical MD
-requirements. The 3L models are natively fp32, so `grace/3l/kk` is the
-mixed-precision style and there is no fp64 3L variant.
-
-#### Monitoring the extrapolation grade in LAMMPS (GRACE/FS)
+##### Monitoring the extrapolation grade in LAMMPS (GRACE/FS)
 
 ```
 pair_style grace/fs extrapolation
@@ -415,6 +316,41 @@ variable max_grace_gamma equal c_max_grace_gamma
 fix extreme_extrapolation all halt 10 v_max_grace_gamma > 25
 ```
 
+#### LAMMPS: GRACE-1L / 2L / 3L (Kokkos) {#lammps-grace-1l-grace-2l-grace-3l-kokkos-no-tensorflow}
 
+`grace/1l/kk`, `grace/2l/kk` and `grace/3l/kk` run on GPU or OpenMP without TensorFlow. They read
+the `.npz` file from [`export_kokkos`](#lammps-kokkos-npz-grace-1l-grace-2l-grace-3l):
 
+```
+pair_style grace/1l/kk    # or grace/2l/kk, grace/3l/kk
+pair_coeff * * grace_weights.npz Mo Nb Ta W
+```
 
+`newton on` is required (the usual `lmp -k on g 1 -sf kk -pk kokkos newton on neigh half ...`
+sets it).
+
+Extrapolation grade γ: see [γ in LAMMPS](uq_workflows.md#2-md-in-lammps-monitor-and-collect-extrapolative-frames)
+in the UQ tutorial.
+
+??? warning "Standard architectures only"
+    The Kokkos pair styles support the **standard GRACE-1L / GRACE-2L / GRACE-3L architectures**
+    ([built-in presets](presets.md) and [foundation models](foundation.md)). Custom models with
+    non-standard instruction graphs, unsupported activations, or dimensions above the Kokkos
+    compile-time limits are not supported: `export_kokkos` rejects them with a clear error. Use the
+    TensorFlow pair styles (`grace`, `grace/2layer/parallel`, ...) or GRACE/FS for them.
+
+??? info "Runtime precision"
+    `export_kokkos` always writes the `.npz` in float64; the pair style chooses the compute
+    precision. The same `.npz` works with all variants.
+
+    | `pair_style` | NN math | Geometry |
+    |---|---|---|
+    | `grace/{1l,2l}/kk`       | fp64 | fp64 |
+    | `grace/{1l,2l}/kk/mixed` | fp32 | fp64 |
+    | `grace/{1l,2l}/kk/fp32`  | fp32 | fp32 |
+    | `grace/3l/kk`            | fp32 | fp64 |
+    | `grace/3l/kk/fp32`       | fp32 | fp32 |
+
+    `fp32` and `mixed` agree with `fp64` to about **1e-6 relative** on energies and forces, well
+    within typical MD needs. 3L models are natively fp32, so `grace/3l/kk` is the mixed-precision
+    style and there is no fp64 3L variant.

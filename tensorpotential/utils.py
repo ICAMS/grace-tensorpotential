@@ -935,6 +935,11 @@ def process_cutoff_dict(pair_cutoff_map: str | dict, element_map: dict):
 
     # algorithmically re-expand cutoff dict
     all_elements = sorted(set(element_map.keys()))
+    if isinstance(pair_cutoff_map, str) and pair_cutoff_map not in CUTOFF_PRESETS:
+        raise ValueError(
+            f"Unknown cutoff_dict preset {pair_cutoff_map!r}, "
+            f"possible values: {sorted(CUTOFF_PRESETS)}"
+        )
     if isinstance(pair_cutoff_map, str) and pair_cutoff_map in CUTOFF_PRESETS:
         pair_cutoff_map = CUTOFF_PRESETS[pair_cutoff_map]
         pair_cutoff_map = {
@@ -951,22 +956,18 @@ def process_cutoff_dict(pair_cutoff_map: str | dict, element_map: dict):
 
         pair_cutoff_map = binary_cutoff_dict
 
-    # pre-expand "*" to all elements:
-    upd_cutoff_dict = {}
+    # pre-expand "*" to all elements; explicitly given pairs are kept separately,
+    # so that they win over the wildcard ones below
+    wildcard_cutoff_dict = {}
     key_to_drop = []
     for k, v in pair_cutoff_map.items():
-        if "*" in k:
-            assert (
-                all_elements is not None
-            ), f"Can not expand * in {k} if :elements: is not provided"
+        if isinstance(k, str) and "*" in k:
             for e in all_elements:
                 new_k = k.replace("*", str(e))
-                upd_cutoff_dict[new_k] = v
+                wildcard_cutoff_dict[new_k] = v
             key_to_drop.append(k)
     for k in key_to_drop:
         del pair_cutoff_map[k]
-    # upd_cutoff_dict.update(cutoff_dict)
-    pair_cutoff_map.update(upd_cutoff_dict)
 
     pattern = re.compile(r"[A-Z][a-z]*")
 
@@ -984,15 +985,17 @@ def process_cutoff_dict(pair_cutoff_map: str | dict, element_map: dict):
         else:
             raise ValueError(f"Can not parse {s}")
 
-    cut_dict = {
-        extract_element_pairs_from_str(k): v for k, v in pair_cutoff_map.items()
-    }
+    def symmetric_pairs(str_dict):
+        pairs = {}
+        for k, v in str_dict.items():
+            e1, e2 = extract_element_pairs_from_str(k)
+            pairs[(e1, e2)] = v
+            pairs[(e2, e1)] = v
+        return pairs
 
-    #
-    sym_upd_cut_d = {}
-    for (e1, e2), v in cut_dict.items():
-        sym_upd_cut_d[(e2, e1)] = v
-    cut_dict.update(sym_upd_cut_d)
+    # explicit pairs (e.g. MoNb) win over pairs from wildcards (e.g. Mo*)
+    cut_dict = symmetric_pairs(wildcard_cutoff_dict)
+    cut_dict.update(symmetric_pairs(pair_cutoff_map))
 
     # ensure that only elements from element_map are in cut_dict
     cut_dict = {

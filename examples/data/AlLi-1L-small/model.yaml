@@ -1,0 +1,326 @@
+metadata:
+  tensorpotential_version: 0.6.1
+  saved_at: '2026-10-02T12:02:46Z'
+  param_dtype: float32
+instructions:
+  BondLength:
+    __cls__: tensorpotential.instructions.compute.BondLength
+    instruction_with_bonds: null
+    name: BondLength
+  ScaledBondVector:
+    __cls__: tensorpotential.instructions.compute.ScaledBondVector
+    bonds: null
+    name: ScaledBondVector
+    bond_length:
+      _instruction_: true
+      name: BondLength
+  RadialBasis:
+    __cls__: tensorpotential.instructions.compute.RadialBasis
+    name: RadialBasis
+    bonds:
+      _instruction_: true
+      name: BondLength
+    basis_type: Cheb
+    nfunc: 8
+    p: 16
+    normalized: false
+    rcut: 5.0
+  Z:
+    __cls__: tensorpotential.instructions.compute.ScalarChemicalEmbedding
+    is_trainable: true
+    init: random
+    lora_config: null
+    element_map:
+      Al: 0
+      Li: 1
+    embedding_size: 128
+    name: Z
+  R:
+    __cls__: tensorpotential.instructions.compute.MLPRadialFunction_v2
+    name: R
+    basis:
+      _instruction_: true
+      name: RadialBasis
+    input_shape: null
+    hidden_layers:
+    - 64
+    - 64
+    activation:
+    - silu
+    - silu
+    no_weight_decay: true
+    init_type: normal
+    normalize: true
+    chem_embedding: null
+    embed_i: false
+    embed_j: true
+    lora_config: null
+    n_rad_max: 32
+    lmax: 4
+  Y:
+    __cls__: tensorpotential.instructions.compute.SphericalHarmonic
+    vhat:
+      _instruction_: true
+      name: ScaledBondVector
+    lmax: 4
+    name: Y
+  A:
+    __cls__: tensorpotential.instructions.compute.SingleParticleBasisFunctionScalarInd
+    indicator:
+      _instruction_: true
+      name: Z
+    indicator_l_depend: false
+    sum_neighbors: true
+    avg_n_neigh: 25.82307494205511
+    lora_config: null
+    lmax: null
+    lm_first: false
+    radial:
+      _instruction_: true
+      name: R
+    angular:
+      _instruction_: true
+      name: Y
+    name: A
+  A1:
+    __cls__: tensorpotential.instructions.compute.FCRight2Left
+    n_out: 32
+    left_coefs: true
+    is_central_atom_type_dependent: null
+    number_of_atom_types: null
+    init_vars: random
+    normalize: true
+    norm_out: true
+    lora_config: null
+    lm_first: false
+    left:
+      _instruction_: true
+      name: A
+    right:
+      _instruction_: true
+      name: A
+    name: A1
+  AA:
+    __cls__: tensorpotential.instructions.compute.ProductFunction
+    is_left_right_equal: true
+    lmax_left: null
+    lmax_right: null
+    lmax_hist: null
+    lmax_hist_left: null
+    lmax_hist_right: null
+    history_drop_list: null
+    max_sum_l: null
+    keep_parity:
+    - - 0
+      - 1
+    - - 1
+      - -1
+    - - 2
+      - 1
+    - - 3
+      - -1
+    - - 4
+      - 1
+    - - 5
+      - -1
+    - - 6
+      - 1
+    normalize: true
+    lm_first: false
+    left:
+      _instruction_: true
+      name: A1
+    right:
+      _instruction_: true
+      name: A1
+    name: AA
+    lmax: 4
+    Lmax: 4
+  AA1:
+    __cls__: tensorpotential.instructions.compute.FCRight2Left
+    n_out: 32
+    left_coefs: true
+    is_central_atom_type_dependent: null
+    number_of_atom_types: null
+    init_vars: random
+    normalize: true
+    norm_out: true
+    lora_config: null
+    lm_first: false
+    left:
+      _instruction_: true
+      name: AA
+    right:
+      _instruction_: true
+      name: A
+    name: AA1
+  AAA:
+    __cls__: tensorpotential.instructions.compute.ProductFunction
+    is_left_right_equal: null
+    lmax_left: null
+    lmax_right: null
+    lmax_hist: null
+    lmax_hist_left: null
+    lmax_hist_right: null
+    history_drop_list: null
+    max_sum_l: null
+    keep_parity:
+    - - 0
+      - 1
+    - - 1
+      - -1
+    - - 2
+      - 1
+    - - 3
+      - -1
+    - - 4
+      - 1
+    - - 5
+      - -1
+    - - 6
+      - 1
+    normalize: true
+    lm_first: false
+    left:
+      _instruction_: true
+      name: AA1
+    right:
+      _instruction_: true
+      name: A1
+    name: AAA
+    lmax: 4
+    Lmax: 0
+  AA2:
+    __cls__: tensorpotential.instructions.compute.FCRight2Left
+    n_out: 32
+    left_coefs: true
+    is_central_atom_type_dependent: null
+    number_of_atom_types: null
+    init_vars: random
+    normalize: true
+    norm_out: true
+    lora_config: null
+    lm_first: false
+    left:
+      _instruction_: true
+      name: AA
+    right:
+      _instruction_: true
+      name: A
+    name: AA2
+  AAAA:
+    __cls__: tensorpotential.instructions.compute.ProductFunction
+    is_left_right_equal: null
+    lmax_left: null
+    lmax_right: null
+    lmax_hist: null
+    lmax_hist_left: null
+    lmax_hist_right: null
+    history_drop_list: null
+    max_sum_l: null
+    keep_parity:
+    - - 0
+      - 1
+    - - 1
+      - -1
+    - - 2
+      - 1
+    - - 3
+      - -1
+    - - 4
+      - 1
+    - - 5
+      - -1
+    - - 6
+      - 1
+    normalize: true
+    lm_first: false
+    left:
+      _instruction_: true
+      name: AA2
+    right:
+      _instruction_: true
+      name: AA2
+    name: AAAA
+    lmax: 4
+    Lmax: 0
+  rho:
+    __cls__: tensorpotential.instructions.compute.FunctionReduceN
+    out_norm: false
+    is_central_atom_type_dependent: true
+    number_of_atom_types: 2
+    init_vars: random
+    normalize: true
+    init_target_value: zeros
+    simplify: false
+    scale: 1.0
+    lora_config: null
+    lm_first: false
+    instructions:
+    - _instruction_: true
+      name: A
+    - _instruction_: true
+      name: AA
+    - _instruction_: true
+      name: AAA
+    - _instruction_: true
+      name: AAAA
+    name: rho
+    ls_max: 0
+    n_out: 11
+    allowed_l_p:
+    - - 0
+      - 1
+    - - 1
+      - -1
+    - - 2
+      - 1
+    - - 3
+      - -1
+    - - 4
+      - 1
+    - - 5
+      - -1
+    - - 6
+      - 1
+  atomic_energy:
+    __cls__: tensorpotential.instructions.output.CreateOutputTarget
+    initial_value: 0.0
+    l: 0
+    name: atomic_energy
+  LinMLPOut2ScalarTarget:
+    __cls__: tensorpotential.instructions.output.LinMLPOut2ScalarTarget
+    hidden_layers:
+    - 64
+    name: LinMLPOut2ScalarTarget
+    n_out: 1
+    normalize: null
+    activation: silu
+    l: 0
+    lora_config: null
+    return_hidden_target: null
+    origin:
+    - _instruction_: true
+      name: rho
+    target:
+      _instruction_: true
+      name: atomic_energy
+  ConstantScaleShiftTarget:
+    __cls__: tensorpotential.instructions.output.ConstantScaleShiftTarget
+    scale: 0.3437346697816835
+    shift: 0
+    atomic_shift_map: null
+    chemical_embedding: null
+    name: ConstantScaleShiftTarget
+    l: 0
+    target:
+      _instruction_: true
+      name: atomic_energy
+  TrainableShiftTarget:
+    __cls__: tensorpotential.instructions.output.TrainableShiftTarget
+    name: TrainableShiftTarget
+    l: 0
+    target:
+      _instruction_: true
+      name: atomic_energy
+    number_of_atom_types: 2

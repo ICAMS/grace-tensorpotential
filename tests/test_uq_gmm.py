@@ -192,3 +192,69 @@ def test_gmm_missing_elements_fictitious_inv_cov(uq_setup):
     sigma_fitted, _, _ = model.compute(feats_f, elems_f)
     sigma_missing, _, _ = model.compute(feats_f, elems_m)
     assert sigma_missing.numpy().mean() > sigma_fitted.numpy().mean() * 2
+
+
+def test_uneven_k_padding_uses_sentinel_centroids():
+    """from_artifacts with fewer clusters for one element: the missing slots are padded
+    with the builder's sentinel centroid, never zeros, so an atom near the origin is
+    assigned to a real cluster and gets the gamma of a builder-style padded artifact."""
+    import copy
+
+    from tensorpotential.uq import constants as uq_constants
+    from tensorpotential.uq.cli import _common
+    from tensorpotential.uq.constants import SENTINEL_CENTROID_VALUE
+
+    assert _common.SENTINEL_CENTROID_VALUE == SENTINEL_CENTROID_VALUE  # re-export kept
+
+    D = 4
+    rng = np.random.default_rng(0)
+
+    def cluster(mu):
+        return mu, np.diag(rng.uniform(0.5, 2.0, D))
+
+    arts = {}
+    for e, mus in ((0, [np.full(D, 1.0), np.full(D, -3.0), np.full(D, 6.0)]), (1, [np.full(D, 5.0)])):
+        cents, invs = zip(*[cluster(m) for m in mus])
+        k = len(mus)
+        arts[e] = {uq_constants.CENTROIDS: np.array(cents), uq_constants.INV_COV: np.array(invs),
+                   uq_constants.COUNTS: np.full(k, 50), uq_constants.SCATTER: None}
+    padded = copy.deepcopy(arts)  # builder style: element 1 carries explicit sentinel slots
+    a = padded[1]
+    a[uq_constants.CENTROIDS] = np.vstack([a[uq_constants.CENTROIDS],
+                                           np.full((2, D), SENTINEL_CENTROID_VALUE)])
+    a[uq_constants.INV_COV] = np.concatenate([a[uq_constants.INV_COV], np.tile(np.eye(D), (2, 1, 1))])
+    a[uq_constants.COUNTS] = np.array([50, 0, 0])
+    extra = {"interp_thresholds": np.ones((2, 3))}
+    uneven = GMMUQModel.from_artifacts(arts, extra_data=dict(extra), param_dtype=tf.float64)
+    builder = GMMUQModel.from_artifacts(padded, extra_data=dict(extra), param_dtype=tf.float64)
+    assert np.all(uneven.centroids.numpy()[1, 1:] == SENTINEL_CENTROID_VALUE)
+    x = np.zeros((1, D))  # near the origin, element 1
+    g_uneven = uneven.gamma_from_features(x, np.array([1]))[0]
+    g_builder = builder.gamma_from_features(x, np.array([1]))[0]
+    expected = np.sqrt(np.full(D, -5.0) @ arts[1][uq_constants.INV_COV][0] @ np.full(D, -5.0))
+    np.testing.assert_allclose(g_uneven, expected, rtol=1e-6)
+    np.testing.assert_allclose(g_uneven, g_builder, rtol=1e-12)
+
+
+def test_gamma_from_features_without_thresholds_says_how_to_fix(tmp_path):
+    """An artifact from the Python builder has no gamma thresholds: a clear error, not a TF one."""
+    from tensorpotential.uq import GMMUQArtifactBuilder
+
+    rng = np.random.default_rng(0)
+
+    def batches():
+        for _ in range(3):
+            yield rng.normal(size=(400, 8)), rng.integers(0, 2, 400), np.ones(400)
+
+    builder = GMMUQArtifactBuilder(n_clusters=2, feature_dim=8)
+    builder.fit_centroids(batches(), verbose=False)
+    builder.accumulate_scatter(batches(), verbose=False)
+    path = str(tmp_path / "no_thresholds.npz")
+    builder.save(path, builder.finalize(element_names={0: "Al", 1: "Li"}))
+
+    model = GMMUQModel(path)
+    feats, elems = rng.normal(size=(4, 8)), np.array([0, 1, 0, 1])
+    sigma, _, _ = model(feats, elems, verbose=False)  # sigma still works
+    assert np.all(np.isfinite(np.asarray(sigma)))
+    with pytest.raises(ValueError, match=r"no gamma thresholds.*grace_uq build"):
+        model.gamma_from_features(feats, elems)
