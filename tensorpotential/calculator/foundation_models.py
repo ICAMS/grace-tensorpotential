@@ -555,7 +555,6 @@ def download_extract_rename(url, model_path):
                 )
             os.rmdir(model_path)
         os.rename(extracted_model_path, model_path)
-    assert is_saved_model(model_path), f"No SavedModel in {model_path}"
 
 
 def get_or_download_model(model):
@@ -574,6 +573,7 @@ def get_or_download_model(model):
             raise ValueError(f"No available URL to download for {model}")
         print("Downloading GRACE model")
         download_extract_rename(url, model_path)
+        assert is_saved_model(model_path), f"No SavedModel in {model_path}"
         write_origin_sidecar(
             model_path, model, "model", url,
             kokkos_url=model_metadata.get(KOKKOS_URL_KEY),
@@ -604,6 +604,9 @@ def get_or_download_checkpoint(model):
             raise ValueError(f"No available checkpoint URL for {model}")
         print("Downloading GRACE checkpoint")
         download_extract_rename(url, checkpoint_path)
+        assert os.path.isfile(
+            os.path.join(checkpoint_path, "model.yaml")
+        ), f"No model.yaml in checkpoint {checkpoint_path}"
         write_origin_sidecar(checkpoint_path, model, "checkpoint", url)
         print(f"GRACE model checkpoint downloaded to {checkpoint_path}")
     else:
