@@ -93,3 +93,34 @@ def test_update_skips_kokkos_only_dir(kokkos_only, tmp_path, monkeypatch, capsys
     update_models(argparse.Namespace(model_name=[NAME], all=False, force=False, dry_run=False))
     assert fetched == [], "update fetched a model that was never downloaded"
     assert (kokkos_only / "kokkos.npz").read_text() == "side-loaded"
+
+
+def test_checkpoint_download_needs_no_saved_model(tmp_path, monkeypatch):
+    """A checkpoint archive holds model.yaml + checkpoint files, no SavedModel.
+
+    0.6.2 checked every download (models and checkpoints) for saved_model.pb, so
+    downloading any foundation checkpoint failed: fine-tuning from a foundation
+    model on a machine without a cached checkpoint stopped with
+    "AssertionError: No SavedModel in .../checkpoints/<MODEL>".
+    """
+    ckpt_url = "https://huggingface.co/x/y/resolve/checkpoint-v3/checkpoints/M-checkpoint.tar.gz"
+    src = tmp_path / "src" / NAME
+    src.mkdir(parents=True)
+    (src / "model.yaml").write_text("yaml")
+    (src / "checkpoint.index").write_text("idx")
+    tgz = tmp_path / "checkpoint.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tar:
+        tar.add(src, arcname=NAME)
+
+    ckpt_cache = tmp_path / "checkpoints"
+    monkeypatch.setattr(fm, "FOUNDATION_CHECKPOINTS_CACHE_DIR", str(ckpt_cache))
+    monkeypatch.setitem(fm.MODELS_METADATA, NAME, {fm.CHECKPOINT_URL_KEY: ckpt_url})
+    monkeypatch.setattr(
+        fm, "_stream_download", lambda url, dest, desc=None: shutil.copy(tgz, dest) and dest
+    )
+
+    path = fm.get_or_download_checkpoint(NAME)
+
+    assert path == str(ckpt_cache / NAME)
+    assert (ckpt_cache / NAME / "model.yaml").read_text() == "yaml"
+    assert fm.read_origin_sidecar(path)["url"] == ckpt_url
