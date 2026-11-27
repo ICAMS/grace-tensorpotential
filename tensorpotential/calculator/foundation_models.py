@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import tarfile
+import tempfile
+import uuid
 from datetime import datetime, timezone
 
 import keyword
@@ -361,20 +364,33 @@ except ImportError:
 MODELS_NAME_LIST = list(MODELS_METADATA.keys())
 
 
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def _stream_download(url, dest_path, desc=None):
     """Stream ``url`` to ``dest_path`` with a tqdm progress bar (rate + ETA).
 
     Uses ``requests`` with large (1 MiB) chunks — far faster than the small-buffer
-    single-read urllib path it replaces. Writes to a ``.part`` temp file and only
-    renames it into place on success, so an interrupted download never masquerades
-    as a complete file. Retries the whole transfer on transient network errors.
-    Raises RuntimeError if the response is an HTML page (e.g. a wrong/expired URL)
-    rather than a binary file.
+    single-read urllib path it replaces. Writes to a unique exclusive ``.part``
+    temp file in the destination directory and atomically replaces ``dest_path``
+    on success, so concurrent downloads do not collide and an interrupted download
+    never masquerades as a complete file. Retries the whole transfer on transient
+    network errors. Raises RuntimeError if the response is an HTML page (e.g. a
+    wrong/expired URL) rather than a binary file.
     """
     desc = desc or os.path.basename(dest_path)
-    tmp_path = dest_path + ".part"
+    abs_dest = os.path.abspath(dest_path)
+    dest_dir = os.path.dirname(abs_dest)
+    base = os.path.basename(abs_dest)
     last_err = None
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        tmp_path = os.path.join(
+            dest_dir, f".{base}.{os.getpid()}.{uuid.uuid4().hex[:12]}.part"
+        )
         try:
             with requests.get(
                 url, stream=True, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True
@@ -386,7 +402,7 @@ def _stream_download(url, dest_path, desc=None):
                         f"Please check the URL {url!r}"
                     )
                 total = int(resp.headers.get("Content-Length", 0)) or None
-                with open(tmp_path, "wb") as f, tqdm(
+                with open(tmp_path, "xb") as f, tqdm(
                     total=total,
                     unit="B",
                     unit_scale=True,
@@ -402,13 +418,15 @@ def _stream_download(url, dest_path, desc=None):
             return dest_path
         except (requests.RequestException, OSError) as err:
             last_err = err
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            _unlink_quietly(tmp_path)
             if attempt < DOWNLOAD_RETRIES:
                 print(
                     f"  download attempt {attempt}/{DOWNLOAD_RETRIES} failed "
                     f"({err}); retrying..."
                 )
+        except BaseException:
+            _unlink_quietly(tmp_path)
+            raise
     raise RuntimeError(
         f"Download of {url!r} failed after {DOWNLOAD_RETRIES} attempts: {last_err}"
     )
@@ -451,7 +469,7 @@ def _tag_from_url(url: str) -> str | None:
 
 
 def write_origin_sidecar(path: str, model: str, payload: str, url: str, **extra) -> None:
-    """Stamp ``<path>/.grace_origin.json`` with the URL the payload came from.
+    """Stamp ``<path>/.grace_origin.json`` atomically with the URL the payload came from.
 
     Best-effort: a read-only or full filesystem must never break a download.
     """
@@ -464,10 +482,16 @@ def write_origin_sidecar(path: str, model: str, payload: str, url: str, **extra)
         "tensorpotential_version": _tp_version(),
     }
     record.update({k: v for k, v in extra.items() if v is not None})
+    target_path = os.path.join(path, ORIGIN_SIDECAR)
+    tmp_path = os.path.join(
+        path, f".{os.getpid()}.{uuid.uuid4().hex[:12]}{ORIGIN_SIDECAR}"
+    )
     try:
-        with open(os.path.join(path, ORIGIN_SIDECAR), "w") as f:
+        with open(tmp_path, "x") as f:
             json.dump(record, f, indent=2)
+        os.replace(tmp_path, target_path)
     except OSError as e:
+        _unlink_quietly(tmp_path)
         logging.debug(f"Could not write {ORIGIN_SIDECAR} in {path}: {e}")
 
 
@@ -522,39 +546,96 @@ def is_saved_model(path) -> bool:
     return os.path.isfile(os.path.join(path, "saved_model.pb"))
 
 
-def download_extract_rename(url, model_path):
-    model_path = model_path[:-1] if model_path.endswith("/") else model_path
+def _merge_tree(src_dir: str, dst_dir: str) -> None:
+    """Move contents of ``src_dir`` into ``dst_dir`` without removing unrelated files."""
+    os.makedirs(dst_dir, exist_ok=True)
+    with os.scandir(src_dir) as entries:
+        for entry in entries:
+            dst_entry = os.path.join(dst_dir, entry.name)
+            if entry.is_dir(follow_symlinks=False):
+                try:
+                    os.rename(entry.path, dst_entry)
+                except OSError:
+                    _merge_tree(entry.path, dst_entry)
+            else:
+                os.replace(entry.path, dst_entry)
+
+
+def _publish_extracted_dir(
+    src_dir: str, dst_dir: str, *, sentinel: str | None = None
+) -> None:
+    """Publish staged ``src_dir`` to ``dst_dir`` atomically or merge into an incomplete dir.
+
+    If ``dst_dir`` already contains ``sentinel`` (another process won the race),
+    keep the existing directory untouched and skip publishing.
+    """
+    try:
+        os.rename(src_dir, dst_dir)
+        return
+    except OSError:
+        if not os.path.isdir(dst_dir):
+            raise
+
+    if sentinel is not None and os.path.isfile(os.path.join(dst_dir, sentinel)):
+        return
+
+    try:
+        sentinel_src = None
+        with os.scandir(src_dir) as entries:
+            for entry in entries:
+                if sentinel is not None and entry.name == sentinel:
+                    sentinel_src = entry.path
+                    continue
+                dst_entry = os.path.join(dst_dir, entry.name)
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        os.rename(entry.path, dst_entry)
+                    except OSError:
+                        _merge_tree(entry.path, dst_entry)
+                else:
+                    os.replace(entry.path, dst_entry)
+
+        if sentinel_src is not None:
+            os.replace(sentinel_src, os.path.join(dst_dir, sentinel))
+    except PermissionError:
+        if sentinel is not None and os.path.isfile(os.path.join(dst_dir, sentinel)):
+            return
+        raise
+
+
+def download_extract_rename(
+    url, model_path, *, sentinel: str | None = None, prepare_extracted=None
+):
+    model_path = os.path.normpath(model_path)
     # sciebo/Nextcloud public-share links require a trailing "/download";
     # direct hosts (e.g. Hugging Face "resolve" URLs) are used as-is.
     if "sciebo" in url and not url.endswith("/download"):
         url += "/download"
-    root_folder = os.path.dirname(model_path)
+    root_folder = os.path.dirname(os.path.abspath(model_path))
     os.makedirs(root_folder, exist_ok=True)
-    # download and save to disk
-    print(f"Downloading from {url!r}")
-    # Define the file path
-    filename = os.path.join(root_folder, TMP_TAR_GZ)
-    local_filename = _stream_download(
-        url, filename, desc=os.path.basename(model_path) + " (archive)"
+    # Stage download, extraction, validation, and sidecar stamping in a private
+    # sibling directory on the same filesystem so concurrent downloads never share
+    # temp files or publish partial/unvalidated payloads.
+    staging_dir = tempfile.mkdtemp(
+        prefix=f".{os.path.basename(model_path)}.tmp.", dir=root_folder
     )
-    # Unpack the .tar.gz file
-    print(
-        f"Unpacking model from {url!r} (local file: {local_filename}) to {root_folder}"
-    )
-    top_folder_name = safe_extract(local_filename, path=root_folder)
-    os.remove(local_filename)
-    extracted_model_path = os.path.join(root_folder, top_folder_name)
-    if extracted_model_path != model_path:
-        if os.path.isdir(model_path):
-            # keep files fetched before the model (kokkos.npz): move them into the payload,
-            # then swap the payload in with one rename, so a half-moved model is never cached
-            for name in os.listdir(model_path):
-                os.replace(
-                    os.path.join(model_path, name),
-                    os.path.join(extracted_model_path, name),
-                )
-            os.rmdir(model_path)
-        os.rename(extracted_model_path, model_path)
+    try:
+        print(f"Downloading from {url!r}")
+        filename = os.path.join(staging_dir, TMP_TAR_GZ)
+        local_filename = _stream_download(
+            url, filename, desc=os.path.basename(model_path) + " (archive)"
+        )
+        print(
+            f"Unpacking model from {url!r} (local file: {local_filename}) to {staging_dir}"
+        )
+        top_folder_name = safe_extract(local_filename, path=staging_dir)
+        _unlink_quietly(local_filename)
+        extracted_model_path = os.path.join(staging_dir, top_folder_name)
+        if prepare_extracted is not None:
+            prepare_extracted(extracted_model_path)
+        _publish_extracted_dir(extracted_model_path, model_path, sentinel=sentinel)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def get_or_download_model(model):
@@ -572,11 +653,22 @@ def get_or_download_model(model):
         if url is None:
             raise ValueError(f"No available URL to download for {model}")
         print("Downloading GRACE model")
-        download_extract_rename(url, model_path)
-        assert is_saved_model(model_path), f"No SavedModel in {model_path}"
-        write_origin_sidecar(
-            model_path, model, "model", url,
-            kokkos_url=model_metadata.get(KOKKOS_URL_KEY),
+
+        def _prepare_model(extracted_dir: str) -> None:
+            assert is_saved_model(extracted_dir), f"No SavedModel in {model_path}"
+            write_origin_sidecar(
+                extracted_dir,
+                model,
+                "model",
+                url,
+                kokkos_url=model_metadata.get(KOKKOS_URL_KEY),
+            )
+
+        download_extract_rename(
+            url,
+            model_path,
+            sentinel="saved_model.pb",
+            prepare_extracted=_prepare_model,
         )
         print(f"GRACE model downloaded to {model_path}")
     else:
@@ -603,11 +695,19 @@ def get_or_download_checkpoint(model):
         if url is None:
             raise ValueError(f"No available checkpoint URL for {model}")
         print("Downloading GRACE checkpoint")
-        download_extract_rename(url, checkpoint_path)
-        assert os.path.isfile(
-            os.path.join(checkpoint_path, "model.yaml")
-        ), f"No model.yaml in checkpoint {checkpoint_path}"
-        write_origin_sidecar(checkpoint_path, model, "checkpoint", url)
+
+        def _prepare_checkpoint(extracted_dir: str) -> None:
+            assert os.path.isfile(
+                os.path.join(extracted_dir, "model.yaml")
+            ), f"No model.yaml in checkpoint {checkpoint_path}"
+            write_origin_sidecar(extracted_dir, model, "checkpoint", url)
+
+        download_extract_rename(
+            url,
+            checkpoint_path,
+            sentinel="model.yaml",
+            prepare_extracted=_prepare_checkpoint,
+        )
         print(f"GRACE model checkpoint downloaded to {checkpoint_path}")
     else:
         print(f"Using cached GRACE checkpoint from {checkpoint_path}")
