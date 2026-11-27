@@ -25,7 +25,7 @@ class FitMetrics:
         """
 
         regularization_loss = [
-            float(r_comp * r_weight)
+            float(np.asarray(r_comp * r_weight).item())
             for r_comp, r_weight in zip(self.regs, self.reg_weights)
         ]
         l1 = regularization_loss[0]

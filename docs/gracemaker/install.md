@@ -21,11 +21,11 @@ micromamba activate grace
 pip install tensorpotential
 ```
 
-On Linux this also installs TensorFlow with GPU support (`tensorflow[and-cuda]<=2.20`); on macOS
+On Linux this also installs TensorFlow with GPU support (`tensorflow[and-cuda]<2.22`); on macOS
 and Windows, TensorFlow for CPU. If TensorFlow does not find your GPU, install it by hand:
 
 ```bash
-pip install "tensorflow[and-cuda]<=2.20"
+pip install "tensorflow[and-cuda]<2.22"
 ```
 
 ??? info "Developer version from source"
