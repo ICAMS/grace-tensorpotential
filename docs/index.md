@@ -5,6 +5,17 @@
 Project GRACEmaker is a heavily modified and in large parts rewritten version of the [PACEmaker](https://pacemaker.readthedocs.io/)
 software geared towards support for multi-component materials and graph architectures.
 
+!!! tip "Fast inference without TensorFlow: [grace-runtime](https://github.com/ICAMS/grace-runtime)"
+    For fast, TensorFlow-free inference of GRACE-1L, GRACE-2L and GRACE-3L models (foundation models or fitted models exported to `kokkos.npz`) on CPU, NVIDIA CUDA and AMD HIP, use **[grace-runtime](https://github.com/ICAMS/grace-runtime)** ([manual](https://github.com/ICAMS/grace-runtime/blob/master/docs/index.md)). It provides an ASE calculator (`GRACERuntimeCalculator`), batch processing (`compute_batch`), per-atom UQ (`gamma`), an optional TorchSim adapter, and LAMMPS pair styles (`grace/runtime`, `grace/runtime/kk`).
+
+    ```bash
+    pip install grace-runtime                       # CPU
+    pip install "grace-runtime-cuda12[cublas]"      # NVIDIA GPU (CUDA 12)
+    pip install grace-runtime-rocm6                 # AMD GPU (ROCm 6)
+    ```
+
+    Use `gracemaker` / `tensorpotential` for fitting and fine-tuning models, CALM UQ and HAL workflows, exporting models (`kokkos.npz`, SavedModel, GRACE/FS), and TensorFlow-based (`TPCalculator`, `grace_fm`, `pair_style grace`) or `grace/{1l,2l,3l}/kk` inference.
+
 ## What's new
 
 ### [0.6.2](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.2) (October 2026)
@@ -40,20 +51,24 @@ software geared towards support for multi-component materials and graph architec
     efficient multi-CPU parallelization using MPI in LAMMPS. Intended for large-scale simulations of systems
     containing up to several million atoms.
    
-    * **GRACE-1L**: Local, non-linear model with improved accuracy intended to run on GPU.
-    Utilizes TensorFlow library to run simulations in LAMMPS or in python and supports multi-GPU parallelization.
+    * **GRACE-1L**: Local, non-linear model with improved accuracy intended to run on GPU or CPU.
+    Runs without TensorFlow via [grace-runtime](https://github.com/ICAMS/grace-runtime) (Python/ASE, TorchSim, and LAMMPS `grace/runtime(/kk)`),
+    or with TensorFlow (`TPCalculator`, `pair_style grace`) and the `grace/1l/kk` LAMMPS Kokkos style; supports multi-GPU parallelization.
     Suitable for modeling both small systems and large-scale simulations of hundreds of thousands of atoms.
-  
-    * **GRACE-2L**: Semi-local, non-linear model offering state-of-the-art accuracy. 
-    Utilizes TensorFlow library to run simulations in LAMMPS or in python.
+
+    * **GRACE-2L**: Semi-local, non-linear model offering state-of-the-art accuracy.
+    Runs without TensorFlow via [grace-runtime](https://github.com/ICAMS/grace-runtime) (Python/ASE, TorchSim, and LAMMPS `grace/runtime(/kk)`),
+    or with TensorFlow (`TPCalculator`, `pair_style grace`) and the `grace/2l/kk` LAMMPS Kokkos style.
     Best applied for simulating molecular systems and materials with up to tens of thousands of atoms.
 
     * **GRACE-3L**: Semi-local, non-linear model with a third message-passing layer for a larger
     effective receptive field, offering the best accuracy of the series. Available as
-    [foundation models](gracemaker/foundation.md#three-layer-3l-models) (natively fp32) for use in
-    python or in LAMMPS, including the TensorFlow-free `grace/3l/kk` Kokkos pair style.
+    [foundation models](gracemaker/foundation.md#three-layer-3l-models) (natively fp32) and via fine-tuning;
+    runs without TensorFlow via [grace-runtime](https://github.com/ICAMS/grace-runtime) (Python/ASE, TorchSim, and LAMMPS `grace/runtime(/kk)`),
+    with TensorFlow, or with the `grace/3l/kk` LAMMPS Kokkos style.
 
 ## What's next ?
+* !!NEW!! [Fast inference without TensorFlow (grace-runtime)](https://github.com/ICAMS/grace-runtime)
 * !!NEW!! [Video tutorial](https://www.youtube.com/watch?v=rndnkiu9LGE)
 * [Installation](gracemaker/install.md)
 * [Quick start](gracemaker/quickstart.md)

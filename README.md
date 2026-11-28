@@ -1,3 +1,18 @@
+## Fast inference without TensorFlow: [grace-runtime](https://github.com/ICAMS/grace-runtime)
+
+For fast inference of GRACE-1L, GRACE-2L and GRACE-3L models (foundation models or fitted models exported to `kokkos.npz`) without TensorFlow, PyTorch or JAX, use **[grace-runtime](https://github.com/ICAMS/grace-runtime)** ([manual](https://github.com/ICAMS/grace-runtime/blob/master/docs/index.md)):
+
+- **Backends:** standalone CPU, NVIDIA CUDA, and AMD HIP (Kokkos).
+- **Interfaces:** ASE calculator (`GRACERuntimeCalculator`), batch evaluation (`compute_batch`), per-atom UQ (`gamma`), optional TorchSim adapter, and LAMMPS pair styles (`grace/runtime`, `grace/runtime/kk`).
+
+```bash
+pip install grace-runtime                       # CPU
+pip install "grace-runtime-cuda12[cublas]"      # NVIDIA GPU (CUDA 12)
+pip install grace-runtime-rocm6                 # AMD GPU (ROCm 6)
+```
+
+Use **`tensorpotential` / `gracemaker`** (this repository) for fitting and fine-tuning GRACE models, CALM UQ and HAL workflows, exporting models (`kokkos.npz`, SavedModel, GRACE/FS), as well as TensorFlow-based inference (`TPCalculator`, `grace_fm`, `pair_style grace`) and the `grace/{1l,2l,3l}/kk` LAMMPS styles.
+
 ## What's new
 
 ### [0.6.2](https://github.com/ICAMS/grace-tensorpotential/releases/tag/0.6.2) (October 2026)
